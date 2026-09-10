@@ -949,7 +949,10 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
             )
         )
         # Use Python-controlled stage loop instead of _run_chat
-        task = asyncio.create_task(_stage_loop(state, slot, auto_run=_is_auto))
+        task = asyncio.create_task(
+            _stage_loop(state, slot, auto_run=_is_auto),
+            name=f"dashboard-stage:{slot.key}",
+        )
         slot.task = task
         slot._recovery_retrigger_count = 0
         state._background_tasks.add(task)

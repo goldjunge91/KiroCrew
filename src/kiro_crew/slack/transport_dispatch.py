@@ -34,9 +34,10 @@ from kiro_crew.hooks import HOOK_REPLY, TOOL_AUTO_APPROVE, TOOL_DENY
 from kiro_crew.llm_helpers import save_conversation_turn_off_loop
 from kiro_crew.memory_stores import UnknownMemoryStore
 from kiro_crew.messaging import auto_title
-from kiro_crew.messaging.dispatch import build_directive_consumer
+from kiro_crew.messaging.dispatch import admit_inbound_callback, build_directive_consumer
 from kiro_crew.messaging.driver import APPROVAL_INTERACTIVE, TurnDriver
 from kiro_crew.messaging.identity import channel_inbound_permitted, publish_turn_identity
+from kiro_crew.messaging.inbound_spool import InboundRoute, spool_refused_turn
 from kiro_crew.messaging.link import canonical_key
 from kiro_crew.platform import current_context
 from kiro_crew.security import redact, redact_local_paths
@@ -154,6 +155,7 @@ async def handle_message_transport(
     """
     Stats().inc_message_received()
     _t0 = time.monotonic()
+    inbound_text = text
     # Same key discipline as native handle_message: reply_ts is the bare Slack
     # thread timestamp (posting + thread-index key); session_key is the
     # canonical namespaced form (registry, conversation log, thread overrides
@@ -231,6 +233,21 @@ async def handle_message_transport(
     await _hydrate_thread_overrides(session_key, conversation_log)
     await _resolve_thread_owner("post-hydration")
     _hydrate_conv_flags(sessions, session_key)
+
+    inbound_route = InboundRoute(
+        conversation_id=channel,
+        text=inbound_text,
+        user_id=user_id,
+        thread_id=reply_ts,
+        message_id=msg_ts,
+    )
+    if not await admit_inbound_callback(
+        sessions,
+        channel_type="slack",
+        route=inbound_route,
+        restricted=_is_slack_restricted(session_key),
+    ):
+        return
 
     # Resolve the agent early so ALL persist paths can forward it — including
     # the hook auto-reply below, whose write CREATES the session file when a
@@ -888,6 +905,17 @@ async def handle_message_transport(
         # circuit breaker on a session that never misbehaved), is not a failed
         # message, and does not warrant an error posted into the thread.
         logger.info("Aborting Slack dispatch for %s — gateway is shutting down", session_key)
+        if not _is_slack_restricted(session_key):
+            await spool_refused_turn(
+                channel_type="slack",
+                route=InboundRoute(
+                    conversation_id=channel,
+                    text=inbound_text,
+                    user_id=user_id,
+                    thread_id=reply_ts,
+                    message_id=msg_ts,
+                ),
+            )
         with contextlib.suppress(Exception):
             await slack.set_thread_status(channel, reply_ts, "")
     except Exception as exc:

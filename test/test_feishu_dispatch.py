@@ -12,6 +12,7 @@ import pytest
 from kiro_crew.acp.types import EVENT_COMPLETE, EVENT_TEXT_CHUNK, AcpEvent
 from kiro_crew.feishu.client import LarkInbound
 from kiro_crew.feishu.transport_dispatch import FeishuDispatcher
+from kiro_crew.messaging.inbound_spool import InboundRoute
 from kiro_crew.messaging.link import (
     CHAT_TYPE_DIRECT,
     CHAT_TYPE_FORUM,
@@ -664,6 +665,37 @@ class TestCommands:
         assert d._conv.current_gen(route) == 1
         assert sessions.reserved_generations == [d._session_key(route)]
         assert sessions.successes == []  # no LLM turn
+
+    @pytest.mark.asyncio
+    async def test_update_pause_spools_new_before_generation_side_effects(
+        self, monkeypatch
+    ) -> None:
+        from kiro_crew.messaging import dispatch
+
+        sessions = FakeSessions(FakeProvider([]))
+        sessions.reserve_inbound_callback = lambda: None
+        client = FakeClient()
+        d = _dispatcher(sessions, FakeCtx(), client)
+        spooled: list[tuple[str, InboundRoute | None]] = []
+
+        async def capture(*, channel_type, route):
+            spooled.append((channel_type, route))
+
+        monkeypatch.setattr(dispatch, "spool_refused_turn", capture)
+        inbound = _inbound("/new")
+        route = d._route(inbound)
+
+        await d.handle_message(inbound)
+
+        assert d._conv.current_gen(route) == 0
+        assert sessions.reserved_generations == []
+        assert client.replies == []
+        assert len(spooled) == 1
+        channel_type, refused = spooled[0]
+        assert channel_type == "feishu"
+        assert refused is not None
+        assert refused.message_id == inbound.message_id
+        assert refused.text == "/new"
 
     @pytest.mark.asyncio
     async def test_group_command_intercepts_despite_the_bot_mention(self) -> None:

@@ -121,14 +121,34 @@ class SessionRegistryState:
     sessions: dict[str, Any] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closing: bool = False
+    update_pause_owned: bool = False
+    update_restart_fenced: bool = False
     start_sem: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(4))
     starting_pids: set[int] = field(default_factory=set)
     allocation_reservations: dict[str, set[object]] = field(default_factory=dict)
+    inbound_callback_reservations: set[object] = field(default_factory=set)
     ownership_generations: dict[str, int] = field(default_factory=dict)
     subagent_runtimes: dict[str, Any] = field(default_factory=dict)
     subagent_runtime_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     continuable_keys: set[str] = field(default_factory=set)
     continuable_fallback: Callable[[str], bool] | None = None
+
+
+class InboundCallbackReservation:
+    """One counted inbound callback claim with idempotent release."""
+
+    __slots__ = ("_reservations", "_token")
+
+    def __init__(self, reservations: set[object], token: object) -> None:
+        self._reservations = reservations
+        self._token: object | None = token
+
+    def release(self) -> None:
+        token = self._token
+        if token is None:
+            return
+        self._token = None
+        self._reservations.discard(token)
 
 
 class _AllocationOwner(Protocol):
@@ -291,6 +311,10 @@ class SessionAllocationService:
     @_allocation_reservations.setter
     def _allocation_reservations(self, value: dict[str, set[object]]) -> None:
         self.state.allocation_reservations = value
+
+    @property
+    def _inbound_callback_reservations(self) -> set[object]:
+        return self.state.inbound_callback_reservations
 
     @property
     def _ownership_generations(self) -> dict[str, int]:
@@ -812,6 +836,18 @@ class SessionAllocationService:
             await self._owner.reset(key)
             return True
         return False
+
+    def reserve_inbound_callback(self) -> InboundCallbackReservation | None:
+        """Claim one pre-turn callback atomically against update/shutdown admission."""
+        if self._closing:
+            return None
+        token = object()
+        self._inbound_callback_reservations.add(token)
+        return InboundCallbackReservation(self._inbound_callback_reservations, token)
+
+    @property
+    def inbound_callback_count(self) -> int:
+        return len(self._inbound_callback_reservations)
 
     def begin_turn(self, key: str) -> None:
         """Yield-free pre-dispatch closing gate for an already-issued lease."""

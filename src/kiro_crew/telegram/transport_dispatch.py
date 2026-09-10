@@ -61,6 +61,7 @@ from kiro_crew.messaging.commands import (
 )
 from kiro_crew.messaging.conversation import reserve_new_generation
 from kiro_crew.messaging.dispatch import (
+    admit_inbound_callback,
     build_auto_approve,
     build_directive_consumer,
     delivery_is_muted,
@@ -87,6 +88,7 @@ from kiro_crew.messaging.session_resume import (
     ResumeReleaseError,
     RoutingDecision,
     persisted_session_agent,
+    refused_resume_is_restricted,
 )
 from kiro_crew.messaging.session_trust import add_trusted_session, is_session_trusted
 from kiro_crew.messaging.transport import InboundMessage
@@ -566,6 +568,41 @@ class TelegramDispatcher:
                 self._routing_checks.pop(routing_id)
         if not permitted:
             logger.info("telegram inbound dropped: denied by channels governance policy")
+            return
+        native_session_key = self._session_key(route)
+
+        async def _resolve_refused_route() -> RoutingDecision:
+            if not (interpret_commands or bool(origin_tag)):
+                return RoutingDecision()
+            async with self._routing_turn(routing_id):
+                return await self._session_resume.route(
+                    user_id,
+                    chat_id,
+                    getattr(msg, "chat_type", "private"),
+                    reply_thread,
+                )
+
+        async def _refused_turn_restricted() -> bool:
+            return await refused_resume_is_restricted(
+                native_session_key,
+                resolve=_resolve_refused_route,
+                is_restricted=self._session_restricted,
+            )
+
+        inbound_route = InboundRoute(
+            conversation_id=str(chat_id),
+            text=msg.text,
+            user_id=str(user_id),
+            thread_id=str(reply_thread) if reply_thread else "",
+            message_id=str(getattr(msg, "message_id", "") or ""),
+            attachments_dropped=len(getattr(msg, "attachments", None) or ()),
+        )
+        if not await admit_inbound_callback(
+            self.sessions,
+            channel_type="telegram",
+            route=inbound_route,
+            restricted=_refused_turn_restricted,
+        ):
             return
         # Counted here, matching where Slack counts it: an inbound message the
         # governance gate refused never happened as far as the operator's own

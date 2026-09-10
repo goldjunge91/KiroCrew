@@ -272,6 +272,10 @@ class WorkflowService:
         """Effective (clamped) default wall-clock ceiling for runs of this service."""
         return self._timeout_secs
 
+    def _admission_closed(self) -> bool:
+        """Read SessionManager's shared gate without yielding."""
+        return getattr(self._sessions, "admission_closed", False) is True
+
     def set_timeout_secs(self, value: Optional[int]) -> None:
         """Adopt a new default run ceiling for runs started from now on.
 
@@ -866,6 +870,8 @@ class WorkflowService:
         refused = await _memory_admission_error(session_key, author)
         if refused is not None:
             return refused
+        if self._admission_closed():
+            return {"error": "gateway admission is closed"}
         run_id = self._new_run_id()
 
         async def _author_fn(
@@ -913,6 +919,8 @@ class WorkflowService:
         refused = await _memory_admission_error(session_key, author)
         if refused is not None:
             return refused
+        if self._admission_closed():
+            return {"error": "gateway admission is closed"}
         run_id = self._new_run_id()
         await self._runner(run_id, timeout_secs=timeout_secs).run_background(
             source,
@@ -1159,8 +1167,6 @@ class WorkflowService:
                         "revision": definition["revision"],
                     }
                 )
-            elif "error" in started:
-                started["admission_rejected"] = True
             return started
         if input_text:
             run_args["input"] = input_text
@@ -1234,6 +1240,8 @@ class WorkflowService:
             vr = validate(run_source)
             if not vr.ok:
                 return {"error": "; ".join(vr.errors), "errors": vr.errors}
+        if self._admission_closed():
+            return {"error": "gateway admission is closed"}
         new_id = self._new_run_id()
         # An edited script can't safely replay the old prefix (call indices shift),
         # so force a fresh run; an unedited rerun keeps the replay cache.

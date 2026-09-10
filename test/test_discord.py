@@ -2467,9 +2467,14 @@ class TestDispatcher:
         await d.handle_message(self._msg("keep me"))
         assert spool.exists() and "keep me" in spool.read_text(encoding="utf-8")
         spool.unlink()
+        sess.reserve_inbound_callback = lambda: None
 
-        async def _restricted(_key: str) -> bool:
-            return True
+        d._session_resume.route = mock.AsyncMock(
+            return_value=td_mod.RoutingDecision(resumed_key="dashboard:restricted")
+        )
+
+        async def _restricted(key: str) -> bool:
+            return key == "dashboard:restricted"
 
         monkeypatch.setattr(d, "_session_restricted", _restricted)
         await d.handle_message(self._msg("my secret"))

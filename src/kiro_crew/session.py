@@ -145,6 +145,7 @@ from kiro_crew.sel import sel
 from kiro_crew.session_allocation import (
     AllocationConstants,
     AllocationDeps,
+    InboundCallbackReservation,
     SessionAllocationService,
 )
 from kiro_crew.session_allocation import SessionBusyError as SessionBusyError  # noqa: F401
@@ -1346,6 +1347,34 @@ class SessionManager:
         self._registry_state().closing = value
 
     @property
+    def admission_closed(self) -> bool:
+        """Return the shared shutdown/update admission gate without yielding.
+
+        Background launchers read this immediately before registering work. On
+        the event loop that check-and-register span is atomic with respect to
+        ``pause_turn_admission_for_update()``, which sets the same state under
+        the registry lock.
+        """
+        return self._closing
+
+    @property
+    def _update_pause_owned(self) -> bool:
+        return self._registry_state().update_pause_owned
+
+    @_update_pause_owned.setter
+    def _update_pause_owned(self, value: bool) -> None:
+        self._registry_state().update_pause_owned = value
+
+    @property
+    def update_restart_fenced(self) -> bool:
+        """Whether refused callbacks must persist inline before imminent re-exec."""
+        return self._registry_state().update_restart_fenced
+
+    @update_restart_fenced.setter
+    def update_restart_fenced(self, value: bool) -> None:
+        self._registry_state().update_restart_fenced = value
+
+    @property
     def _start_sem(self) -> asyncio.Semaphore:
         return self._registry_state().start_sem
 
@@ -2376,9 +2405,44 @@ class SessionManager:
         """Record a failure and apply the circuit breaker."""
         return await self._allocation_boundary().record_failure(key)
 
+    def reserve_inbound_callback(self) -> InboundCallbackReservation | None:
+        """Claim one callback before any pre-turn command or card handling."""
+        return self._allocation_boundary().reserve_inbound_callback()
+
+    @property
+    def inbound_callback_count(self) -> int:
+        """Return callbacks admitted but not yet finished."""
+        return self._allocation_boundary().inbound_callback_count
+
     def begin_turn(self, key: str) -> None:
         """Apply the yield-free pre-dispatch closing gate."""
         self._allocation_boundary().begin_turn(key)
+
+    async def pause_turn_admission_for_update(self) -> bool:
+        """Block new turns for update apply without overriding real shutdown."""
+        async with self._lock:
+            if self._closing and not self._update_pause_owned:
+                return False
+            self._closing = True
+            self._update_pause_owned = True
+            self.update_restart_fenced = False
+            return True
+
+    def fence_update_restart(self) -> bool:
+        """Commit inline refusal persistence before the final restart drain."""
+        if not self._closing or not self._update_pause_owned:
+            return False
+        self.update_restart_fenced = True
+        return True
+
+    async def resume_turn_admission_after_update(self) -> None:
+        """Release this caller's temporary update pause, if it still owns it."""
+        async with self._lock:
+            if not self._update_pause_owned:
+                return
+            self.update_restart_fenced = False
+            self._update_pause_owned = False
+            self._closing = False
 
     # ── Per-session semaphore ──
 

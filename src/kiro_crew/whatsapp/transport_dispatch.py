@@ -30,6 +30,7 @@ from kiro_crew.messaging.conversation import (
 )
 from kiro_crew.messaging.dispatch import (
     ChannelTurn,
+    admit_inbound_callback,
     delivery_is_muted,
     drive_turn,
     inbound_permitted,
@@ -144,21 +145,26 @@ class WhatsAppDispatcher:
 
     async def handle_message(self, inbound: InboundMessage) -> None:
         """Transport dispatch callback: one normalized inbound message."""
-        # A bare cancel survives a channel deny, which is the one documented
-        # exemption: a policy added while a turn is in flight must not take away
-        # the only way to stop it, and with `max_buttons=0` `/stop` IS the only
-        # cancel affordance here. Attachment-bearing messages stay gated, because
-        # media is fetched after authorize and a denied channel must not trigger
-        # a download.
+        assert self.transport is not None
+        verdict = self.transport.pending_verdicts.get(id(inbound))
+        group = is_group_jid(inbound.conversation_id)
+        inbound_route = None if group else self._inbound_route(inbound)
+        if not await admit_inbound_callback(
+            self.sessions,
+            channel_type="whatsapp",
+            route=inbound_route,
+        ):
+            return
+
+        # Recheck governance only after this accepted callback is census-visible;
+        # otherwise the off-loop policy read opens an uncounted restart window.
+        # The bare-cancel exemption remains unchanged.
         if not await inbound_permitted(
             "whatsapp",
             text=inbound.text,
             has_attachments=bool(inbound.attachments),
         ):
             return
-        assert self.transport is not None
-        verdict = self.transport.pending_verdicts.get(id(inbound))
-        group = is_group_jid(inbound.conversation_id)
         may_steer = verdict.may_steer if verdict is not None else not group
 
         # An approval answer is consumed BEFORE the command table and before the
@@ -186,7 +192,7 @@ class WhatsAppDispatcher:
             await self._handle_command(inbound, command)
             return
 
-        await self._drive(inbound, verdict)
+        await self._drive(inbound, verdict, inbound_route=inbound_route)
 
     def _consume_approval_reply(self, inbound: InboundMessage) -> str:
         """The receipt for an approval answer, or ``""`` if this is not one.
@@ -334,7 +340,13 @@ class WhatsAppDispatcher:
             attachments_dropped=media,
         )
 
-    async def _drive(self, inbound: InboundMessage, verdict: Any) -> None:
+    async def _drive(
+        self,
+        inbound: InboundMessage,
+        verdict: Any,
+        *,
+        inbound_route: InboundRoute | None,
+    ) -> None:
         assert self.transport is not None and self.client is not None
         transport = self.transport
         client = self.client
@@ -421,7 +433,7 @@ class WhatsAppDispatcher:
                 # private operating rules -- prepended to the model prompt). The
                 # notice quotes the spooled text back into the conversation, so
                 # only what the user actually sent may be spooled.
-                inbound_route=(None if group else self._inbound_route(inbound)),
+                inbound_route=inbound_route,
                 agent=agent,
                 user_text=user_text,
                 renderer=renderer,

@@ -37,6 +37,7 @@ from kiro_crew.messaging.renderer import (
     OutputEvent,
     session_provenance_tag,
 )
+from kiro_crew.messaging.session_resume import RoutingDecision
 from kiro_crew.messaging.transport import InboundMessage
 from kiro_crew.session import BACKGROUND_KEY, _opt_out_key
 from kiro_crew.session_allocation import SessionClosingError
@@ -2828,9 +2829,14 @@ class TestDispatcher:
         monkeypatch.setattr(S, "data_home", lambda: tmp_path)
         d, _cli, sess = _dispatcher({7})
         sess.closing = True
+        sess.reserve_inbound_callback = lambda: None
 
-        async def _restricted(_key: str) -> bool:
-            return True
+        d._session_resume.route = AsyncMock(
+            return_value=RoutingDecision(resumed_key="dashboard:restricted")
+        )
+
+        async def _restricted(key: str) -> bool:
+            return key == "dashboard:restricted"
 
         monkeypatch.setattr(d, "_session_restricted", _restricted)
 
@@ -2845,7 +2851,7 @@ class TestDispatcher:
 
         spool = tmp_path / "inbound-spool" / "refused.jsonl"
         assert not spool.exists(), "an incognito message was persisted to the spool"
-        assert sess.released == ["telegram:kirocrew:direct:7"], "the refusal must still release"
+        assert sess.released == [], "paused admission must not acquire or release a session"
 
     def test_agent_resolves_to_kirocrew_when_unset(self) -> None:
         # agent=None + empty default_agent must fall back to "kirocrew" so the

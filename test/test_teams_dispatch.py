@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import contextlib
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from kiro_crew.acp.types import EVENT_COMPLETE, EVENT_TEXT_CHUNK, AcpEvent
+from kiro_crew.messaging.session_resume import RoutingDecision
 from kiro_crew.session_allocation import SessionClosingError
 from kiro_crew.teams.client import TeamsInbound
 from kiro_crew.teams.transport_dispatch import TeamsDispatcher
@@ -371,6 +373,45 @@ class TestTurn:
 
 
 class TestCommands:
+    @pytest.mark.asyncio
+    async def test_closed_admission_spools_new_before_reset(self, monkeypatch) -> None:
+        sessions = FakeSessions(FakeProvider([]))
+        sessions.reserve_inbound_callback = lambda: None  # type: ignore[attr-defined]
+        client = FakeClient()
+        d = _dispatcher(sessions, FakeCtx(), client)
+        spool = AsyncMock(return_value=True)
+        monkeypatch.setattr("kiro_crew.messaging.dispatch.spool_refused_turn", spool)
+
+        await d.handle_message(_inbound("/new"))
+
+        assert client.sent == []
+        assert d._conv.current_gen(_EMAIL) == 0
+        route = spool.await_args.kwargs["route"]
+        assert spool.await_args.kwargs["channel_type"] == "teams"
+        assert route.conversation_id == "CONV"
+        assert route.text == "/new"
+        assert route.user_id == _EMAIL
+        assert route.message_id == "act-1"
+
+    @pytest.mark.asyncio
+    async def test_closed_admission_never_spools_a_restricted_resumed_session(
+        self, monkeypatch
+    ) -> None:
+        sessions = FakeSessions(FakeProvider([]))
+        sessions.reserve_inbound_callback = lambda: None  # type: ignore[attr-defined]
+        d = _dispatcher(sessions, FakeCtx(), FakeClient())
+        d._session_resume.route = AsyncMock(
+            return_value=RoutingDecision(resumed_key="dashboard:restricted")
+        )
+        d._session_restricted = AsyncMock(side_effect=lambda key: key == "dashboard:restricted")
+        spool = AsyncMock(return_value=True)
+        monkeypatch.setattr("kiro_crew.messaging.dispatch.spool_refused_turn", spool)
+
+        await d.handle_message(_inbound("keep this private"))
+
+        spool.assert_not_awaited()
+        d._session_restricted.assert_awaited()
+
     @pytest.mark.asyncio
     async def test_new_bumps_gen_and_acks(self) -> None:
         sessions = FakeSessions(FakeProvider([]))

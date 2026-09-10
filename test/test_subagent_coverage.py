@@ -1156,6 +1156,30 @@ class TestReadSurfaces:
         mgr._running_count = 4
         assert (mgr.max_concurrent, mgr.running_count) == (7, 4)
 
+    @pytest.mark.asyncio
+    async def test_pending_work_count_covers_post_slot_lifecycle_tasks(self) -> None:
+        mgr = _manager()
+        release = asyncio.Event()
+        recovery = asyncio.create_task(release.wait())
+        report = asyncio.create_task(release.wait())
+        followup = asyncio.create_task(release.wait())
+        reconcile = asyncio.create_task(release.wait())
+        completed = asyncio.create_task(asyncio.sleep(0))
+        await completed
+        mgr._running_count = 0
+        mgr._queue = [{"parent_session_key": "dash:1"}]
+        mgr._tasks = {"run:recovery": recovery, "done": completed}
+        mgr._report_tasks = {report}
+        mgr._followup_watchers = {"run": followup}
+        mgr._reconcile_task = reconcile
+        mgr._abandoned_state_writers = {"state-writer"}
+        try:
+            # queue + recovery + report + follow-up + reconciliation + writer
+            assert mgr.pending_work_count == 6
+        finally:
+            release.set()
+            await asyncio.gather(recovery, report, followup, reconcile)
+
 
 class TestQueueDepth:
     def test_depth_counts_only_matching_parent(self) -> None:

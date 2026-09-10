@@ -326,6 +326,34 @@ def test_new_command_starts_a_fresh_session_without_a_turn():
     assert any("fresh session" in t.lower() for _, t in transport.sent)
 
 
+def test_update_pause_spools_dm_new_before_generation_side_effects(monkeypatch):
+    import kiro_crew.messaging.dispatch as dispatch
+
+    d, _client, sessions, transport = _make(provider=FakeProvider())
+    sessions.reserve_inbound_callback = lambda: None
+    inbound = _msg("/new")
+    transport.pending_original[id(inbound)] = ("/new", 0)
+    spooled: list[tuple[str, Any]] = []
+
+    async def capture(*, channel_type, route):
+        spooled.append((channel_type, route))
+
+    monkeypatch.setattr(dispatch, "spool_refused_turn", capture)
+    before = d._session_key(_DM)
+
+    asyncio.run(d.handle_message(inbound))
+
+    assert d._session_key(_DM) == before
+    assert sessions.reserved_generations == []
+    assert transport.sent == []
+    assert len(spooled) == 1
+    channel_type, refused = spooled[0]
+    assert channel_type == "whatsapp"
+    assert refused is not None
+    assert refused.conversation_id == _DM
+    assert refused.text == "/new"
+
+
 def test_compact_command_compacts_in_place_without_a_turn():
     provider = FakeProvider()
     d, _client, sessions, transport = _make(provider=provider)

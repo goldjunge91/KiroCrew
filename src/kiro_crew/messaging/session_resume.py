@@ -31,7 +31,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 from kiro_crew.history import (
     is_incognito_transcript,
@@ -174,6 +174,47 @@ class RoutingDecision:
     observed: InboundResolution | None = None
     adopt_key: str = ""
     adopt_title: str = ""
+
+
+async def refused_resume_is_restricted(
+    native_session_key: str,
+    *,
+    resolve: Callable[[], Awaitable[RoutingDecision]],
+    is_restricted: Callable[[str], Awaitable[bool]],
+) -> bool:
+    """Resolve every possible resume target before persisting a refused message.
+
+    A routing refusal can carry the expected, observed, or adopted session even
+    when ``resumed_key`` is empty. Check all of them plus the native key so an
+    update-pause spool cannot persist content belonging to a temporary or
+    incognito conversation. Any resolution failure denies persistence: losing
+    one restart notice is reversible, while writing restricted content is not.
+    """
+    try:
+        decision = await resolve()
+        if decision.observed is not None and decision.observed.ambiguous:
+            return True
+        candidates = (
+            native_session_key,
+            decision.resumed_key,
+            decision.adopt_key,
+            decision.described.key if decision.described is not None else None,
+            decision.observed.key if decision.observed is not None else None,
+        )
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            if await is_restricted(candidate):
+                return True
+    except Exception:
+        logger.warning(
+            "resume: could not resolve refused callback privacy; denying persistence",
+            exc_info=True,
+        )
+        return True
+    return False
 
 
 @dataclass(frozen=True)

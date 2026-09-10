@@ -63,11 +63,13 @@ from kiro_crew.messaging.commands import compact_unsupported_backend, compact_un
 from kiro_crew.messaging.conversation import reserve_new_generation
 from kiro_crew.messaging.dispatch import (
     ChannelTurn,
+    admit_inbound_callback,
     build_directive_consumer,
     drive_turn,
     inbound_permitted,
 )
 from kiro_crew.messaging.driver import APPROVAL_INTERACTIVE
+from kiro_crew.messaging.inbound_spool import InboundRoute
 from kiro_crew.messaging.link import (
     CHAT_TYPE_DIRECT,
     CHAT_TYPE_FORUM,
@@ -331,6 +333,21 @@ class WebexDispatcher:
         email = inbound.person_email
         room_id = inbound.room_id
         text = inbound.text
+        reply_parent = self._reply_parent(inbound)
+        inbound_route = InboundRoute(
+            conversation_id=room_id,
+            text=inbound.text,
+            user_id=email,
+            thread_id=(reply_parent if inbound.room_type != ROOM_DIRECT else ""),
+            message_id=inbound.message_id,
+            attachments_dropped=len(inbound.file_urls),
+        )
+        if not await admit_inbound_callback(
+            self.sessions,
+            channel_type="webex",
+            route=inbound_route,
+        ):
+            return
 
         # ── Card press intercept ──
         # A press is not a message: it carries no text, so every path below would
@@ -461,7 +478,6 @@ class WebexDispatcher:
         agent = self._resolve_agent()
         # The SAME derivation the dispatcher's own sends use, so the answer and
         # every ack about it cannot end up in different places.
-        reply_parent = self._reply_parent(inbound)
 
         # A decider only exists under INTERACTIVE: in auto/trust the driver's own
         # ladder approves without ever asking, and posting a prompt nobody needs
@@ -521,6 +537,7 @@ class WebexDispatcher:
                 ChannelTurn(
                     channel_type="webex",
                     session_key=session_key,
+                    inbound_route=inbound_route,
                     # Session-directive consumer: monitor_start / autonudge_stop /
                     # ... return a marker TurnDriver decodes; apply it against THIS
                     # turn's session key (dashboard-only directives stay refused

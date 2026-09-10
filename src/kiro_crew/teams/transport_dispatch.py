@@ -56,11 +56,13 @@ from kiro_crew.messaging.conversation import (
 )
 from kiro_crew.messaging.dispatch import (
     ChannelTurn,
+    admit_inbound_callback,
     build_directive_consumer,
     drive_turn,
     inbound_permitted,
 )
 from kiro_crew.messaging.driver import APPROVAL_INTERACTIVE
+from kiro_crew.messaging.inbound_spool import InboundRoute
 from kiro_crew.messaging.link import (
     ChannelLink,
     bind_origin_mirror,
@@ -76,6 +78,8 @@ from kiro_crew.messaging.queue_receipt import (
     ReceiptQueue,
     ReceiptSurface,
 )
+from kiro_crew.messaging.session_resume import refused_resume_is_restricted
+from kiro_crew.messaging.upload_gate import session_is_restricted
 from kiro_crew.safety_override import safety_override
 from kiro_crew.sel import sel
 from kiro_crew.teams.approvals import TeamsApprovalDecider
@@ -272,6 +276,29 @@ class TeamsDispatcher:
         # generation the turn was not using.
         email = self._identity(inbound)
         text = inbound.text
+        native_session_key = self._session_key(email)
+
+        async def _refused_turn_restricted() -> bool:
+            return await refused_resume_is_restricted(
+                native_session_key,
+                resolve=lambda: self._session_resume.route(inbound.conversation_id),
+                is_restricted=self._session_restricted,
+            )
+
+        inbound_route = InboundRoute(
+            conversation_id=inbound.conversation_id,
+            text=inbound.text,
+            user_id=email,
+            message_id=inbound.activity_id,
+            attachments_dropped=len(inbound.attachments),
+        )
+        if not await admit_inbound_callback(
+            self.sessions,
+            channel_type="teams",
+            route=inbound_route,
+            restricted=_refused_turn_restricted,
+        ):
+            return
         logger.info(
             "Teams inbound from %s: %d chars",
             email[:3] + "***" if email else "?",
@@ -378,7 +405,14 @@ class TeamsDispatcher:
             temp_paths = list(result.temp_paths)
             text = append_attachment_context(text, result)
         try:
-            await self._run_turn(inbound, email, text, drain=drain, resumed_key=route.resumed_key)
+            await self._run_turn(
+                inbound,
+                email,
+                text,
+                inbound_route=inbound_route,
+                drain=drain,
+                resumed_key=route.resumed_key,
+            )
         finally:
             if temp_paths:
                 # In a worker: one syscall per file on a directory that is not
@@ -391,6 +425,7 @@ class TeamsDispatcher:
         email: str,
         text: str,
         *,
+        inbound_route: InboundRoute,
         drain: bool,
         resumed_key: str | None = None,
     ) -> None:
@@ -422,6 +457,7 @@ class TeamsDispatcher:
         # let it change between the decision and its use.
         session_key = resumed_key or self._session_key(email)
         agent = self._resolve_agent()
+        session_restricted = await self._session_restricted(session_key)
 
         # Adaptive Card approvals: the decider awaits the click and denies by
         # default on timeout, and the renderer posts the card that resolves it.
@@ -462,6 +498,8 @@ class TeamsDispatcher:
                 ChannelTurn(
                     channel_type="teams",
                     session_key=session_key,
+                    inbound_route=inbound_route,
+                    inbound_restricted=session_restricted,
                     # Session-directive consumer: monitor_start / autonudge_stop /
                     # ... return a marker TurnDriver decodes; apply it against THIS
                     # turn's session key (dashboard-only directives stay refused
@@ -483,8 +521,12 @@ class TeamsDispatcher:
                     # governance ceiling and the deny-list all run ahead of this
                     # rung in TurnDriver, so a hard DENY still wins.
                     auto_approve_session=lambda: safety_override().is_active(),
-                    persist=lambda user_text, reply, is_new: self._persist_turn(
-                        session_key, user_text, reply, is_new, agent
+                    persist=(
+                        None
+                        if session_restricted
+                        else lambda user_text, reply, is_new: self._persist_turn(
+                            session_key, user_text, reply, is_new, agent
+                        )
                     ),
                     notice=lambda sk, provider: self._maybe_notice(inbound, sk, provider),
                     audit_caller=f"teams:{email}",
@@ -1110,6 +1152,17 @@ class TeamsDispatcher:
             agent=self._resolve_agent(),
             user_id=email,
             dm_scope=str(self.cfg.messaging.dm_scope),
+        )
+
+    async def _session_restricted(self, session_key: str) -> bool:
+        """True when the resolved Teams session must leave no durable trace."""
+        from kiro_crew.dashboard.handlers._shared import _probe_persisted_session
+
+        return await session_is_restricted(
+            getattr(self._session_resume, "dashboard_state", None),
+            session_key,
+            persisted_probe=_probe_persisted_session,
+            unknown_denies=False,
         )
 
     def _persist_turn(

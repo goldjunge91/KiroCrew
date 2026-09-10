@@ -2246,6 +2246,43 @@ class SubagentManager:
     def running_count(self) -> int:
         return self._running_count
 
+    @property
+    def pending_work_count(self) -> int:
+        """Return accepted subagent work that a process restart would interrupt.
+
+        ``running_count`` alone stops representing work before shielded terminal
+        delivery finishes, and an unexpected-cancel recovery can be live while
+        holding no concurrency slot. Count the finite manager-owned registries
+        instead, while retaining ``running_count`` as a fail-closed floor for a
+        slot published just before its task registration. The perpetual reaper
+        is maintenance and is deliberately excluded; its one-shot orphan
+        reconciliation is finite delivery work and is included.
+        """
+        live_primary: set[int] = set()
+        for task in self._tasks.values():
+            if not task.done():
+                live_primary.add(id(task))
+
+        pending = len(self._queue) + max(max(0, int(self._running_count)), len(live_primary))
+        seen = set(live_primary)
+        extra_tasks = [*self._report_tasks, *self._followup_watchers.values()]
+        reconcile = getattr(self, "_reconcile_task", None)
+        if reconcile is not None:
+            extra_tasks.append(reconcile)
+        for task in extra_tasks:
+            marker = id(task)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            if not task.done():
+                pending += 1
+
+        # A cancelled to_thread state write can outlive its run task. Its done
+        # callback removes this hold, so every entry is finite restart-sensitive
+        # work even though the worker Future has no retained awaitable here.
+        pending += len(self._abandoned_state_writers)
+        return pending
+
     def running_agents_for(self, parent_key: str) -> list[dict]:
         return self._run_events.running_agents_for_impl(parent_key)
 
@@ -2481,6 +2518,11 @@ class SubagentManager:
 
     def _queued_depth(self, parent_session_key: str) -> int:
         return self._run_events._queued_depth_impl(parent_session_key)
+
+    @property
+    def queued_count(self) -> int:
+        """Return all not-yet-registered spawns in the stagger queue."""
+        return len(self._queue)
 
     def queued_count_for(self, parent_session_key: str) -> int:
         return self._run_events.queued_count_for_impl(parent_session_key)
