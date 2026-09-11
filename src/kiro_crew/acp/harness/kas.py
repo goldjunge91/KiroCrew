@@ -249,5 +249,8 @@ class KasHarness(MembershipHarness):
 
         Every local transcript-retention choice is therefore a no-op on this
         host, and a later resume degrades to "conversation gone".
+
+        A request, like the kiro verb it stands in for: the deletion is what the
+        answer confirms, and a delete whose outcome is unknown is worth waiting for.
         """
-        return TeardownPolicy(method=METHOD_KAS_SESSION_DELETE)
+        return TeardownPolicy(method=METHOD_KAS_SESSION_DELETE, notification=False)

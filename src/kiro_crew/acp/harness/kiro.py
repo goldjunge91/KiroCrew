@@ -193,5 +193,8 @@ class KiroHarness(MembershipHarness):
 
         The record stays on disk, so a later resume finds it and a caller asking
         to keep the transcript is honoured.
+
+        A request: kiro-cli answers it, and the answer is what says the session left
+        the process rather than that the write reached the pipe.
         """
-        return TeardownPolicy(method=METHOD_SESSION_TERMINATE)
+        return TeardownPolicy(method=METHOD_SESSION_TERMINATE, notification=False)
