@@ -2668,6 +2668,52 @@ reworded instead of presenting a rejected write as success.
 3. **Consolidation** (background): extracts corrections not already saved via `learn_add`. V1 and V2 call `write_lesson(source="consolidation")` at confidence 0.9.
 4. **Dashboard/CLI** (manual): `POST /api/lessons` → `write_lesson()`
 
+**Durable lesson volatile-fact boundary.** The primary `write_lesson()` writer and the
+JSONL `LessonStore` fallback call one shared predicate before persistence. It refuses
+exactly two classes in either the `rule` or `negative` field, in every category:
+runtime model-identity assertions recognized by `_VOLATILE_MODEL_FACT_RE`, and
+concrete-ID model-selection imperatives recognized by `_BEHAVIORAL_MODEL_PIN_RE`.
+The imperative can start the field or follow `.`, `!`, `?`, or a newline, with optional
+`please` / `kindly`, emphatic `do`, and bounded `for ... ,` / `when ... ,` prefixes.
+It is refused only when a recognized verb directly selects a concrete model ID, with
+optional short determiners, qualifiers, and a `model`, `backend`, or `provider` noun
+around that ID. The matcher consumes the complete ID-shaped token. After an optional
+`model`, `backend`, or `provider` noun, the selected object must end its clause at the
+end of the field, a newline, punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `)`, or `]`),
+or before one connector from this closed class: `for`, `when`, `whenever`, `if`,
+`unless`, `in`, `on`, `at`, `to`, `over`, `instead`, `rather`, `and`, `or`, `but`,
+`as`, `with`, `without`, `because`, `since`, `by`, `until`, `while`, `so`, `only`,
+`from`, `during`, `before`, `after`, `except`, `via`, `per`, or `not`. A following
+plain noun such as `tokenizer`, `endpoints`, `wrapper`, or `flag` makes the ID a
+qualifier of a durable tooling object rather than the selected model.
+The concrete-ID scope is deliberately limited to the registry families encoded by
+`MODEL_ID_LITERAL_PATTERN`. The trusted review workflow keeps an exact literal copy
+pinned by a test, so IDs from other backends are not lesson-refused. This grammar is
+best-effort for free-form wording. Future phrasing misses are handled by the
+`learn_add` tool-description instruction, never by new regex branches; callers must
+not disguise either refused class. A model-version literal by itself is not volatile.
+Durable compatibility, tooling, and preference text can name a version in any category or in a NOT-clause.
+The vector writer returns `outcome="refused", reason="volatile_session_fact"` before
+embedding or deduplication; the JSONL route maps the same refusal to that wire outcome
+and reason.
+Automatic JSONL callers read the returned outcome before counting, notifying, ledgering,
+or reporting an imported lesson. Onboarding applies the same predicate before either its
+vector or JSONL instruction branch, so a rejected directive is never reported as
+imported. Both context renderers apply the predicate again. Mapping rows expose their
+fields directly. Legacy vector strings use the row's MD5-derived key to prove which
+in-band separator splits the rule from its NOT-clause; rows keyed by another writer
+remain one rule rather than being guessed apart. A legacy volatile row stays
+available to listing and manual deletion, never reaches a prompt, and carries
+`withheld_reason="volatile_session_fact"` in the lessons API so `learn_list` marks it
+`WITHHELD`. Vector population checks use the same renderability predicate, so a store
+containing only withheld rows does not suppress the JSONL lesson fallback.
+The `learn_add` MCP handler, task runner, consolidation, dashboard POST route, headless
+`--slack-only` route, and direct writers therefore enforce the same boundary. The MCP
+handler renders the reason as `Error: volatile_session_fact: ...` and asks for a reusable
+behavioral rule instead. An imperative concrete model choice belongs in
+`agent.role_models.<role>`. Model-family guidance and plain model-version references
+remain durable.
+
 **Migration**: `migrate_from_markdown()` reads `lessons.jsonl` and writes each entry as `lesson.*` semantic key with `source=migration, confidence=0.9`. User-explicit lessons (confidence 1.0) can't be overwritten by migration.
 
 Categories: `tool`, `preference`, `knowledge`. Injected as a `[Learned corrections]` block. V1 session context retains query-ranked, project-scoped lessons; V2 selects bounded, project-scoped lessons without a query embedding. Explicit lesson readers can use hybrid relevance and fill the caller's character budget, reporting shown and omitted counts; the JSONL path caps at `_MAX_LESSONS_IN_CONTEXT = 50`. The JSONL store retains `_MAX_LESSONS_TOTAL = 200` and prunes oldest-first beyond that.
