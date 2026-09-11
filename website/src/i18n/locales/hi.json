@@ -9968,6 +9968,7 @@
       "popped_out": "पॉप आउट किया गया",
       "previous_chats": "पिछली चैट",
       "regenerate_title_with_llm": "LLM से शीर्षक पुनः बनाएँ",
+      "auto_title": "स्वतः शीर्षक",
       "remove_knowledge_context": "ज्ञान संदर्भ निकालें",
       "return": "वापस लाएँ",
       "return_this_session_to_the_main_window": "इस सत्र को मुख्य विंडो में वापस लाएँ",

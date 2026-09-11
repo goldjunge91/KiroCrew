@@ -9968,6 +9968,7 @@
       "popped_out": "Ausgekoppelt",
       "previous_chats": "Frühere Chats",
       "regenerate_title_with_llm": "Titel mit LLM neu erstellen",
+      "auto_title": "Auto-Titel",
       "remove_knowledge_context": "Wissenskontext entfernen",
       "return": "Zurückholen",
       "return_this_session_to_the_main_window": "Diese Sitzung in das Hauptfenster zurückholen",

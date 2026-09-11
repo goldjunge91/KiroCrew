@@ -10111,6 +10111,7 @@
       "popped_out": "Détachée",
       "previous_chats": "Chats précédents",
       "regenerate_title_with_llm": "Régénérer le titre avec le LLM",
+      "auto_title": "Titre auto",
       "remove_knowledge_context": "Retirer le contexte de connaissances",
       "return": "Rattacher",
       "return_this_session_to_the_main_window": "Rattacher cette session à la fenêtre principale",

@@ -19,6 +19,7 @@ import QueueStack, { SubagentDeliveryProgress, splitPaneMessages } from './Queue
 import SubagentProgressBar from '../pages/chat/SubagentProgressBar'
 import ChatFooter from '../pages/chat/ChatFooter'
 import PinnedPrompt from '../pages/chat/PinnedPrompt'
+import SessionTitleControl from '../pages/chat/SessionTitleControl'
 import { usePinnedPrompt } from '../pages/chat/usePinnedPrompt'
 import type { DisplayItem } from '../pages/chat/types'
 import AgentDropdownList, { DefaultAgentRow, ManageAgentsFooter } from './AgentDropdownList'
@@ -247,6 +248,9 @@ export default function ChatPane({
   // not persist — the shared toast is transient feedback, not the error surface.
   const [switchError, setSwitchError] = useState('')
   const [stopError, setStopError] = useState('')
+  // In-pane report of a title rename / regenerate that did not land (#9727):
+  // the main header routes the same failure into its action banner.
+  const [titleError, setTitleError] = useState<{ title: string; message: string } | null>(null)
   const [agentBtnRect, setAgentBtnRect] = useState<DOMRect | null>(null)
   const [modelBtnRect, setModelBtnRect] = useState<DOMRect | null>(null)
   // The transcript is virtualized (chat-core P5-e): ChatMessageList owns the
@@ -1173,10 +1177,18 @@ export default function ChatPane({
             tab strip under the pane titles. This row is flex-flow chrome, not
             an overlay, and stays below every shell layer. */}
         {!frameless && (
-        <div className="panel-toolbar relative z-10 flex items-center gap-2 pl-3 pr-2 bg-bg shrink-0">
+        <div className="group/header panel-toolbar relative z-10 flex items-center gap-2 pl-3 pr-2 bg-bg shrink-0">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <span className={`w-2 h-2 rounded-full shrink-0 ${running ? 'bg-ok animate-pulse' : 'bg-accent'}`} />
-            <span className="text-[13px] font-semibold text-text-strong truncate min-w-0">{title}</span>
+            {/* Same rename / regenerate control as the single-session header
+                (#9727): the toolbar is the `group/header` hover target that
+                reveals the Pen and the Sparkles button. */}
+            <SessionTitleControl
+              slotKey={slotKey}
+              title={title}
+              compact
+              onError={(message, lead) => setTitleError({ title: lead, message })}
+            />
             {parentKey && <span className="shrink-0 text-[10px] text-accent bg-accent/10 rounded-full px-1.5 py-0.5 truncate max-w-[38%]" title={i18nT('components.chatPane.forked_from', { name: parentTitle || parentKey })}>↳ {parentTitle || parentKey}</span>}
             {running && <span className="shrink-0 text-[10px] text-ok font-mono">{streamState}</span>}
           </div>
@@ -1413,6 +1425,17 @@ export default function ChatPane({
           testId="chat-pane-stop-error"
           message={stopError}
           onDismiss={() => setStopError('')}
+        />
+        {/* No hand-off: the composer draft is untouched by a failed rename; the
+            title in the bar is the one the store still holds, so the user can
+            simply try again. */}
+        <ErrorNotice
+          variant="inline"
+          className="mx-4 mt-2"
+          testId="chat-pane-title-error"
+          title={titleError?.title}
+          message={titleError?.message}
+          onDismiss={() => setTitleError(null)}
         />
 
         {/* Quote transit: the selection flies from where it was taken into this

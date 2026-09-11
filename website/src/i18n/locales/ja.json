@@ -9825,6 +9825,7 @@
       "popped_out": "別ウィンドウで表示中",
       "previous_chats": "以前のチャット",
       "regenerate_title_with_llm": "LLM でタイトルを再生成",
+      "auto_title": "自動タイトル",
       "remove_knowledge_context": "ナレッジコンテキストを削除",
       "return": "戻す",
       "return_this_session_to_the_main_window": "このセッションをメインウィンドウに戻す",

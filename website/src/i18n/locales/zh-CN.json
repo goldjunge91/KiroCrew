@@ -9825,6 +9825,7 @@
       "popped_out": "已弹出",
       "previous_chats": "以往聊天",
       "regenerate_title_with_llm": "用 LLM 重新生成标题",
+      "auto_title": "自动命名",
       "remove_knowledge_context": "移除知识上下文",
       "return": "返回",
       "return_this_session_to_the_main_window": "把此会话返回到主窗口",

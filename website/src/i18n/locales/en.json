@@ -6352,6 +6352,7 @@
       "popped_out": "Popped out",
       "previous_chats": "Previous chats",
       "regenerate_title_with_llm": "Regenerate title with LLM",
+      "auto_title": "Auto-title",
       "remove_knowledge_context": "Remove knowledge context",
       "return": "Return",
       "return_this_session_to_the_main_window": "Return this session to the main window",

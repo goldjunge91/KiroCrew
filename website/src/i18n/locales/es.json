@@ -10111,6 +10111,7 @@
       "popped_out": "En ventana aparte",
       "previous_chats": "Chats anteriores",
       "regenerate_title_with_llm": "Regenerar el título con el LLM",
+      "auto_title": "Título automático",
       "remove_knowledge_context": "Quitar el contexto de conocimiento",
       "return": "Devolver",
       "return_this_session_to_the_main_window": "Devolver esta sesión a la ventana principal",

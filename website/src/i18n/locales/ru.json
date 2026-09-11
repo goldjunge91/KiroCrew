@@ -10254,6 +10254,7 @@
       "popped_out": "В отдельном окне",
       "previous_chats": "Предыдущие чаты",
       "regenerate_title_with_llm": "Сгенерировать заголовок заново через LLM",
+      "auto_title": "Автозаголовок",
       "remove_knowledge_context": "Удалить контекст знаний",
       "return": "Вернуть",
       "return_this_session_to_the_main_window": "Вернуть эту сессию в главное окно",

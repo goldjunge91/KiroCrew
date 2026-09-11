@@ -9825,6 +9825,7 @@
       "popped_out": "별도 창에 표시 중",
       "previous_chats": "이전 채팅",
       "regenerate_title_with_llm": "LLM으로 제목 다시 생성",
+      "auto_title": "자동 제목",
       "remove_knowledge_context": "지식 컨텍스트 제거",
       "return": "되돌리기",
       "return_this_session_to_the_main_window": "이 세션을 기본 창으로 되돌리기",
