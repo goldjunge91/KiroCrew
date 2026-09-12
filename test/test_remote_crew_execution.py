@@ -3431,6 +3431,35 @@ class TestRelayedSendToBusyPeerSlotIsRefused:
     """
 
     @pytest.mark.asyncio
+    async def test_a_relayed_send_never_recreates_a_missing_peer_slot(self, tmp_path, monkeypatch):
+        """`relay=1` targets an existing peer session; it never creates one.
+
+        The owner can validate a row and lose it before the first relayed turn.
+        Without this guard `api_chat` falls through to `get_or_create_slot`, mints
+        an empty ordinary peer slot under the vanished key, and answers against no
+        inherited history — plausible output with the wrong context.
+        """
+        from aiohttp.test_utils import TestClient, TestServer
+
+        state = _make_state(tmp_path)
+        assert "peer-just-closed" not in state._slots
+
+        def _relay_must_not_create(*_args, **_kwargs):
+            raise AssertionError("relay=1 reached get_or_create_slot")
+
+        monkeypatch.setattr(state, "get_or_create_slot", _relay_must_not_create)
+
+        async with TestClient(TestServer(_send_app(state))) as client:
+            resp = await client.post(
+                "/api/chat/send?relay=1",
+                json={"slot": "peer-just-closed", "message": "relayed"},
+            )
+            assert resp.status == 404
+            assert (await resp.json())["code"] == "slot_not_found"
+
+        assert "peer-just-closed" not in state._slots
+
+    @pytest.mark.asyncio
     async def test_a_relayed_send_to_a_busy_local_slot_is_refused(self, tmp_path):
         from aiohttp.test_utils import TestClient, TestServer
 
