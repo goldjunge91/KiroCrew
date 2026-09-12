@@ -4041,6 +4041,40 @@ class TestResumeDedupe:
             assert sum(1 for s in slots if s["key"] == "s1") == 1
 
     @pytest.mark.asyncio
+    async def test_resume_of_a_live_slot_refuses_an_app_when_a_bind_lands_mid_reconcile(
+        self, tmp_path, monkeypatch
+    ):
+        """The live-slot resume re-checks the channel-backed guard after its
+        awaited window reconcile: a channel/cron bind landing during it
+        hydrates the window from the channel, and the response is built from
+        that window."""
+        from kiro_crew.dashboard import chat_handlers
+
+        monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)
+        state = _make_state(tmp_path)
+        slot = state.get_or_create_slot("s1")
+        slot._app = "my-app"
+        slot.append("user", "own message", "msg msg-u")
+        slot.drain()
+
+        async def _reconcile_and_bind(_state, existing):
+            existing.linked_session_key = "cron:job-1"
+
+        monkeypatch.setattr(chat_handlers, "_reconcile_slot_window", _reconcile_and_bind)
+        app = _make_app(state)
+
+        @web.middleware
+        async def _as_app(request, handler):
+            request["app"] = "my-app"
+            return await handler(request)
+
+        app.middlewares.insert(0, _as_app)
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/chat/slots/s1/resume", json={"key": "dashboard:s1"})
+            assert resp.status == 404
+            assert (await resp.json())["code"] == "slot_not_found"
+
+    @pytest.mark.asyncio
     async def test_resume_close_resume_no_duplicate_history(self, tmp_path, monkeypatch):
         """Resume → close → resume → close should not create duplicate history."""
         monkeypatch.setattr("kiro_crew.dashboard.state.config_dir", lambda: tmp_path)

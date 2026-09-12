@@ -64,6 +64,7 @@ from typing import Any
 
 from aiohttp import web
 
+from kiro_crew.dashboard.chat_utils import slot_history_key, slot_is_channel_backed
 from kiro_crew.dashboard.session_transfer import (
     SnapshotUnstable,
     build_transfer_bundle_async,
@@ -219,9 +220,12 @@ async def api_chat_slot_export(request: web.Request) -> web.Response:
     # sandbox. The dashboard owner is unaffected -- they are entitled to both.
     #
     # Same 404 as above, for the same reason: a distinguishable code would let an
-    # app learn which of its slots carry a channel link.
-    if request_app and getattr(slot, "linked_session_key", ""):
-        _audit("denied", error=f"app {request_app!r} may not export a channel-linked slot")
+    # app learn which of its slots carry a channel link. ``slot_is_channel_backed``
+    # covers both shapes -- the bound link, and the unbound channel-born slot
+    # whose ``channel_origin`` resolves through ``slot_transcript_key`` onto the
+    # channel's own transcript.
+    if request_app and slot_is_channel_backed(slot):
+        _audit("denied", error=f"app {request_app!r} may not export a channel-backed slot")
         return web.json_response(
             {"error": "session not found", "code": "export_slot_not_found"}, status=404
         )
@@ -245,6 +249,7 @@ async def api_chat_slot_export(request: web.Request) -> web.Response:
             slot,
             origin=local_instance_label(),
             with_source=True,
+            expected_history_key=slot_history_key(slot),
             # Layer A ONLY. Layer B -- the model's context window -- travels
             # byte-exact and unredacted over a tunnel, and what makes that
             # acceptable is the destination: the operator's own authenticated
@@ -285,6 +290,19 @@ async def api_chat_slot_export(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "the session could not be exported", "code": "export_failed"},
             status=500,
+        )
+
+    # Re-checked on BOTH sides of the awaited build: the guards above read the
+    # binding at one instant, and a channel/cron injection can bind
+    # ``linked_session_key`` while the builder is off the loop -- redirecting
+    # its transcript read onto a conversation the app was never authorized
+    # against. Links are only ever set, never cleared, so a bind that raced the
+    # build is visible here: discard the bundle and answer with the same 404
+    # the pre-build guards use.
+    if request_app and slot_is_channel_backed(slot):
+        _audit("denied", error="slot bound to a channel during the export build")
+        return web.json_response(
+            {"error": "session not found", "code": "export_slot_not_found"}, status=404
         )
 
     if not bundle.get("messages"):

@@ -915,11 +915,8 @@ test/test_session_rss.py
 test/test_session_sharing.py
 test/test_session_spend_identity.py
 test/test_session_start_timeout_diagnostics.py
-test/test_session_summary_api.py
 test/test_session_summary_extract.py
-test/test_session_summary_generate.py
 test/test_session_thread_map.py
-test/test_session_transfer.py
 test/test_session_usage.py
 test/test_sessions_health_cache.py
 test/test_settingref_schema_fixture.py

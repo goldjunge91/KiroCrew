@@ -17,7 +17,7 @@ import json
 import re
 from typing import Any, Callable, Optional
 
-from kiro_crew.dashboard.chat_utils import dashboard_slot_key
+from kiro_crew.dashboard.chat_utils import dashboard_slot_key, refuse_app_owned_rebind
 from kiro_crew.dashboard.state import DashboardState, append_and_surface, row_mid
 from kiro_crew.history import append_if_absent_off_loop
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -152,6 +152,10 @@ def inject_workflow_result(
         # 2. Fall back to a dedicated workflow slot only if the chat is gone.
         if slot is None:
             slot = state.get_or_create_slot(name=f"workflow-{run_id}")
+            if refuse_app_owned_rebind(slot, "workflow_slot_bind"):
+                # An app pre-minted the fallback slot's name: neither bind nor
+                # surface the result there (see ``refuse_app_owned_rebind``).
+                return False
             if not getattr(slot, "linked_session_key", ""):
                 slot.linked_session_key = session_key
             slot.title = f"Workflow: {snapshot.get('name') or run_id}"

@@ -178,6 +178,26 @@ def test_inject_falls_back_when_origin_slot_gone() -> None:
     assert state.created == ["workflow-wf_9"]  # dedicated fallback slot created
 
 
+def test_inject_does_not_bind_or_surface_into_an_app_owned_fallback_slot() -> None:
+    from unittest.mock import MagicMock, patch
+
+    from kiro_crew.dashboard import chat_utils
+
+    held = _FakeSlot("workflow-wf_9")
+    held._app = "my-app"  # an app pre-minted the fallback slot's name
+    state = _FakeState({"workflow-wf_9": held})
+    snap = {
+        "name": "pizza", "run_id": "wf_9", "status": "finished",
+        "session_key": "dashboard:chat-gone", "result": {"ok": True},
+    }
+    with patch.object(chat_utils, "sel", lambda: MagicMock()):
+        ok = inject_workflow_result(state, "wf_9", snap)
+    assert ok is False
+    assert held.linked_session_key == ""
+    assert held.messages == []
+    assert state.broadcasts == []
+
+
 def test_inject_no_session_key_returns_false() -> None:
     state = _FakeState({})
     snap = {"name": "x", "run_id": "wf_0", "status": "finished", "result": {}, "session_key": ""}

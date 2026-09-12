@@ -102,6 +102,7 @@ from kiro_crew.dashboard.chat_utils import (
     effective_session_key,
     history_corpus_unreadable,
     slot_history_key,
+    slot_is_channel_backed,
     subagents_attached,
 )
 from kiro_crew.dashboard.handlers._shared import read_bounded_json
@@ -344,31 +345,16 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": str(exc)}, status=409)
 
     # App ownership check (App Kit §5.2): deny-by-default for app tokens.
-    # Apps can only access slots they own. Dashboard users (empty request_app)
-    # can access everything.
+    # Apps can only access slots they own, and owning the SLOT is not owning
+    # the TRANSCRIPT -- this route reads and writes conversation content
+    # through ``slot_history_key``, which resolves a channel-backed slot onto
+    # the channel's own file. ``_check_slot_app_ownership`` refuses all of
+    # unscoped / foreign / channel-linked / channel-origin with one 404.
+    # Dashboard users (empty request_app) pass.
     request_app = request.get("app", "")
-    if request_app:
-        if not slot._app:
-            # Unscoped slot created by dashboard — apps cannot access it.
-            sel().log_api_access(
-                caller=request_app,
-                operation="chat_send",
-                outcome="denied",
-                source="app_isolation",
-                resources=f"slot={slot.key}",
-                error="app cannot access unscoped slots",
-            )
-            return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
-        elif request_app != slot._app:
-            sel().log_api_access(
-                caller=request_app,
-                operation="chat_send",
-                outcome="denied",
-                source="app_isolation",
-                resources=f"slot={slot.key}",
-                error="app does not own this slot",
-            )
-            return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    denied = _check_slot_app_ownership(slot, slot.key, request_app, "chat_send")
+    if denied is not None:
+        return denied
     # Identity gate for a peer-bound slot, on top of the app-scope 404s above:
     # those pass every empty-``app`` caller by contract, and a dashboard-link
     # token is exactly that shape. Sending here would spend the OWNER's tunnel to
@@ -1216,21 +1202,14 @@ async def api_chat_slot_source_links(request: web.Request) -> web.Response:
     # foreign-app session ever mentioned. Same indistinguishable 404 as the send
     # path -- SAME error code too, so the response cannot be used to probe which
     # foreign slots exist.
+    # The URLs are extracted FROM the slot's messages, and for a channel-backed
+    # slot those are the channel conversation's -- the same content the
+    # chokepoint refuses this caller on the detail route, so the gate refuses
+    # both channel shapes beside the ownership arms.
     request_app = request.get("app", "")
-    if request_app and request_app != slot._app:
-        sel().log_api_access(
-            caller=request_app,
-            operation="chat_source_links",
-            outcome="denied",
-            source="app_isolation",
-            resources=f"slot={slot.key}",
-            error=(
-                "app cannot access unscoped slots"
-                if not slot._app
-                else "app does not own this slot"
-            ),
-        )
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    denied = _check_slot_app_ownership(slot, slot.key, request_app, "chat_source_links")
+    if denied is not None:
+        return denied
     if request_app:
         # The ALLOW is a permission decision too, and an audit trail that records
         # only refusals cannot answer which app actually read a slot's links.
@@ -1253,6 +1232,12 @@ async def api_chat_slot_source_links(request: web.Request) -> web.Response:
         logger.debug(
             "GitLab allowlist warm-up failed; expanded chips may lag one round", exc_info=True
         )
+    # Re-authorized on the far side of that await: the payload below is derived
+    # from the slot's in-memory window, which a bind hydrates from the channel.
+    if request_app:
+        denied = _reauthorize_after_await(state, slot, slot.key, request_app, "chat_source_links")
+        if denied is not None:
+            return denied
 
     # Cached status only, gated exactly like the list endpoint: owner sees all,
     # a dashboard-user sees public-repo status, app tokens see none. No
@@ -1263,9 +1248,10 @@ async def api_chat_slot_source_links(request: web.Request) -> web.Response:
     # Deliberately NOT gated on `dashboard.session_card_source_links`: the only
     # caller is the sidebar's "+N" pill, which exists only while the strip
     # renders, and the config write pushes fresh slots so the pill goes at once.
-    # An app token that owns the slot could ask directly, but it can already read
-    # the slot's messages -- these URLs are extracted FROM those messages, so
-    # gating here would withhold nothing it does not already have.
+    # An app token that owns a plain slot could ask directly, but it can already
+    # read that slot's messages -- these URLs are extracted FROM those messages,
+    # so gating here would withhold nothing it does not already have. The
+    # channel-backed case is the one it cannot read, and is refused above.
     return web.json_response(
         slot.source_links_payload(
             include_check_status=is_owner_dashboard_request(request),
@@ -1410,18 +1396,27 @@ async def api_chat_slot_summary(request: web.Request) -> web.Response:
     # and are unaffected; an app token may only read summaries for slots it
     # created, never for unscoped slots.
     request_app = request.get("app", "")
-    if request_app and (not slot._app or slot._app != request_app):
-        sel().log_api_access(
-            caller=request_app,
-            operation="slot_summary_read",
-            outcome="denied",
-            source="app_isolation",
-            resources=f"slot={name}",
-            error="app does not own this slot",
-        )
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    denied = _check_slot_app_ownership(slot, name, request_app, "slot_summary_read")
+    if denied is not None:
+        return denied
+    # The transcript key the guard above authorized, resolved on ITS side of
+    # the awaits below. The read passes THIS key rather than re-resolving
+    # ``slot_history_key(slot)`` after a suspension: a channel/cron injection
+    # can bind ``linked_session_key`` while the config load is off the loop,
+    # and a live re-resolve would follow the new link onto a conversation no
+    # check in this handler ever authorized.
+    authorized_history_key = slot_history_key(slot)
 
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
+    # Re-authorized on the far side of the await: a bind that landed during
+    # the config load is visible here, and the in-memory state
+    # ``_generate_state`` reads below is the hydrated channel window once it
+    # has (``_reauthorize_after_await`` also refuses a slot replaced under
+    # this name while the handler was off the loop).
+    if request_app:
+        denied = _reauthorize_after_await(state, slot, name, request_app, "slot_summary_read")
+        if denied is not None:
+            return denied
     enabled = bool(cfg.session_summary.enabled)
 
     payload: dict | None = None
@@ -1431,8 +1426,11 @@ async def api_chat_slot_summary(request: web.Request) -> web.Response:
     # stop serving summaries, not just stop producing them, or a sidecar written
     # during an earlier opt-in keeps being returned after opt-out.
     if enabled and log is not None:
-        history_key = slot_history_key(slot)
-        payload, stale = await asyncio.to_thread(log.read_intent_summary, history_key)
+        payload, stale = await asyncio.to_thread(log.read_intent_summary, authorized_history_key)
+        if request_app:
+            denied = _reauthorize_after_await(state, slot, name, request_app, "slot_summary_read")
+            if denied is not None:
+                return denied
 
     body: dict = {
         "enabled": enabled,
@@ -1519,18 +1517,19 @@ async def api_chat_slot_summary_generate(request: web.Request) -> web.Response:
     # Same App Kit §5.2 isolation as the GET: generating is strictly more
     # privileged than reading, so it can never be the laxer of the two.
     request_app = request.get("app", "")
-    if request_app and (not slot._app or slot._app != request_app):
-        sel().log_api_access(
-            caller=request_app,
-            operation="slot_summary_generate",
-            outcome="denied",
-            source="app_isolation",
-            resources=f"slot={name}",
-            error="app does not own this slot",
-        )
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    denied = _check_slot_app_ownership(slot, name, request_app, "slot_summary_generate")
+    if denied is not None:
+        return denied
+    # Pinned on the guard's side of every await (same reasoning as the GET):
+    # the generator refuses to run against any other key, and the read-back
+    # below uses this one rather than a live re-resolve.
+    authorized_history_key = slot_history_key(slot)
 
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
+    if request_app:
+        denied = _reauthorize_after_await(state, slot, name, request_app, "slot_summary_generate")
+        if denied is not None:
+            return denied
     if not cfg.session_summary.enabled:
         return web.json_response(
             {"error": "session summaries are switched off", "code": "summary_disabled"},
@@ -1558,13 +1557,25 @@ async def api_chat_slot_summary_generate(request: web.Request) -> web.Response:
             status=409,
         )
 
-    await generate_session_summary(state, slot, cfg=cfg, force=True)
+    await generate_session_summary(
+        state, slot, cfg=cfg, force=True, expected_history_key=authorized_history_key
+    )
+    # The pass is many awaits long (flush, mtime, transcript read, model
+    # call); a bind during any of them makes the slot's in-memory window a
+    # channel's, and ``_generate_state`` below reads that window.
+    if request_app:
+        denied = _reauthorize_after_await(state, slot, name, request_app, "slot_summary_generate")
+        if denied is not None:
+            return denied
 
     # Read back rather than trusting the return value: a forced pass returns
     # False both when it produced nothing AND when the cached summary was
     # already current, and those are opposite outcomes for the panel.
-    history_key = slot_history_key(slot)
-    payload, stale = await asyncio.to_thread(log.read_intent_summary, history_key)
+    payload, stale = await asyncio.to_thread(log.read_intent_summary, authorized_history_key)
+    if request_app:
+        denied = _reauthorize_after_await(state, slot, name, request_app, "slot_summary_generate")
+        if denied is not None:
+            return denied
     if payload is None:
         return web.json_response(
             {"error": "could not summarize this session", "code": "summary_unavailable"},
@@ -1989,6 +2000,14 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     denied = _deny_cross_app_slot_access(request, slot, name, "slot_detail")
     if denied is not None:
         return denied
+    # The transcript key the chokepoint authorized, resolved on ITS side of
+    # every await in this handler. Each disk read below passes THIS key
+    # rather than re-resolving ``slot_history_key(slot)``: a channel/cron
+    # injection can bind ``linked_session_key`` while a read is off the loop,
+    # and a live re-resolve would follow the new link onto a conversation the
+    # chokepoint never authorized. The in-memory window is re-checked before
+    # the response leaves (a bind also hydrates it from the channel).
+    history_key = slot_history_key(slot)
 
     limit_raw = request.query.get("limit")
     before_raw = request.query.get("before")
@@ -2019,7 +2038,6 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
     if limit_raw is None and before_raw is None:
         mem_msgs = list(slot.messages)
         if slot._disk_older_count > 0 and state.conversation_log:
-            history_key = slot_history_key(slot)
             try:
                 disk_msgs = await asyncio.to_thread(
                     state.conversation_log.read_messages_chained, history_key
@@ -2043,7 +2061,6 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
                 and not getattr(slot, "_dirty_flag", False)
             )
             if _slot_idle:
-                history_key = slot_history_key(slot)
                 try:
                     disk_msgs = await asyncio.to_thread(
                         state.conversation_log.read_messages_chained, history_key
@@ -2152,7 +2169,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
             try:
                 rotated = await asyncio.to_thread(
                     state.conversation_log.read_rotated_messages_chained,
-                    slot_history_key(slot),
+                    history_key,
                 )
             except Exception:
                 # NOT `rotated = []`. An empty list is this handler's encoding of
@@ -2170,7 +2187,7 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
                     try:
                         mid_rotation = await asyncio.to_thread(
                             state.conversation_log.chain_mid_rotation,
-                            slot_history_key(slot),
+                            history_key,
                         )
                     except Exception:
                         # A failed probe leaves `mid_rotation` False, which sends
@@ -2336,6 +2353,14 @@ async def api_chat_slot_detail(request: web.Request) -> web.Response:
         # is two dict lookups plus a returncode read.
         live_child = _live_child_instance(state, slot)
         body = await asyncio.to_thread(_render, live_child)
+    # The chokepoint's check was synchronous and this handler has awaited many
+    # times since; ``messages`` came from the pinned key, but the in-memory
+    # window it was merged with is the channel's once a bind has landed.
+    request_app = request.get("app", "")
+    if request_app:
+        denied = _reauthorize_after_await(state, slot, name, request_app, "slot_detail")
+        if denied is not None:
+            return denied
     return web.Response(text=body, content_type="application/json")
 
 
@@ -4047,7 +4072,9 @@ async def api_chat_slot_stop(request: web.Request) -> web.Response:
     slot = state._slots.get(name)
     if not slot:
         return _slot_not_found()
-    denied = _deny_cross_app_slot_access(request, slot, name, "slot_stop")
+    denied = _deny_cross_app_slot_access(
+        request, slot, name, "slot_stop", allow_channel_backed=True
+    )
     if denied is not None:
         return denied
     # A peer-bound stop travels over the owner's tunnel and aborts a turn on the
@@ -4116,21 +4143,13 @@ async def api_chat_slot_continue(request: web.Request) -> web.Response:
     # dispatches an agent turn that runs tools and writes to the repo. Same
     # indistinguishable 404 as the send path, so the response cannot be used to
     # probe which foreign slots exist.
+    # Owning the SLOT is not owning the TRANSCRIPT either: a continue
+    # dispatches a turn that runs and writes on the linked conversation, so
+    # the gate refuses both channel shapes beside the ownership arms.
     request_app = request.get("app", "")
-    if request_app and request_app != slot._app:
-        sel().log_api_access(
-            caller=request_app,
-            operation="chat_continue",
-            outcome="denied",
-            source="app_isolation",
-            resources=f"slot={slot.key}",
-            error=(
-                "app cannot access unscoped slots"
-                if not slot._app
-                else "app does not own this slot"
-            ),
-        )
-        return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
+    denied = _check_slot_app_ownership(slot, slot.key, request_app, "chat_continue")
+    if denied is not None:
+        return denied
 
     # A crew-bound slot has no local continue: it queues a synthetic turn that the
     # runner would dispatch on THIS machine, diverging from the peer. AFTER the
@@ -4141,6 +4160,15 @@ async def api_chat_slot_continue(request: web.Request) -> web.Response:
         return refusal
 
     async with slot._lock:
+        # Re-authorized on THIS side of the lock acquire, on the same tick as
+        # the ``queue_insert`` below: the guard above read the binding before
+        # the await, and a channel/cron injection that bound the slot while
+        # this handler waited for the lock would otherwise have the
+        # continuation dispatched onto the channel's session. Same 404.
+        if request_app:
+            denied = _reauthorize_after_await(state, slot, slot.key, request_app, "chat_continue")
+            if denied is not None:
+                return denied
         if slot.running:
             return web.json_response(
                 {"error": "slot is running", "code": "slot_running"}, status=409
@@ -4349,7 +4377,9 @@ async def api_chat_slot_interrupt(request: web.Request) -> web.Response:
     slot = state._slots.get(name)
     if not slot:
         return _slot_not_found()
-    denied = _deny_cross_app_slot_access(request, slot, name, "slot_interrupt")
+    denied = _deny_cross_app_slot_access(
+        request, slot, name, "slot_interrupt", allow_channel_backed=True
+    )
     if denied is not None:
         return denied
     # Before the _stop_state claim and the queue promotion below, both of which
@@ -8463,19 +8493,33 @@ def _redact_followup_item(item: dict) -> dict:
 
 
 def _deny_cross_app_slot_access(
-    request: web.Request, slot, name: str, operation: str
+    request: web.Request, slot, name: str, operation: str, *, allow_channel_backed: bool = False
 ) -> web.Response | None:
     """Deny app tokens acting on slots they don't own (App Kit §5.2).
 
     Returns a 404 response if the caller is an app that doesn't own this slot,
     or None to proceed. Dashboard users (empty request_app) always pass.
     Anti-enumeration: uses 404 not 403 (CWE-204).
+
+    ``allow_channel_backed``: the cancel routes opt out of the
+    channel-backed refusal because they authorize against the TURN's own
+    identity in ``_app_cancel_denied`` -- an app may still stop a turn it
+    started on its own session after a mid-flight rebind, and that guard
+    (not this one) is what refuses a cancel landing on a foreign session.
     """
     request_app = request.get("app", "")
     if not request_app:
         return None  # Dashboard user -- no restriction
+    if not allow_channel_backed:
+        # The default path IS the ownership gate: unscoped / foreign /
+        # channel-linked / channel-origin, one spelling, one 404. Owning the
+        # SLOT is not owning the TRANSCRIPT -- a channel-backed slot resolves
+        # reads and writes onto a channel conversation's own file. Routes that
+        # read the transcript AFTER this synchronous check re-authorize through
+        # ``_reauthorize_after_await`` on the far side of their awaits.
+        return _check_slot_app_ownership(slot, name, request_app, operation)
     if slot._app and request_app == slot._app:
-        return None  # App owns this slot
+        return None  # App owns this slot; the cancel routes accept a channel-backed one
     reason = "app does not own this slot" if slot._app else "app cannot access unscoped slots"
     try:
         sel().log_api_access(
@@ -8869,31 +8913,25 @@ async def _live_slot_resume_response(
                 break
     if existing:
         # App ownership check (App Kit §5.2)
+        # Owning the SLOT is not owning the TRANSCRIPT: a resume hands back
+        # the linked conversation's content, so the gate refuses both
+        # channel shapes beside the ownership arms, with one 404.
         request_app = request.get("app", "")
-        if request_app:
-            if not existing._app:
-                sel().log_api_access(
-                    caller=request_app,
-                    operation="slot_resume",
-                    outcome="denied",
-                    source="app_isolation",
-                    resources=f"slot={existing.key}",
-                    error="app cannot access unscoped slots",
-                )
-                return web.json_response({"error": "not found"}, status=404)
-            elif request_app != existing._app:
-                sel().log_api_access(
-                    caller=request_app,
-                    operation="slot_resume",
-                    outcome="denied",
-                    source="app_isolation",
-                    resources=f"slot={existing.key}",
-                    error="app does not own this slot",
-                )
-                return web.json_response({"error": "not found"}, status=404)
+        denied = _check_slot_app_ownership(existing, existing.key, request_app, "slot_resume")
+        if denied is not None:
+            return denied
         # Reconcile: if disk grew beyond what the in-memory window covers,
         # append the missing tail so a page refresh self-heals.
         await _reconcile_slot_window(state, existing)
+        # Re-authorized on the far side of that await, before the window
+        # below is read: a bind landing during the reconcile hydrates it from
+        # the channel. Same 404 as the pre-await gate.
+        if request_app:
+            denied = _reauthorize_after_await(
+                state, existing, existing.key, request_app, "slot_resume"
+            )
+            if denied is not None:
+                return denied
         # Reduce the wire-only rows before bounding, for the same reason the
         # detail handler does: a segment still streaming is hundreds of `chunk`
         # rows that render as one message, so a raw 200-row bound over the live
@@ -10408,7 +10446,10 @@ def _check_slot_app_ownership(
     authorization and action cannot disagree.
 
     The denials are single-sourced through :func:`_slot_not_found` so the four
-    cannot drift apart -- byte-identity is the property being defended.
+    cannot drift apart -- byte-identity is the property being defended. The
+    two transcript conditions are decided by ``slot_is_channel_backed`` -- the
+    same predicate every other app boundary uses -- so there is one definition
+    of the refused set; the audit reason distinguishes the two shapes.
     """
     if not request_app:
         return None
@@ -10432,24 +10473,26 @@ def _check_slot_app_ownership(
             error="app does not own this slot",
         )
         return _slot_not_found()
-    if effective_session_key(slot) != _history_key_for(slot.key):
+    if slot_is_channel_backed(slot):
+        # ONE definition of "channel-backed" for every boundary
+        # (``slot_is_channel_backed``: a bound link, or an unbound channel-born
+        # slot), so the set this gate refuses cannot drift from the set the
+        # transfer / export / fork / rewind / openai_compat boundaries and the
+        # chokepoint refuse. The audit reason still names which shape fired:
+        # the session condition (a bound link) or the transcript condition (a
+        # channel-born slot the dashboard could not bind, whose transcript
+        # ``slot_history_key`` resolves through ``slot_transcript_key``).
         sel().log_api_access(
             caller=request_app,
             operation=operation,
             outcome="denied",
             source="app_isolation",
             resources=f"slot={name}",
-            error="app does not own the session this slot is linked to",
-        )
-        return _slot_not_found()
-    if slot_history_key(slot) != _history_key_for(slot.key):
-        sel().log_api_access(
-            caller=request_app,
-            operation=operation,
-            outcome="denied",
-            source="app_isolation",
-            resources=f"slot={name}",
-            error="app does not own the transcript this slot writes to",
+            error=(
+                "app does not own the session this slot is linked to"
+                if getattr(slot, "linked_session_key", "")
+                else "app does not own the transcript this slot writes to"
+            ),
         )
         return _slot_not_found()
     return None
