@@ -1932,6 +1932,20 @@ Examples:
             "skips its speech-to-text (whisper) model download too."
         ),
     )
+    pod_up.add_argument(
+        "--wait-secs",
+        dest="wait_secs",
+        type=int,
+        metavar="SECS",
+        default=None,
+        help=(
+            "Health-wait budget in seconds before `pod up` gives up on the "
+            "gateway answering /api/health (default: 90; a first boot does "
+            "migration and staging work, so slow hosts may need more). Also "
+            "settable via KIROCREW_POD_HEALTH_SECS; the flag wins. Values "
+            "below 5 are raised to 5, values above 3600 are capped at 3600."
+        ),
+    )
     pod_down = pod_sub.add_parser("down", help="Evict a pod (zero residue)")
     pod_down.add_argument("name", help="Worktree name")
     pod_ls = pod_sub.add_parser("ls", help="List running pods")

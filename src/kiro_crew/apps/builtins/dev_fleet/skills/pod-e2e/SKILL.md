@@ -110,7 +110,11 @@ full suite.
 
 1. **up** — `kirocrew pod up <wt> --json`. If already active, reuses it (and
    won't stop it on exit). Boots the worktree's own gateway with `--no-crons`,
-   blank-seed DB, isolated HOME.
+   blank-seed DB, isolated HOME. If this phase fails with `gateway still
+   starting after Ns` in `pod-up.log`, the gateway was alive but slower than
+   the health-wait budget (default 90s): re-run with
+   `KIROCREW_POD_HEALTH_SECS=<higher>` exported — the harness passes its
+   environment through to the `pod up` it spawns.
 2. **health** — polls `kirocrew pod status <wt> --json` until its `health` is
    200/401/403 (≤60s). Deliberately not a bare `curl base_url/api/health`: a
    derived port is routinely held by another pod or by the live gateway, every
