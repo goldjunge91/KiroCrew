@@ -46,6 +46,21 @@ MAX_MONITOR_CHECK_IDENTITY_CHARS = 200
 # and bounded.
 MONITOR_COMPLETION_EVIDENCE_TIMEOUT_SECS = 7_260
 MONITOR_BUSY_RETRY_SECS = 15
+#: Shortest a coalescing window stays open before an actionable change may wake
+#: the session. A floor, not a timeout: a subject whose checks are still landing
+#: can look settled for a moment, and firing on that reports a convergence that
+#: did not happen. Successive changes to the one subject age from when the window
+#: opened, so a burst of edits costs one wake rather than one per change.
+DEFAULT_MONITOR_COALESCE_SECS = 240.0
+#: Wall-clock ceiling on a coalescing window, measured from when it opened. The
+#: window flushes at this age regardless of whether the subject settled, so a
+#: subject that never converges yields a delayed wake rather than none.
+DEFAULT_MONITOR_COALESCE_MAX_SECS = 1800.0
+#: A delivered wake re-arms after this long while the same actionable
+#: fingerprint persists. Level-triggered re-assertion: an unresolved condition
+#: is re-reported on this interval rather than once, and a future timestamp
+#: (clock rollback) reads as stale so it can never suppress a wake forever.
+DEFAULT_MONITOR_REALERT_SECS = 6 * 3600
 MONITOR_STOP_RUNTIME_BUDGET = "runtime_budget"
 MONITOR_STOP_AGENT_TURN_BUDGET = "agent_turn_budget"
 MONITOR_STOP_TOKEN_BUDGET = "token_budget"
@@ -534,6 +549,26 @@ class MonitorState:
     last_probe_at: float = 0.0
     last_decision: MonitorDecision | None = None
     last_provider_error: ProviderErrorKind | None = None
+    #: The coalescing window over successive changes to this one subject. A
+    #: structured monitor watches ONE subject, so a tick yields one observation
+    #: and there is no simultaneous set of anomalies to fold; the burst is the
+    #: same subject changing again before the last change settled. The window
+    #: holds the actionable fingerprint currently waiting out its floor.
+    #:
+    #: Empty ``coalesce_fingerprint`` means no window is open, so a persisted
+    #: record written before these fields load as an unopened window and the
+    #: first tick behaves as a fresh start -- neither a window opened at time
+    #: zero (which fires at once) nor one held open forever.
+    coalesce_fingerprint: str = ""
+    #: When the open window's fingerprint was first seen. Read only while
+    #: ``coalesce_fingerprint`` is non-empty; the pair moves together.
+    coalesce_opened_at: float = 0.0
+    #: Per-fingerprint time of the last wake it caused, for level-triggered
+    #: re-assertion: the same actionable fingerprint re-wakes only once its entry
+    #: is older than the re-alert interval. Pruned unconditionally each settled
+    #: decision, because on a durable per-loop record this map grows across
+    #: restarts and the growth is a durability cost, not untidiness.
+    coalesce_alerted: dict[str, float] = field(default_factory=dict)
     #: Adoption metering. Without these two numbers a probe gate that never
     #: fires and a probe gate that is doing its job are indistinguishable from
     #: the outside, so a gate stuck at zero adoption goes unnoticed.
@@ -725,6 +760,17 @@ class MonitorState:
             self.last_provider_error, ProviderErrorKind
         ):
             raise ValueError("last_provider_error must be a ProviderErrorKind")
+        if not isinstance(self.coalesce_fingerprint, str):
+            raise ValueError("coalesce_fingerprint must be a string")
+        if not is_finite_non_negative_number(self.coalesce_opened_at):
+            raise ValueError("coalesce_opened_at must be a finite non-negative number")
+        if not isinstance(self.coalesce_alerted, dict):
+            raise ValueError("coalesce_alerted must be an object")
+        for key, value in self.coalesce_alerted.items():
+            if not isinstance(key, str):
+                raise ValueError("coalesce_alerted keys must be strings")
+            if not is_finite_non_negative_number(value):
+                raise ValueError("coalesce_alerted values must be finite non-negative numbers")
         if self.outcome is not None and not isinstance(self.outcome, MonitorOutcome):
             raise ValueError("outcome must be a MonitorOutcome")
         if not isinstance(self.stopped_reason, str):
