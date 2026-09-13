@@ -208,11 +208,111 @@ class TestCleanupOrphanedMcpServers:
         with (
             patch("kiro_crew.session_pid.platform_compat.pid_exists", side_effect=fake_pid_exists),
             patch("kiro_crew.platform_compat.get_ppid", return_value=5555),
+            patch("kiro_crew.session_pid._accepted_subreaper_pids", return_value={1}),
         ):
             killed = _cleanup_orphaned_mcp_servers()
 
         assert killed == 0
         assert "77777" not in pid_file.read_text(encoding="utf-8")  # stale entry pruned
+
+    def test_orphan_reparented_to_systemd_user_killed(self, pid_file: Path) -> None:
+        """Orphan reparented to a same-uid systemd --user subreaper IS killed.
+
+        Under a ``systemd --user`` gateway a genuine orphan reparents to the
+        user manager process, not pid 1. A guard accepting only
+        ``(1, parent_pid)`` misreads that orphan as PID reuse and prunes it
+        WITHOUT killing -- leaking the runtime where no other reaper can see
+        it. The guard must accept the shared subreaper set instead, gated on
+        the KIROCREW_SPAWNED environ marker as positive identity.
+        """
+        from kiro_crew.session_pid import _cleanup_orphaned_mcp_servers
+
+        systemd_user_pid = 4242  # same-uid systemd --user manager
+        pid_file.write_text("77777:99999\n")  # parent 99999 is dead
+
+        def fake_pid_exists(pid: int) -> bool:
+            return pid == 77777  # child alive, parent dead
+
+        kill_mock = MagicMock()
+        with (
+            patch("kiro_crew.session_pid.platform_compat.pid_exists", side_effect=fake_pid_exists),
+            patch("kiro_crew.session_pid.platform_compat.kill_pid", kill_mock),
+            patch("kiro_crew.platform_compat.get_ppid", return_value=systemd_user_pid),
+            patch(
+                "kiro_crew.session_pid._accepted_subreaper_pids",
+                return_value={1, systemd_user_pid},
+            ),
+            patch("kiro_crew.session_pid._env_has_kirocrew_marker", return_value=True),
+        ):
+            killed = _cleanup_orphaned_mcp_servers()
+
+        assert killed == 1
+        kill_mock.assert_called_once()
+        assert kill_mock.call_args.args[0] == 77777
+        assert "77777" not in pid_file.read_text(encoding="utf-8")
+
+    def test_systemd_parented_recycled_pid_without_marker_not_killed(self, pid_file: Path) -> None:
+        """Recycled PID now owned by an unrelated systemd --user service survives.
+
+        Under ``systemd --user`` every manager-started service carries the
+        manager's PID as its PPid for its whole life, so PPid membership in
+        the subreaper set alone does not prove the PID is ours. Without the
+        KIROCREW_SPAWNED environ marker the sweep must treat the entry as PID
+        reuse: prune the stale line, never SIGKILL the innocent process.
+        """
+        from kiro_crew.session_pid import _cleanup_orphaned_mcp_servers
+
+        systemd_user_pid = 4242
+        pid_file.write_text("77777:99999\n")  # parent 99999 is dead
+
+        def fake_pid_exists(pid: int) -> bool:
+            return pid == 77777  # PID alive (recycled), parent dead
+
+        kill_mock = MagicMock()
+        with (
+            patch("kiro_crew.session_pid.platform_compat.pid_exists", side_effect=fake_pid_exists),
+            patch("kiro_crew.session_pid.platform_compat.kill_pid", kill_mock),
+            patch("kiro_crew.platform_compat.get_ppid", return_value=systemd_user_pid),
+            patch(
+                "kiro_crew.session_pid._accepted_subreaper_pids",
+                return_value={1, systemd_user_pid},
+            ),
+            patch("kiro_crew.session_pid._env_has_kirocrew_marker", return_value=False),
+        ):
+            killed = _cleanup_orphaned_mcp_servers()
+
+        assert killed == 0
+        kill_mock.assert_not_called()
+        assert "77777" not in pid_file.read_text(encoding="utf-8")  # stale entry pruned
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="/proc scan is Linux-only")
+    def test_accepted_subreaper_pids_detects_same_uid_systemd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shared scan finds same-uid systemd processes plus init.
+
+        Exercises the real detection logic against a fake ``/proc`` tree:
+        a same-uid ``systemd`` comm is accepted, a non-systemd comm and a
+        non-numeric entry are not, and pid 1 is always present.
+        """
+        import kiro_crew.session_pid as session_pid_mod
+
+        (tmp_path / "4242").mkdir()
+        (tmp_path / "4242" / "comm").write_text("systemd\n")
+        (tmp_path / "4300").mkdir()
+        (tmp_path / "4300" / "comm").write_text("bash\n")
+        (tmp_path / "4301").mkdir()  # no comm file: skipped, not fatal
+        (tmp_path / "notpid").mkdir()
+
+        real_path = session_pid_mod.Path
+        monkeypatch.setattr(
+            session_pid_mod,
+            "Path",
+            lambda p="": real_path(tmp_path) if str(p) == "/proc" else real_path(p),
+        )
+
+        accepted = session_pid_mod._accepted_subreaper_pids()
+        assert accepted == {1, 4242}
 
     def test_bare_pid_dead_pruned(self, pid_file: Path) -> None:
         """Dead bare PIDs should be pruned from the file."""

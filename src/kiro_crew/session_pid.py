@@ -656,6 +656,9 @@ def _cleanup_orphaned_mcp_servers() -> int:
         lines = path.read_text(encoding="utf-8").splitlines()
         killed = 0
         lines_to_remove: set[str] = set()
+        # Lazily computed on the first orphan-kill decision: the /proc scan is
+        # only worth paying when at least one tracked child has a dead parent.
+        accepted_ppids: set[int] | None = None
 
         for line in lines:
             stripped = line.strip()
@@ -687,11 +690,30 @@ def _cleanup_orphaned_mcp_servers() -> int:
                 continue  # parent alive (or unknown) — leave child running
 
             # Parent confirmed dead → child is orphaned — kill it.
-            # Guard against PID reuse: if the child was truly ours, its PPid
-            # should be 1 (reparented to init) since the parent died. A reused
-            # PID would have a different PPid.
+            # Guard against PID reuse: if the child was truly ours, it
+            # reparented to init or the nearest subreaper (systemd --user)
+            # when the parent died -- the same accepted-parent set
+            # _our_orphan_pids uses. parent_pid stays accepted to cover the
+            # race where the parent died after our liveness probe but the
+            # child has not been reparented yet. Any other PPid means the
+            # PID was reused by an unrelated process.
+            #
+            # The init and dead-parent arms keep their historical shape on
+            # every platform. The systemd arm is stricter: under systemd
+            # --user EVERY manager-started service carries the manager's PID
+            # as its PPid for its whole life, so a recycled PID that is now
+            # an unrelated user service would match the set -- require the
+            # KIROCREW_SPAWNED environ marker (inherited by every MCP server
+            # kiro-cli spawns) as positive identity before killing there.
+            # Marker absent or unreadable -> treat as PID reuse and prune
+            # without killing, the same disposition as any other mismatch.
+            if accepted_ppids is None:
+                accepted_ppids = _accepted_subreaper_pids()
             actual_ppid = platform_compat.get_ppid(child_pid)
-            if actual_ppid not in (1, parent_pid):
+            ours = actual_ppid in (1, parent_pid) or (
+                actual_ppid in accepted_ppids and _env_has_kirocrew_marker(child_pid)
+            )
+            if not ours:
                 # PID was reused by an unrelated process — just prune
                 lines_to_remove.add(stripped)
                 continue
@@ -1400,6 +1422,47 @@ def _is_sweepable_orphan_browser_daemon(pid: int, cmdline: bytes, age_seconds: f
     return not _browser_session_owner_alive(pid, session)
 
 
+def _accepted_subreaper_pids() -> set[int]:
+    """PIDs an orphan may legitimately reparent to: init plus same-uid systemd.
+
+    An orphaned process reparents to init (pid 1) or the nearest subreaper --
+    under a ``systemd --user`` gateway that is the user manager process, not
+    pid 1. On Linux this scans ``/proc`` for same-uid processes whose comm is
+    ``systemd``; elsewhere only init/launchd (pid 1) is a reparent target.
+    Single source of truth shared by :func:`_our_orphan_pids` and the PID-reuse
+    guard in :func:`_cleanup_orphaned_mcp_servers`, so the two reapers agree on
+    what an orphan's parent may look like -- a guard accepting only pid 1 would
+    misread a systemd-reparented orphan as PID reuse and prune it without
+    killing.
+
+    We deliberately do NOT include the gateway's launcher ppid: doing so would
+    widen the candidate set to the launcher's other live children (peer
+    processes from the same shell/tmux/supervisor), adding wrong-kill surface
+    with no orphan-reaping benefit.
+    """
+    accepted: set[int] = {1}
+    if sys.platform != "linux":
+        return accepted
+    try:
+        my_uid = os.getuid()
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if entry.stat().st_uid != my_uid:
+                    continue
+                # Detect systemd --user (user-session subreaper)
+                if (entry / "comm").read_text().strip() == "systemd":
+                    accepted.add(int(entry.name))
+            except (OSError, ValueError):
+                continue
+    except Exception:
+        # Callers include the startup sweep, which has no catch-all of its
+        # own: degrade to the init-only set rather than aborting the sweep.
+        logger.warning("_accepted_subreaper_pids /proc scan failed", exc_info=True)
+    return accepted
+
+
 def _our_orphan_pids() -> list[int]:
     """PIDs owned by current user whose parent is init (pid 1) or systemd --user.
 
@@ -1410,35 +1473,13 @@ def _our_orphan_pids() -> list[int]:
     if platform_compat.IS_WINDOWS:
         return []
     my_uid = os.getuid()
-    # An orphaned process reparents to init (pid 1) or the nearest subreaper
-    # (systemd --user), never back to its original launcher. We deliberately do
-    # NOT include the gateway's launcher ppid: doing so would widen the
-    # candidate set to the launcher's other live children (peer processes from
-    # the same shell/tmux/supervisor), adding wrong-kill surface with no
-    # orphan-reaping benefit.
-    accepted_ppids: set[int] = {1}
+    # Pass 1 detects the accepted reparent targets (init + systemd --user
+    # subreapers); pass 2 classifies orphans (needs the complete subreaper set
+    # before any child can be matched against accepted_ppids).
+    accepted_ppids = _accepted_subreaper_pids()
     try:
         if sys.platform == "linux":
-            # Two /proc passes: pass 1 detects systemd --user subreaper PIDs,
-            # pass 2 classifies orphans (needs the complete subreaper set
-            # before any child can be matched against accepted_ppids).
             result: list[int] = []
-            for entry in Path("/proc").iterdir():
-                if not entry.name.isdigit():
-                    continue
-                try:
-                    if entry.stat().st_uid != my_uid:
-                        continue
-                    pid = int(entry.name)
-                    # Detect systemd --user (user-session subreaper)
-                    try:
-                        if (entry / "comm").read_text().strip() == "systemd":
-                            accepted_ppids.add(pid)
-                    except OSError:
-                        pass
-                except (OSError, ValueError):
-                    continue
-            # Second pass now that accepted_ppids is complete
             for entry in Path("/proc").iterdir():
                 if not entry.name.isdigit():
                     continue

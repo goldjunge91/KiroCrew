@@ -1625,7 +1625,17 @@ crashes, the entries remain in the file for the next startup.
 **Detection**: reads `kiro_pids.txt`, processes only `child:parent` lines
 (bare PID lines are kiro-cli parents handled by `cleanup_orphaned_sessions()`).
 If the child is alive but its parent PID is dead, the child is orphaned and
-killed.
+killed.  A PID-reuse guard checks the child's current PPid first: a genuine
+orphan reparented to init (pid 1), or still showing the dead parent's PID
+(kill/reparent race), is killed outright.  A PPid in the same-uid
+`systemd --user` subreaper set -- the same accepted-parent set
+`_our_orphan_pids()` uses, computed by the shared
+`_accepted_subreaper_pids()` -- is killed only when the process also carries
+the `KIROCREW_SPAWNED` environ marker, because every manager-started user
+service holds the manager's PID as its PPid for its whole life, so PPid
+membership alone does not prove the PID is ours.  Any other PPid, or a
+subreaper PPid without the marker, means the PID was recycled by an
+unrelated process: the stale entry is pruned without killing.
 
 **Why not ancestor walk?** MCP servers are spawned in separate process groups
 and immediately reparented to init (ppid=1) even while the session is alive.
