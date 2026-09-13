@@ -525,7 +525,7 @@ export default function UpdateFoundModal() {
             <button
               type="button"
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md bg-accent text-accent-fg hover:opacity-90 cursor-pointer"
-              onClick={async () => { await copyToClipboard(candidate.command || ''); setCopied(true) }}
+              onClick={async () => { if (await copyToClipboard(candidate.command || '')) setCopied(true) }}
             >
               {copied ? <Check size={14} className="lucide-inline" /> : <Copy size={14} className="lucide-inline" />}
               {copied ? i18nT('components.updateFoundModal.copied') : i18nT('components.updateFoundModal.copy_command')}
