@@ -65,6 +65,23 @@ taskrunner.py        (orchestrator)
 The gateway attaches its singleton `WorkflowService` and `TaskRunner` after both
 are constructed. The dependency is optional so CLI, tests, and headless callers
 retain the existing TaskRunner behavior when no workflow service is present.
+An async dashboard host first calls `defer_workflow_attachment()` on the shared
+runner before yielding during startup. While deferred, `plan`, `run`,
+`start_background`, `execute_plan`, and `retry_from_task` reject new admission;
+`delete_run`, `update_plan`, and `update_task` also reject while deferred so a
+persisted task cannot be changed without propagating to its restored workflow.
+The shared check raises `WorkflowInitializing` (a `RuntimeError` subtype).
+Dashboard start, plan, retry, execute, delete and update handlers catch that type
+around the actual operation and return an initializing 503; unrelated runtime
+errors retain their existing handling. Chat-to-plan retains an early check before
+allocating its own placeholder or directory and catches the same typed exception.
+Status and cancel
+remain available. These checks run before creating or mutating run state, including
+calls from messaging channels
+that retain the gateway's runner reference. Attachment releases that gate;
+explicit attachment of `None` releases standalone fallback after initialization
+failure. Cancellation or slow I/O does not release it. Standalone and headless
+callers that never defer attachment retain their existing admission behavior.
 Workflow publication is best-effort: an unavailable registry cannot fail task
 planning or execution. Every host lifecycle checkpoint — registration, source,
 rebind, phase/step events, pause, terminal state, and deletion — awaits the workflow

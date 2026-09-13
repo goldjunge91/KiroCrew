@@ -35,6 +35,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from kiro_crew.metrics.events import WORKFLOW_RUNS, emit_counter
@@ -86,6 +87,18 @@ MAX_RUN_TIMEOUT_SECS = 6 * 3600
 # Cap on a persisted per-agent failure description: enough to identify the fault,
 # short enough that a wide fan-out of failures can't bloat the run record.
 MAX_AGENT_ERROR_CHARS = 500
+
+
+def host_now_iso() -> str:
+    """Real wall-clock UTC stamp for ONE event (the HOST clock).
+
+    Distinct from ``ctx.now`` (the fixed, script-visible run-start stamp): the
+    event journal records when each event actually happened, while the script's
+    only clock stays fixed for determinism / resume-stability. It lives in host
+    code and never reaches the sandboxed script, so it grants no new time
+    capability inside a workflow.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 def clamp_run_timeout(value: Optional[int], *, default: int = DEFAULT_RUN_TIMEOUT_SECS) -> int:
@@ -637,7 +650,7 @@ class WorkflowRunner:
         return a run_id instantly instead of blocking on a slow synchronous author.
         """
         args = args or {}
-        stream = EventStream(run_id)
+        stream = EventStream(run_id, clock=host_now_iso)
         events: list[WorkflowEvent] = []
 
         def emit(ev: WorkflowEvent) -> WorkflowEvent:
@@ -919,10 +932,15 @@ class WorkflowRunner:
                 )
             result = run_task.result()  # re-raises the script's own exception, if any
         except asyncio.CancelledError:
-            # The RUN itself was cancelled by our caller (not a timeout) — stop the
-            # in-flight script and report it as cancelled.
-            if task is not None and not task.done():
-                task.cancel()
+            # Drain owned work before publishing a terminal event, including any
+            # cleanup logs/checkpoints and exceptions raised during cancellation.
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
             await _pre_terminal()
             emit(stream.run_cancelled(now, reason="cancelled"))
             return RunResult(
