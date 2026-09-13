@@ -186,9 +186,11 @@ class TestFileRead:
 
     @pytest.mark.asyncio
     async def test_schema_violation_is_400(self, mock_sel):
-        # '$' is outside FILE_READ_SCHEMA's allowed character class.
+        # A newline in the path: FILE_READ_SCHEMA refuses it because it splits
+        # the log line the path is written into. Ordinary punctuation is NOT a
+        # violation -- a filename may legally hold it.
         async with TestClient(TestServer(self._client_app())) as client:
-            resp = await client.get("/api/file-read?path=/tmp/$evil")
+            resp = await client.get("/api/file-read?path=/tmp/a%0Ab")
             assert resp.status == 400
             assert (await resp.json())["error"] == "invalid input"
 
@@ -299,7 +301,7 @@ class TestFileWrite:
     async def test_schema_violation_is_400(self, mock_sel):
         async with TestClient(TestServer(self._client_app())) as client:
             resp = await client.post(
-                "/api/file-write", json={"path": "/tmp/$evil", "content": "x"}
+                "/api/file-write", json={"path": "/tmp/a\nb", "content": "x"}
             )
             assert resp.status == 400
             assert (await resp.json())["error"] == "invalid input"
@@ -570,7 +572,7 @@ class TestFileWatch:
     @pytest.mark.asyncio
     async def test_schema_violation_is_400(self, mock_sel):
         async with TestClient(TestServer(self._client_app())) as client:
-            resp = await client.get("/api/file-watch?path=/tmp/$evil")
+            resp = await client.get("/api/file-watch?path=/tmp/a%0Ab")
             assert resp.status == 400
             assert (await resp.json())["error"] == "invalid input"
 

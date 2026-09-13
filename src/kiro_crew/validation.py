@@ -2573,7 +2573,22 @@ HOOK_UPDATE_SCHEMA = ToolSchema(
 #: the caller appears to name) has a ``:`` in the body and is still refused.
 #: A drive-relative path (``C:x``) is likewise refused -- it resolves against a
 #: per-drive working directory the caller cannot see.
-_FS_PATH_PATTERN = re.compile(r"^(?:[~/]|[A-Za-z]:[\\/]|\\\\)[-\w.@~/\\ ]+$")
+#:
+#: The body is a DENYLIST, not an allowlist of punctuation. Every filesystem
+#: this gate fronts accepts any byte but the separator and NUL in a name, so an
+#: enumerated allowlist refuses legal files -- ``Notes (draft).md``,
+#: ``Q1 2026 #2.md``, ``50% done.md``, ``report [final].md`` -- and returns
+#: HTTP 400 for each. Only two classes are hazards in the path *string* itself
+#: and both stay refused: a control character, which truncates at NUL, splits a
+#: log line at CR/LF, and injects a terminal escape at ESC or at the 8-bit C1
+#: forms a UTF-8 terminal decodes the same way (U+0085 NEL, U+009B CSI); and
+#: ``:`` in the body, for the alternate-data-stream reason above. The deny range
+#: therefore spans C0, DEL and C1 -- no filesystem name legitimately carries a
+#: control character, so the wider range costs nothing. Nothing else is excluded,
+#: because nothing downstream interprets the string: every subprocess in the
+#: file handlers is ``exec``-form argv with no shell, and the required absolute
+#: prefix means the path can never be read as a leading-dash option.
+_FS_PATH_PATTERN = re.compile(r"^(?:[~/]|[A-Za-z]:[\\/]|\\\\)[^\x00-\x1f\x7f-\x9f:]+$")
 
 FILE_READ_SCHEMA = ToolSchema(
     tool_name="file_read",

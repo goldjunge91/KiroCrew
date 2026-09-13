@@ -2194,10 +2194,38 @@ async def api_workspaces_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+#: Every control character: C0, DEL, and the C1 block.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
 def _validate_dashboard_path(raw: str) -> str | None:
-    """Validate a file path through hooks.py enforcement layer."""
+    """Validate a file path through hooks.py enforcement layer.
+
+    Refuses a control character in the RAW path first. ``FILE_READ_SCHEMA``
+    declares that class but cannot enforce it: ``validate_tool_args`` matches the
+    *sanitized* copy of the value, from which ``strip_hidden_unicode`` has already
+    removed every control character but CR, LF and TAB, while the raw string is
+    what travels on. So the class is unobservable at the schema and has to be
+    refused here.
+
+    It is refused HERE rather than inside ``validate_file_path`` because that is a
+    shared chokepoint whose other callers deliberately handle such a name -- a
+    diagnostic that enumerates an agent-writeable directory reports on a
+    control-character-named file and escapes the name for display, and refusing it
+    there would suppress that report. The class is a property of what this
+    boundary accepts from a caller, not of what a path can be.
+
+    What it buys at this boundary: the raw path is recorded in the request's audit
+    entry and echoed in diagnostics, so CR or LF forges a line and ESC or an 8-bit
+    C1 (U+009B CSI, U+0085 NEL) is a terminal escape. No file a dashboard caller
+    means to open is named with one, so the refusal costs nothing legitimate --
+    unlike the punctuation an allowlist omits, which is the defect this gate's
+    denylist exists to stop causing.
+    """
     from kiro_crew.hooks import validate_file_path  # noqa: F811
 
+    if _CONTROL_CHARS_RE.search(raw):
+        return None
     return validate_file_path(raw)
 
 
