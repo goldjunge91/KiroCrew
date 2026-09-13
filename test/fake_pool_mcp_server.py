@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 
 def main() -> int:
@@ -60,6 +61,16 @@ def main() -> int:
     # violation.
     with open(log, "a", encoding="utf-8") as fh:
         fh.write(f"{os.getpid()}\n")
+
+    # Optional slow handshake, for the admission tests: sleep this long before
+    # answering ``initialize`` so spawn+initialize windows overlap and the
+    # daemon's spawn gate has something to bound. ``FAKE_POOL_WINDOW_LOG`` then
+    # records ``<pid> <launch_epoch> <init_answered_epoch>`` per process, from
+    # which a test computes how many windows were ever open at once -- again a
+    # closed-box observation, needing nothing from the pool's internals.
+    init_delay = float(os.environ.get("FAKE_POOL_INIT_DELAY_SECS", "0") or 0)
+    window_log = os.environ.get("FAKE_POOL_WINDOW_LOG", "")
+    launched_at = time.time()
 
     for line in sys.stdin:
         line = line.strip()
@@ -91,6 +102,11 @@ def main() -> int:
             continue
         if method != "initialize":
             continue
+        if init_delay > 0:
+            time.sleep(init_delay)
+        if window_log:
+            with open(window_log, "a", encoding="utf-8") as fh:
+                fh.write(f"{os.getpid()} {launched_at:.6f} {time.time():.6f}\n")
         params = msg.get("params") or {}
         capabilities: dict = {"tools": {}}
         if caller_log or tenant_log:

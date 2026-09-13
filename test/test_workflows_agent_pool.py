@@ -558,3 +558,240 @@ def test_max_turns_constant_is_shared_with_agent_exec():
     from kiro_crew.workflows import agent_exec, agent_pool
 
     assert agent_pool._MAX_TURNS_PER_STEP is agent_exec._MAX_TURNS_PER_STEP
+
+
+# ── taskq admission: the effective cap bounds the pool ────────────────────────
+
+
+class _Peak:
+    """Counts overlapping calls through a wrapped agent_fn."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.peak = 0
+
+    def wrap(self, agent_fn):
+        async def _fn(prompt, opts):
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            try:
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                return await agent_fn(prompt, opts)
+            finally:
+                self.active -= 1
+
+        return _fn
+
+
+def _admission(cap: int, *, mode: str = "aimd", store=None):
+    from kiro_crew.taskq.adapters.runner import RunnerAdmission, RunnerLane
+
+    return RunnerAdmission(store, lane=RunnerLane(cap, mode=mode))
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_honours_the_effective_cap_beneath_max_workers():
+    """The lane's effective cap, not the pool's max_workers, is the live bound."""
+    from kiro_crew.workflows.agent_pool import admitted_agent_fn
+
+    sessions = _FakeSessions()
+    agent_fn, pool = build_pooled_agent_fn(sessions, run_id="cap1", max_workers=4)
+    adm = _admission(2)
+    peak = _Peak()
+    fn = admitted_agent_fn(peak.wrap(agent_fn), adm, run_id="cap1", session_key="chat:a")
+    try:
+        await asyncio.gather(*(fn(f"t{i}", {}) for i in range(6)))
+    finally:
+        await pool.shutdown()
+    assert peak.peak == 2  # pool would allow 4; the effective cap says 2
+    assert sessions.cold_starts <= 2
+    assert adm.lane.running == 0 and adm.lane.stats()["granted"] == 6
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_follows_a_cap_change_mid_run():
+    """set_effective_cap (the adaptive controller's actuator) lowers the bound live."""
+    from kiro_crew.workflows.agent_pool import admitted_agent_fn
+
+    sessions = _FakeSessions()
+    agent_fn, pool = build_pooled_agent_fn(sessions, run_id="cap2", max_workers=4)
+    adm = _admission(3)
+    peak = _Peak()
+    fn = admitted_agent_fn(peak.wrap(agent_fn), adm, run_id="cap2", session_key="chat:a")
+    try:
+        first = [asyncio.create_task(fn(f"a{i}", {})) for i in range(3)]
+        await asyncio.sleep(0)
+        assert adm.lane.running == 3
+        assert adm.lane.set_effective_cap(1) == 1  # pressure: 3 -> 1
+        await asyncio.gather(*first)
+        peak.peak = 0
+        await asyncio.gather(*(fn(f"b{i}", {}) for i in range(4)))
+        assert peak.peak == 1  # the lowered cap holds for the rest of the run
+        adm.lane.set_effective_cap(None)
+        peak.peak = 0
+        await asyncio.gather(*(fn(f"c{i}", {}) for i in range(4)))
+        assert peak.peak == 3  # lifted: back to the ceiling
+        assert adm.lane.set_effective_cap(0) == 0  # paused: nothing new is granted
+        parked = asyncio.create_task(fn("d0", {}))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert adm.lane.waiting == 1 and not parked.done()
+        adm.lane.set_effective_cap(2)
+        assert (await parked).endswith("d0")
+    finally:
+        await pool.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_worker_pool_fixed_mode_ignores_the_actuator():
+    from kiro_crew.workflows.agent_pool import admitted_agent_fn
+
+    sessions = _FakeSessions()
+    agent_fn, pool = build_pooled_agent_fn(sessions, run_id="fix", max_workers=4)
+    adm = _admission(2, mode="fixed")
+    adm.lane.set_effective_cap(1)  # pinned: the controller cannot move it
+    peak = _Peak()
+    fn = admitted_agent_fn(peak.wrap(agent_fn), adm, run_id="fix")
+    try:
+        await asyncio.gather(*(fn(f"t{i}", {}) for i in range(5)))
+    finally:
+        await pool.shutdown()
+    assert peak.peak == 2
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_calls_are_rows_in_the_launching_sessions_lane(tmp_path):
+    """Every ctx.agent() call is a workflow_agent row: written before it runs, settled after."""
+    from kiro_crew.taskq import model as m
+    from kiro_crew.taskq.store import TaskStore
+    from kiro_crew.workflows.agent_pool import admitted_agent_fn
+
+    store = TaskStore(tmp_path / "tasks.db", network_fs=False).open()
+    try:
+        sessions = _FakeSessions()
+        agent_fn, pool = build_pooled_agent_fn(sessions, run_id="rows", max_workers=2)
+        adm = _admission(2, store=store)
+        fn = admitted_agent_fn(agent_fn, adm, run_id="rows", session_key="chat:bob")
+        try:
+            out = await asyncio.gather(fn("p1", {}), fn("p2", {"model": "m2"}))
+        finally:
+            await pool.shutdown()
+        assert all(o.endswith(("p1", "p2")) for o in out)
+        rows = sorted(store.list_rows(kind=m.KIND_WORKFLOW_AGENT), key=lambda x: x.id)
+        assert [x.id for x in rows] == ["workflow:rows:agent1", "workflow:rows:agent2"]
+        assert all(x.state == m.DONE and x.params["lane"] == "chat:bob" for x in rows)
+        assert rows[1].provider == "m2"
+        kinds = [e.kind for e in store.events("workflow:rows:agent1")]
+        assert kinds[:2] == ["accepted", "claimed"] and kinds.count("claimed") == 1
+
+        # A cron-launched run (no session) queues in the system lane.
+        agent_fn2, pool2 = build_pooled_agent_fn(sessions, run_id="rows2", max_workers=1)
+        try:
+            await admitted_agent_fn(agent_fn2, adm, run_id="rows2", source="cron")("p", {})
+        finally:
+            await pool2.shutdown()
+        assert store.get("workflow:rows2:agent1").params["lane"] == "system"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_failure_settles_the_row_failed(tmp_path):
+    from kiro_crew.taskq import model as m
+    from kiro_crew.taskq.store import TaskStore
+    from kiro_crew.workflows.agent_pool import admitted_agent_fn
+
+    store = TaskStore(tmp_path / "tasks.db", network_fs=False).open()
+    try:
+
+        async def _boom(prompt, opts):
+            raise RuntimeError("model exploded")
+
+        adm = _admission(1, store=store)
+        fn = admitted_agent_fn(_boom, adm, run_id="bad", session_key="chat:c")
+        with pytest.raises(RuntimeError, match="model exploded"):
+            await fn("p", {})
+        row = store.get("workflow:bad:agent1")
+        assert row.state == m.FAILED and adm.lane.running == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_workflow_agent_rate_limit_waits_then_retries(tmp_path):
+    """A 429 parks the call in waiting_dependency (slot released) and re-runs it on wake."""
+    from kiro_crew.taskq import model as m
+    from kiro_crew.taskq.adapters.runner import RunnerAdmission, RunnerLane
+    from kiro_crew.taskq.dependency import KIND_RATE_LIMITED, SIGNAL_ATTR, DependencySignal
+    from kiro_crew.taskq.store import TaskStore
+    from kiro_crew.workflows.agent_pool import admitted_agent_fn
+
+    now = {"t": 100.0}
+    store = TaskStore(tmp_path / "tasks.db", network_fs=False, clock=lambda: now["t"]).open()
+    try:
+        adm = RunnerAdmission(store, lane=RunnerLane(1), clock=lambda: now["t"])
+        calls = []
+
+        async def _flaky(prompt, opts):
+            calls.append(prompt)
+            if len(calls) == 1:
+                exc = RuntimeError("HTTP 429")
+                setattr(
+                    exc,
+                    SIGNAL_ATTR,
+                    DependencySignal(
+                        kind=KIND_RATE_LIMITED, dependency_scope="prov", source="t", retry_at=130.0
+                    ),
+                )
+                raise exc
+            return "ok"
+
+        fn = admitted_agent_fn(_flaky, adm, run_id="rl", session_key="chat:d")
+        task = asyncio.create_task(fn("p", {}))
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if store.get("workflow:rl:agent1").state == m.WAITING_DEPENDENCY:
+                break
+        assert store.get("workflow:rl:agent1").state == m.WAITING_DEPENDENCY
+        assert adm.lane.running == 0
+        now["t"] = 131.0
+        assert adm.tick() == ["workflow:rl:agent1"]
+        assert await task == "ok"
+        assert len(calls) == 2 and store.get("workflow:rl:agent1").state == m.DONE
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_service_attach_settles_orphaned_workflow_agent_rows(tmp_path):
+    """A workflow restarts through its registry: orphaned call rows never re-dispatch."""
+    from kiro_crew.taskq import model as m
+    from kiro_crew.taskq.store import TaskStore
+    from kiro_crew.workflows.service import WorkflowService
+
+    store = TaskStore(tmp_path / "tasks.db", network_fs=False).open()
+    try:
+        for row_id, safe in (("workflow:old:agent1", True), ("workflow:old:agent2", False)):
+            store.accept_one(
+                m.TaskRecord(id=row_id, kind=m.KIND_WORKFLOW_AGENT, params={"safe_retry": safe})
+            )
+            store.claim(row_id, owner="dead")
+            store.transition(row_id, m.STARTING)
+            store.transition(row_id, m.RUNNING)
+        svc = WorkflowService(sessions=_FakeSessions(), persist=False, pool_agents=True)
+        adm = _admission(2, store=store)
+        svc.attach_task_admission(adm)
+        assert svc.task_admission is adm
+        report = await svc.adopt_task_rows()
+        assert report.failed == ["workflow:old:agent1"]
+        assert report.unknown_side_effect == ["workflow:old:agent2"]
+        assert store.get("workflow:old:agent1").state == m.FAILED
+        assert store.get("workflow:old:agent2").state == m.UNKNOWN_SIDE_EFFECT
+        # The runner the service builds meters its agent_fn through the lane.
+        runner = svc._runner("new", session_key="chat:z")
+        assert runner is not None
+        svc.attach_task_admission(None)
+        assert svc.task_admission is None
+    finally:
+        store.close()

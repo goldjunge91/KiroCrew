@@ -29,6 +29,30 @@ def emit_counter(name: str, attrs: dict[str, str | int | bool | float]) -> None:
         logger.debug("counter emit failed for %s", name, exc_info=True)
 
 
+def emit_histogram(
+    name: str,
+    value: float,
+    attrs: dict[str, str | int | bool | float],
+    *,
+    unit: str = "1",
+) -> None:
+    """Record one *value* observation on histogram *name*; never raises.
+
+    The sampled series below (queue depth, oldest wait, effective caps, host
+    peaks, loop lag, recovery duration) are observations taken by a sampler on
+    its own cadence, so a histogram -- whose MAX/last reading the aggregator
+    can take per attribute set -- is the right instrument: a gauge would need
+    an observable callback registered on the provider's live path, which the
+    facade cannot reach without the import cycle documented above.
+    """
+    try:
+        from kiro_crew.metrics.provider import get_recorder
+
+        get_recorder().histogram(name, value, unit=unit, attrs=attrs)
+    except Exception:  # telemetry must never break the caller
+        logger.debug("histogram emit failed for %s", name, exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Hang-resilience series (see docs in the emitting call sites)
 # ---------------------------------------------------------------------------
@@ -104,6 +128,18 @@ CONTEXT_COMPACTIONS = "kirocrew.context.compactions"
 #: daemon instability that sessions are absorbing silently.
 MCP_RECONNECTS = "kirocrew.mcp.reconnects"
 
+#: One per watchdog cycle in which the gateway daemon missed its full run of
+#: liveness pings but its own self-report (``self_report.read_last_probe``)
+#: proved it alive and serving from the same pid within the report's freshness
+#: window -- so the supervisor kept it instead of SIGKILLing it. Each increment
+#: is a kill the daemon's own word averted: the daemon was overloaded, not dead.
+#: A rising rate is a daemon running near saturation (each increment is a kill
+#: that would have severed every session's MCP transport), which is capacity
+#: pressure to act on, not instability that healed. Deliberately no attributes:
+#: the connection and task counts that describe the overload grow with load and
+#: belong in the warning line, never in a series key.
+MCP_GATEWAY_LIVENESS_OVERLOADED = "kirocrew.mcp.gateway.liveness_overloaded"
+
 #: One per tool-approval decision from the per-surface gate
 #: (``hooks.HookManager.on_tool_call``), which every surface consults before a
 #: tool runs. ``decision`` is the gate's own bounded action: ``auto_approve``
@@ -117,3 +153,68 @@ MCP_RECONNECTS = "kirocrew.mcp.reconnects"
 #: exactly as they are: they measure a specific hang-resilience fix on the
 #: child-permission path, and their population is not this one's.
 APPROVAL_DECISIONS = "kirocrew.approval.decisions"
+
+#: One per adaptive-concurrency decision that CHANGED a cap or the paused flag
+#: (``adaptive.controller``). ``action`` is the policy's closed action enum:
+#: ``decrease`` (a corroborated-pressure halving), ``increase`` (a +1 earned by
+#: a clean window), ``pause`` (dispatch stopped under severe pressure),
+#: ``probe`` (one task admitted to test the recovery) and ``resume`` (the probe
+#: completed). Holds and fixed-mode ticks are not counted: the series measures
+#: how often the host made the controller act, not how often it looked. The
+#: cap values themselves grow with the host and belong in the state snapshot,
+#: never in a series key.
+ADAPTIVE_DECISIONS = "kirocrew.adaptive.decisions"
+
+
+# ---------------------------------------------------------------------------
+# Overload-resilience series (RFC overload-resilience §10) — every attribute
+# value is a member of a closed set: a task STATE, a LAYER name, a LANE KIND,
+# a PRESSURE REASON, a PROCESS role. Never a task id, a session key, a slot
+# key, a backend key, a hostname.
+# ---------------------------------------------------------------------------
+
+#: Sampled depth of the durable task queue per state (``state`` is one of the
+#: 13 ``taskq.model`` states). Emitted by the structured health sampler
+#: (``dashboard/session_health.py``) on each health computation.
+TASKQ_DEPTH = "kirocrew.taskq.depth"
+
+#: Sampled age (seconds) of the oldest row still waiting for dispatch.
+TASKQ_OLDEST_WAIT_SECS = "kirocrew.taskq.oldest_wait_secs"
+
+#: One per task reaching a terminal state; ``outcome`` is the terminal state
+#: name. The aggregator's rate over this IS the completion rate the RFC names
+#: (``taskq_completion_rate``); a pre-computed rate would need its own window.
+TASKQ_COMPLETIONS = "kirocrew.taskq.completions"
+
+#: Sampled effective concurrency cap per ``lane_kind`` (``subagents``,
+#: ``spawn_gate``): the value the controller is currently enforcing, which is
+#: the user's maximum only when nothing is degraded.
+TASKQ_EFFECTIVE_CAP = "kirocrew.taskq.effective_cap"
+
+#: One per health sample taken while a pressure reason is active; ``reason``
+#: is the controller's closed reason enum (``memory``, ``loop_lag``,
+#: ``provider_throttle``, ``start_latency``, ``fd``, ``procs``, ``manual``).
+TASKQ_PRESSURE_REASON = "kirocrew.taskq.pressure_reason"
+
+#: Sampled peaks the host budget observed since the previous sample.
+HOST_PROCS_PEAK = "kirocrew.host.procs_peak"
+HOST_FDS_PEAK = "kirocrew.host.fds_peak"
+HOST_RSS_PEAK_MB = "kirocrew.host.rss_peak_mb"
+
+#: Sampled event-loop lag per ``process`` (``gateway``, ``gatewayd``).
+LOOP_LAG_MS = "kirocrew.loop.lag_ms"
+
+#: One observation per recovered unit: seconds from its first failure at
+#: ``layer`` to the success that closed the run (``recovery.ladder``).
+RECOVERY_DURATION_SECS = "kirocrew.recovery.duration_secs"
+
+#: One per recovery decision; ``layer`` + ``action`` (``retry`` /
+#: ``escalate`` / ``notify`` / ``give_up``).
+RECOVERY_ATTEMPTS = "kirocrew.recovery.attempts"
+
+#: One per hand-up the ladder took; ``from_layer`` / ``to_layer``.
+RECOVERY_ESCALATIONS = "kirocrew.recovery.escalations"
+
+#: One per rebuild a layer performed (a backend respawn, a runtime rebuild, a
+#: daemon respawn); ``layer``.
+RESTARTS_TOTAL = "kirocrew.recovery.restarts"

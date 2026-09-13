@@ -52,6 +52,8 @@ from kiro_crew import (
     shutdown_event,
 )
 from kiro_crew.acp.client import AcpError, AcpProcessDied
+from kiro_crew.adaptive import controller as adaptive_controller
+from kiro_crew.adaptive.controller import AdaptiveController
 from kiro_crew.agent_sdk import AgentTurnUsage
 from kiro_crew.agents_janitor import sweep_agents_dir
 from kiro_crew.autonudge import (
@@ -1737,6 +1739,10 @@ class GatewayOrchestrator:
         # as an inert None so other modules referencing it degrade gracefully.
         self.secretary_svc: object | None = None
         self.subagent_mgr: SubagentManager | None = None
+        # Adaptive concurrency controller: started by _start_adaptive_controller
+        # right after the subagent manager, stopped in shutdown before the
+        # manager is cancelled so no actuator fires into a closing manager.
+        self._adaptive_controller: AdaptiveController | None = None
         self._subagent_coalescer_inst: "SubagentEventCoalescer | None" = None
         # Wave accounting for the completion digest (batch_id -> progress).
         self._batch_progress: dict[str, dict] = {}
@@ -1745,6 +1751,8 @@ class GatewayOrchestrator:
             set()
         )  # job IDs with in-flight script/command execution
         self.task_runner: TaskRunner | None = None
+        # Runner admission over the task queue, attached by _wire_runner_admission
+        self._runner_admission: Any = None
         self.channel_history: ChannelHistory | None = None
         self.dashboard_state: DashboardState | None = None
         self._background_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
@@ -7909,6 +7917,16 @@ class GatewayOrchestrator:
                 )
             elif info.error:
                 detail = f"Error: {info.error}"
+                # A run that ended on a stall / cancel / transport death keeps
+                # what it streamed as a flagged PARTIAL (``info.partial``, set by
+                # the stop-reason classifier in subagent_manager/run.py); deliver
+                # it so the parent continues from it instead of re-submitting the
+                # whole task.
+                if info.partial and info.result:
+                    detail += (
+                        "\n\nPartial output (the run did NOT finish — do not treat "
+                        f"this as a completed result):\n{info.result}"
+                    )
             elif result_path and (info.result_truncated or _is_orchestrator):
                 detail = summarize_result(info.result, result_path)
             else:
@@ -9143,6 +9161,170 @@ class GatewayOrchestrator:
             completion_keep_chars=self._cfg.agent.completion_keep_chars,
         )
         self.subagent_mgr.start_reaper()
+        self._start_adaptive_controller()
+
+    def _start_adaptive_controller(self) -> None:
+        """Run the adaptive concurrency controller beside the subagent manager.
+
+        It bounds the manager's live cap beneath the user's ceiling and moves
+        the MCP daemon's spawn gate through ``GatewayManager.set_spawn_capacity``
+        (read through ``self._mcp_gateway_manager`` at call time, so a broker
+        that starts or restarts later is picked up without rewiring).
+        """
+        if self.subagent_mgr is None:
+            return
+
+        async def _set_gate(capacity: int) -> int | None:
+            mgr = self._mcp_gateway_manager
+            return None if mgr is None else await mgr.set_spawn_capacity(capacity)
+
+        async def _gate_stats() -> dict:
+            mgr = self._mcp_gateway_manager
+            return {} if mgr is None else await mgr.stats()
+
+        cfg_gw = self._cfg.mcp_gateway
+        try:
+            controller = AdaptiveController(
+                self.subagent_mgr,
+                cfg=self._cfg,
+                set_gate_capacity=_set_gate,
+                read_gate_stats=_gate_stats,
+                gate_initial=int(getattr(cfg_gw, "spawn_concurrency_initial", 4)),
+                gate_floor=int(getattr(cfg_gw, "spawn_concurrency_min", 1)),
+                gate_ceiling=int(getattr(cfg_gw, "spawn_concurrency_max", 8)),
+            )
+            controller.start()
+        except Exception:
+            logger.warning("adaptive concurrency controller failed to start", exc_info=True)
+            return
+        self._adaptive_controller = controller
+        adaptive_controller.register(controller)
+        self._wire_overload_health(controller)
+
+    def _wire_overload_health(self, controller: AdaptiveController) -> None:
+        """Publish the controller's caps and degrade reason to session health,
+        and the subagent manager's dependency coordinator to the process.
+
+        ``session_health`` renders ``effective_caps`` per lane and one
+        ``degrade_reason``; both are pulled through the sources registered
+        here at compute time, so the health payload never holds a stale copy.
+        The degrade reason is a closed-set token (``adaptive_<action>``) because
+        it is also a metric attribute. The dependency coordinator is whatever
+        the manager built beside its task store; ``register_coordinator`` is
+        how a caller with no task row (main chat, monitors) reads the shared
+        ``retry_at`` for a scope.
+        """
+        from kiro_crew.dashboard import session_health
+        from kiro_crew.taskq import dependency as taskq_dependency
+
+        def _spawn_gate_cap() -> dict | None:
+            state = controller.state()
+            if not state.get("enabled"):
+                return None
+            return {
+                "effective": state.get("spawn_gate_capacity"),
+                "applied": state.get("applied_gate_cap"),
+                "pending": state.get("gate_pending"),
+                "floor": state.get("gate_floor"),
+                "ceiling": state.get("gate_ceiling"),
+            }
+
+        def _exec_cap() -> dict | None:
+            state = controller.state()
+            if not state.get("enabled"):
+                return None
+            return {
+                "adaptive": state.get("effective_exec_cap"),
+                "ceiling": state.get("exec_ceiling"),
+                "paused": bool(state.get("paused")),
+                "probing": bool(state.get("probing")),
+            }
+
+        def _degrade_reason() -> str | None:
+            state = controller.state()
+            if state.get("paused"):
+                return "adaptive_pause"
+            if state.get("probing"):
+                return "adaptive_probe"
+            last = state.get("last") or {}
+            action = last.get("action") if isinstance(last, dict) else None
+            return "adaptive_decrease" if action == "decrease" else None
+
+        monitor = session_health.default_monitor()
+        monitor.register_cap_source("spawn_gate", _spawn_gate_cap)
+        monitor.register_cap_source("subagents", _exec_cap)
+        monitor.register_pressure_source(_degrade_reason)
+
+        coordinator = getattr(self.subagent_mgr, "dependency_coordinator", None)
+        if callable(coordinator):
+            coordinator = coordinator()
+        if coordinator is not None:
+            taskq_dependency.register_coordinator(coordinator)
+
+    def _unwire_overload_health(self) -> None:
+        """Drop the health sources and the coordinator handle at shutdown so a
+        late health read reports no caps instead of a stopped controller's."""
+        from kiro_crew.dashboard import session_health
+        from kiro_crew.taskq import dependency as taskq_dependency
+
+        session_health.default_monitor().clear_sources()
+        taskq_dependency.register_coordinator(None)
+        self._unwire_runner_admission()
+
+    def _wire_runner_admission(self) -> None:
+        """Put TaskRunner steps and workflow ``ctx.agent()`` calls on the task queue.
+
+        One :class:`RunnerAdmission` over the subagent manager's store and
+        effective cap (so the adaptive controller's decision moves the runner
+        lane too), attached to the TaskRunner and the WorkflowService. The
+        manager's dependency coordinator owns every scope schedule; the
+        runner's waiters subscribe to its wake / give-up hooks so a 429 seen
+        by a TaskRunner step and one seen by a sub-agent share ONE retry
+        instant. Without a coordinator (queue disabled) the runner's own
+        ``tick`` wakes its time-based waits from the reaper sweep.
+        """
+        mgr = self.subagent_mgr
+        if mgr is None:
+            return
+        try:
+            from kiro_crew.recovery.ladder import default_ladder
+            from kiro_crew.taskq.adapters.runner import runner_admission_for
+
+            coordinator = getattr(mgr, "dependency_coordinator", None)
+            if callable(coordinator):
+                coordinator = coordinator()
+            admission = runner_admission_for(
+                mgr, cfg=self._cfg, ladder=default_ladder(), coordinator=coordinator
+            )
+            if coordinator is not None:
+                coordinator.subscribe(
+                    on_wake=admission.on_wake,
+                    on_fail=lambda task_id, _reason: admission.on_wake(task_id),
+                )
+            else:
+                setattr(mgr, "_runner_admission_tick", admission.tick)
+        except Exception:
+            logger.warning("runner task admission not wired", exc_info=True)
+            return
+        self._runner_admission = admission
+        if self.task_runner is not None:
+            self.task_runner.attach_task_admission(admission)
+        workflow_service = getattr(self.dashboard_state, "workflow_service", None)
+        if workflow_service is not None:
+            workflow_service.attach_task_admission(admission)
+
+    def _unwire_runner_admission(self) -> None:
+        admission = getattr(self, "_runner_admission", None)
+        if admission is None:
+            return
+        self._runner_admission = None
+        if self.task_runner is not None:
+            self.task_runner.attach_task_admission(None)
+        workflow_service = getattr(self.dashboard_state, "workflow_service", None)
+        if workflow_service is not None:
+            workflow_service.attach_task_admission(None)
+        if self.subagent_mgr is not None and hasattr(self.subagent_mgr, "_runner_admission_tick"):
+            delattr(self.subagent_mgr, "_runner_admission_tick")
 
     def _start_dashboard_workers_after_memory_ready(self) -> None:
         """Start dashboard workers whose restored jobs may enter memory."""
@@ -9791,6 +9973,15 @@ class GatewayOrchestrator:
                 max_backends=cfg_gw.max_backends,
                 mcp_target_env=target_env,
                 prewarm_count=cfg_gw.prewarm_count,
+                # Admission keys ride the daemon's argv like max_backends.
+                spawn_concurrency_initial=cfg_gw.spawn_concurrency_initial,
+                spawn_concurrency_min=cfg_gw.spawn_concurrency_min,
+                spawn_concurrency_max=cfg_gw.spawn_concurrency_max,
+                spawn_queue_wait_secs=cfg_gw.spawn_queue_wait_secs,
+                initialize_timeout_secs=cfg_gw.initialize_timeout_secs,
+                host_budget_max_procs=cfg_gw.host_budget_max_procs,
+                host_budget_max_rss_mb=cfg_gw.host_budget_max_rss_mb,
+                host_budget_max_fds=cfg_gw.host_budget_max_fds,
             )
         )
         # Pre-resolve npm-launcher targets in the background. An npx spec asks the
@@ -10156,6 +10347,10 @@ class GatewayOrchestrator:
 
         # Kill all ACP processes and close connections
         cleanup_tasks: list = []
+        if self._adaptive_controller is not None:
+            adaptive_controller.register(None)
+            self._unwire_overload_health()
+            cleanup_tasks.append(self._adaptive_controller.stop())
         if self.subagent_mgr:
             cleanup_tasks.append(self.subagent_mgr.cancel_all())
         if self.sessions:
@@ -11823,6 +12018,10 @@ class GatewayOrchestrator:
             await self._init_dashboard()
         else:
             await self._init_api_server()
+        # TaskRunner + workflow agent calls join the durable task queue and the
+        # runner lane now that both consumers exist (the WorkflowService is
+        # built by the dashboard server).
+        self._wire_runner_admission()
 
         # The dashboard/API socket is bound now. A missing wrapper can take the
         # full pip timeout to repair, so track that work without delaying READY.
@@ -11883,6 +12082,8 @@ class GatewayOrchestrator:
         if not await self._wait_for_memory_preparation():
             await self._shutdown_and_exit()
             return
+        if self.subagent_mgr is not None:
+            await self.subagent_mgr.wait_taskq_ready()
 
         # Persisted Crew work and legacy channel agents can dispatch providers
         # immediately when resumed, so start them only after the shared memory

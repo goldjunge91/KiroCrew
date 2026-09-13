@@ -41,7 +41,11 @@ class WaveDigestCoordinator(ManagerComponent):
             return True  # submissions still in flight
         if any(a.batch_id == batch_id and not a.done for a in self._manager._agents.values()):
             return True
-        return any(p.get("batch_id") == batch_id for p in self._manager._queue)
+        if any(p.get("batch_id") == batch_id for p in self._manager._queue):
+            return True
+        # A member queued in the store outside the in-memory window also holds
+        # the wave open.
+        return self._manager._admission.taskq_batch_pending(batch_id)
 
     def finalize_batch_impl(self, batch_id: str) -> None:
         """Prune per-wave bookkeeping once the wave digest has fired.
@@ -136,6 +140,8 @@ class WaveDigestCoordinator(ManagerComponent):
                 continue  # live members will re-evaluate the wave on completion
             if any(p.get("batch_id") == batch_id for p in self._manager._queue):
                 continue  # queued members still pending — not stuck
+            if self._manager._admission.taskq_batch_pending(batch_id):
+                continue  # store-only queued members still pending
             parent = members[0].parent_session_key if members else ""
             logger.warning(
                 "Reaper: wave %s stuck (%d/%d submitted, no progress for %.0fs)"

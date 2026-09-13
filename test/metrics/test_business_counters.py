@@ -219,14 +219,28 @@ class TestCallSitesAreWired:
         "WORKFLOW_RUNS": "workflows/runner.py",
         "CONTEXT_COMPACTIONS": "session_compaction.py",
         "MCP_RECONNECTS": "mcp_gateway/stub.py",
+        "MCP_GATEWAY_LIVENESS_OVERLOADED": "mcp_gateway/manager.py",
         "APPROVAL_DECISIONS": "hooks.py",
+        "ADAPTIVE_DECISIONS": "adaptive/controller.py",
+        # Overload-resilience series (RFC §10). Sampled ones are emitted by the
+        # structured health sampler; the recovery ones by the ladder; the
+        # completion counter at the one funnel every terminal task write crosses.
+        "TASKQ_DEPTH": "dashboard/session_health.py",
+        "TASKQ_OLDEST_WAIT_SECS": "dashboard/session_health.py",
+        "TASKQ_EFFECTIVE_CAP": "dashboard/session_health.py",
+        "TASKQ_PRESSURE_REASON": "dashboard/session_health.py",
+        "TASKQ_COMPLETIONS": "taskq/store.py",
+        "RECOVERY_ATTEMPTS": "recovery/ladder.py",
+        "RECOVERY_ESCALATIONS": "recovery/ladder.py",
+        "RECOVERY_DURATION_SECS": "recovery/ladder.py",
+        "RESTARTS_TOTAL": "recovery/ladder.py",
     }
 
     @pytest.mark.parametrize("const,rel", sorted(OWNERS.items()))
     def test_the_owning_module_emits_the_counter(self, const, rel):
         src = (Path(ev.__file__).resolve().parent.parent / rel).read_text(encoding="utf-8")
         assert const in src, f"{rel} must emit {const}"
-        assert "emit_counter" in src
+        assert "emit_counter" in src or "emit_histogram" in src
 
     def test_every_declared_counter_has_an_owner(self):
         """A constant with no call site is a metric nobody can read."""
@@ -257,7 +271,12 @@ class TestAttributeValuesAreBounded:
             "workflows/runner.py",
             "session_compaction.py",
             "mcp_gateway/stub.py",
+            "mcp_gateway/manager.py",
             "hooks.py",
+            "adaptive/controller.py",
+            "dashboard/session_health.py",
+            "taskq/store.py",
+            "recovery/ladder.py",
         ],
     )
     def test_no_emit_passes_an_f_string_or_a_concatenation(self, rel):
@@ -268,11 +287,46 @@ class TestAttributeValuesAreBounded:
                 continue
             func = node.func
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-            if name != "emit_counter":
+            if name not in ("emit_counter", "emit_histogram"):
                 continue
-            attrs = node.args[1] if len(node.args) > 1 else None
+            # emit_counter(name, attrs) / emit_histogram(name, value, attrs)
+            attrs_index = 1 if name == "emit_counter" else 2
+            attrs = node.args[attrs_index] if len(node.args) > attrs_index else None
             assert isinstance(attrs, ast.Dict), f"{rel}: attrs must be a literal dict"
             for value in attrs.values:
                 assert not isinstance(
                     value, (ast.JoinedStr, ast.BinOp)
                 ), f"{rel}: an interpolated attribute value is unbounded"
+
+
+class TestOverloadSeriesNames:
+    """The RFC §10 names exist, validate, and carry only closed-set attributes."""
+
+    NAMES = [
+        "TASKQ_DEPTH",
+        "TASKQ_OLDEST_WAIT_SECS",
+        "TASKQ_COMPLETIONS",
+        "TASKQ_EFFECTIVE_CAP",
+        "TASKQ_PRESSURE_REASON",
+        "HOST_PROCS_PEAK",
+        "HOST_FDS_PEAK",
+        "HOST_RSS_PEAK_MB",
+        "LOOP_LAG_MS",
+        "RECOVERY_DURATION_SECS",
+        "RECOVERY_ATTEMPTS",
+        "RECOVERY_ESCALATIONS",
+        "RESTARTS_TOTAL",
+    ]
+
+    @pytest.mark.parametrize("const", NAMES)
+    def test_name_is_declared_and_valid(self, const):
+        from kiro_crew.metrics.schema import validate_name
+
+        value = getattr(ev, const)
+        assert value.startswith("kirocrew.")
+        assert validate_name(value) == value
+
+    def test_emit_histogram_never_raises(self, rec):
+        ev.emit_histogram(ev.RECOVERY_DURATION_SECS, 1.5, {"layer": "L1_tool_call"}, unit="s")
+        with patch("kiro_crew.metrics.provider.get_recorder", side_effect=RuntimeError("x")):
+            ev.emit_histogram(ev.TASKQ_DEPTH, 1.0, {"state": "queued"})

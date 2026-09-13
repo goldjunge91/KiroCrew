@@ -205,6 +205,10 @@ class CancellationCoordinator(ManagerComponent):
         the entry lets cancellation publish the same neutral stopped terminal
         outcome as a run that had already started, including batch accounting.
         """
+        # The persisted row is cancelled FIRST, so a drain racing this cannot
+        # claim it, then it is dropped from the window. A row outside the window is cancelled here as well and its
+        # params come back from the store so the queued-stop report is whole.
+        stored = self._manager._admission.taskq_cancel_queued(agent_id)
         for index, params in enumerate(self._manager._queue):
             if str(params.get("_preassigned_id") or "") != agent_id:
                 continue
@@ -217,7 +221,7 @@ class CancellationCoordinator(ManagerComponent):
             except Exception:
                 logger.debug("queue-depth re-emit failed after unqueue", exc_info=True)
             return dropped
-        return None
+        return stored
 
     def _report_queued_stop_impl(self, params: dict) -> None:
         """Publish a neutral terminal record for work stopped before startup."""
@@ -265,6 +269,8 @@ class CancellationCoordinator(ManagerComponent):
             for params in self._manager._queue
             if params.get("parent_session_key", "") == parent_session_key
         ]
+        # This parent's rows waiting outside the in-memory window.
+        queued_ids.extend(self._manager._admission.taskq_pending_ids_for(parent_session_key))
         queued_stopped = 0
         for agent_id in queued_ids:
             if not agent_id:

@@ -662,3 +662,126 @@ async def test_backends_hosting_stub_covers_exclusive() -> None:
     assert pool.backends_hosting_stub("s-pooled") == [pooled]
     assert pool.backends_hosting_stub("s-private") == [private]
     assert pool.backends_hosting_stub("s-none") == []
+
+
+# --- admission: a private-stub storm ------------------------------------------
+
+#: Private (non-poolable) stubs launched at once. The storm the spawn gate exists
+#: for is ~30 such stubs; every one is a full Python process importing
+#: ``kiro_crew`` plus its backend, so this suite runs a smaller storm with a
+#: proportionally smaller gate. The assertions are the same shape at any size.
+_STORM_STUBS = 12
+_STORM_CAPACITY = 3
+_STORM_INIT_DELAY = 0.4
+
+
+def _windows(log: Path) -> list[tuple[float, float]]:
+    """``(launch, initialized)`` epoch pairs the slow fake recorded."""
+    out: list[tuple[float, float]] = []
+    for ln in log.read_text(encoding="utf-8").splitlines():
+        parts = ln.split()
+        if len(parts) == 3:
+            out.append((float(parts[1]), float(parts[2])))
+    return out
+
+
+def _max_overlap(windows: list[tuple[float, float]]) -> int:
+    events = sorted([(a, 1) for a, _ in windows] + [(b, -1) for _, b in windows], key=lambda e: (e[0], e[1]))
+    live = peak = 0
+    for _, delta in events:
+        live += delta
+        peak = max(peak, live)
+    return peak
+
+
+@pytest.mark.asyncio
+async def test_a_private_stub_storm_is_admitted_a_few_at_a_time_and_all_reach_ready(
+    tmp_path: Path, short_sock_dir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE admission assertion, from the outside.
+
+    ``_STORM_STUBS`` non-poolable stubs register at once. Each one wants its own
+    backend, which the pool's ``max_backends`` never bounded; each backend takes
+    ``_STORM_INIT_DELAY`` to answer ``initialize``. Three things must hold:
+
+    * every stub gets its ``initialize`` answered -- nobody is refused and nobody
+      is left hanging past its budget;
+    * no more than ``_STORM_CAPACITY`` spawn+initialize windows are ever open at
+      once, read back from the launch/initialized stamps the fake writes -- the
+      gate held the rest in its FIFO;
+    * no stub fell back to a per-session exec: the fallback ledger under the
+      test's own home does not exist.
+    """
+    sock = short_sock_dir / "gw.sock"
+    work_dir = tmp_path / "ws"
+    work_dir.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    launch_log = tmp_path / "launches.txt"
+    window_log = tmp_path / "windows.txt"
+
+    def _resolver(_key: object) -> tuple[str, list[str], dict[str, str], str]:
+        return (
+            sys.executable,
+            [str(_FAKE_SERVER), str(launch_log)],
+            {
+                "FAKE_POOL_INIT_DELAY_SECS": str(_STORM_INIT_DELAY),
+                "FAKE_POOL_WINDOW_LOG": str(window_log),
+            },
+            str(work_dir),
+        )
+
+    stop = asyncio.Event()
+    daemon = asyncio.create_task(
+        gw.run_gatewayd(
+            socket_path=sock,
+            max_backends=8,
+            idle_timeout_secs=300,
+            stop_event=stop,
+            target_resolver=_resolver,
+            prewarm_count=0,
+            spawn_concurrency=_STORM_CAPACITY,
+            spawn_concurrency_min=1,
+            spawn_concurrency_max=8,
+            spawn_queue_wait_secs=120.0,
+            initialize_timeout_secs=30.0,
+        )
+    )
+    procs: list[asyncio.subprocess.Process] = []
+    try:
+        for _ in range(100):
+            if transport.endpoint_exists(sock):
+                break
+            await asyncio.sleep(0.05)
+        assert transport.endpoint_exists(sock), "gatewayd never bound its endpoint"
+
+        for _ in range(_STORM_STUBS):
+            procs.append(
+                await _spawn_stub(
+                    socket_path=sock, server="fake", agent="storm",
+                    work_dir=work_dir, home=home, poolable=False,
+                )
+            )
+        replies = await asyncio.gather(
+            *(_drive_initialize(proc, req_id=i + 1) for i, proc in enumerate(procs)),
+            return_exceptions=True,
+        )
+        failures = [r for r in replies if isinstance(r, BaseException) or "result" not in r]
+        assert not failures, f"{len(failures)} of {_STORM_STUBS} stubs never got initialize answered: {failures[:3]}"
+
+        assert _launch_count(launch_log) == _STORM_STUBS, "one private backend per stub"
+        windows = _windows(window_log)
+        assert len(windows) == _STORM_STUBS
+        peak = _max_overlap(windows)
+        assert peak <= _STORM_CAPACITY, (
+            f"{peak} spawn+initialize windows were open at once; the gate allows "
+            f"{_STORM_CAPACITY}. Without admission all {_STORM_STUBS} fork together."
+        )
+        assert peak >= 2, "the storm never overlapped at all, so the bound was not exercised"
+        assert not (home / "logs" / "stub_fallback.jsonl").exists(), (
+            "a stub fell back to a per-session exec: capacity must queue, never degrade"
+        )
+    finally:
+        await _reap(procs)
+        stop.set()
+        await asyncio.wait_for(daemon, timeout=60)

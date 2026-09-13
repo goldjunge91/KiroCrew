@@ -1441,6 +1441,106 @@ Bounds (`validation.py`, single source of truth) still gate the tool's arguments
 
 **Legacy blocking stack (retained in code, no longer used by the tool, slated for removal).** The former second blocking round-trip — `DashboardState.request_question` / `resolve_question` over `_pending_questions` / `_question_futures`, the `ask_id`, the `question_card_resolved` broadcast, the `POST /api/ask-question` + `POST /api/ask-question/{ask_id}/answer` + `GET /api/ask-question/pending` endpoints, the caller-chosen `_QUESTION_TIMEOUT_*` window bounded by the ACP tool-stall watchdog (`acp/client.py::_TOOL_STALL_TIMEOUT`), and the `_unblock_pending_waits` / `cancel_questions_for_slot` release chokepoints — still exists in the codebase but is dead on the `ask_question` path. It is described here only so a reader tracing those symbols knows they are no longer how the tool works.
 
+### Tasks & capacity (`handlers/tasks.py`, `pages/system/TasksCapacityCard.tsx`)
+
+The durable task queue's read surface and the one dashboard panel that renders
+it (System > Services, below the host-runtime card). It exists so an operator
+with 2000 accepted tasks can see the queue drain, the concurrency it drains
+under, and why that concurrency is below what they configured — without
+reading logs (SPEC §二.8, RFC overload-resilience §7).
+
+Routes (all behind the ordinary token middleware, NOT on the internal-path
+lists, so an MCP caller with only the loopback secret is refused like
+`/api/sessions/health`):
+
+- `GET /api/tasks?state=&lane=&limit=` — rows from `TaskStore.list_rows`,
+  oldest first, `limit` in `[1, 1000]` (default 100; over-cap values are
+  clamped, non-integers are 400 `bad_limit`; an unknown `state` is 400
+  `bad_state` naming the valid set). Each row carries `id, kind, state, lane,
+  session_key, parent_id, root_id, attempts, generation, next_run_at,
+  deadline_at, lease_owner, lease_expires_at, wait{reason, since, deadline_at,
+  resume_kind, dependency_scope, cancel_semantics, tool_call_id},
+  wait_reason, wait_since, wait_deadline_at, age_secs, created_at,
+  updated_at, terminal`. `lane` is the stored column (`taskq.lanes`, resolved
+  at accept so a nested row reports its ROOT's lane; the schema v3 migration
+  backfilled every older row), so `?lane=` is the store's own
+  `list_rows(lane=)` SQL predicate. `age_secs` is measured on the
+  STORE's clock (`TaskStore.now`), never `time.time()`, so it agrees with the
+  rows' own stamps under an injected clock.
+- `GET /api/tasks/summary` — `{generated_at, available, depth{by_state,
+  queued, waiting, recovering, running, total}, oldest_wait_secs,
+  lanes{<lane>: {effective, user_max, running?, window_queued?}},
+  degrade_reason, adaptive, slots[{key, classification, age_secs, evidence}],
+  waiting[<row>], recovering{tasks[<row>], task_attempts, slots[…],
+  ladder[…]}, stalled, counts, stall_after_secs}`. `depth.queued` counts
+  `queued + admitted + retry_wait + waiting_infra` (the same set
+  `session_health` counts). `lanes` merges the health monitor's registered cap
+  sources (the subagent manager's live cap under `subagents`) with
+  `resource_status.adaptive_state()` — the controller supplies `user_max`
+  (`exec_ceiling`) and the `spawn_gate` lane; a value the monitor already
+  published is not overwritten. `degrade_reason` is the monitor's registered
+  pressure source when one answers, else the controller's own reading (paused
+  → its last decision's reason, probing, or a `decrease`/`pause` last action).
+  `recovering.task_attempts` sums `attempts` over `recovering`/`retry_wait`
+  rows; `recovering.ladder` is `default_ladder().table()`. `available` is
+  false when the gateway has no `TaskStore` (a MagicMock state, the legacy
+  in-memory queue) — the panel then says so instead of rendering zeros. The
+  slot snapshot is taken ON the loop, everything else in `to_thread`; the log
+  scan is never run here (`/api/sessions/health` owns that evidence).
+- `GET /api/tasks/{task_id}` — `{task: <row>, events: [{seq, ts, kind,
+  data}]}`, the last `_EVENTS_TAIL` (200) events oldest-first. 404
+  `not_found`; 404 `unavailable` with no store; 503 `unavailable` on a store
+  read error.
+- `POST /api/tasks/{task_id}/cancel` — cancels THROUGH the owner that can
+  stop the work, never by writing the store for a running row. Subagent rows:
+  `SubagentManager.cancel(task_id)` — the manager's cascade is what unqueues a
+  row that never started (`_unqueue` → `taskq_cancel_queued`), reaps a live
+  one (`_force_reap` → `taskq_settle`, children cancelled children-first), and
+  writes the SEL record, so a task stopped here is indistinguishable from one
+  stopped on its activity card. TaskRunner step / workflow agent-call rows
+  (`taskq.adapters.runner.owner_of`): a parked row (queued, deferred, any
+  wait) ends through `RunnerAdmission.cancel_wait` (the parked coroutine
+  resumes and sees the cancel); a RUNNING row cancels its run
+  (`TaskRunner.cancel(run_id, exact=True)` / `WorkflowService.cancel(run_id)`)
+  because a step is one unit of its run and the run's own exit path settles
+  the row. Answers `{ok, cancelled, task}`; 409 `terminal` for a row already
+  ended (no owner is called); 409 `no_cancel_adapter` when no owner took the
+  cancel and the row is still live; 404 `not_found`; 500 `cancel_failed` when
+  the cascade raised. `test_api_tasks.py::test_cancel_goes_through_the_manager_not_the_store`
+  pins the no-direct-write property for subagent rows by tripping every store
+  writer; `test_overload_integration_glue.py` pins the runner routing.
+- `POST /api/tasks/{task_id}` — one action on a TaskRunner / workflow row:
+  `{"action": "answer_input", "answer": "<text>"}` delivers the operator's
+  answer to a `waiting_input` row through `RunnerAdmission.answer_input`
+  (bound to that row's wait; the runner never auto-answers, and a late answer
+  after the wait ended is 409 `not_waiting_input`); `{"action": "cancel_wait"}`
+  ends any wait without an answer (row `cancelled`). 400 `invalid_json` /
+  `bad_action` (names the valid set) / `answer_required`; 409
+  `no_input_adapter` for a subagent row or when no admission is attached, 409
+  `terminal`, 409 `action_failed` when the admission refused; 404
+  `not_found` / `unavailable`. Registered before `/{task_id}/cancel`.
+
+Panel (`TasksCapacityCard`): polls `api.tasksSummary()` every 5s (the
+spawn-panel cadence) and renders three columns in the Services plane's own
+label/value shape — Queue (queued, running, waiting, "Recovering tasks" =
+`depth.recovering` (task rows re-dispatched after a stall plus rows parked in
+`retry_wait`), oldest wait), Capacity per lane (`effective of user_max` +
+running count per lane, the degrade reason or "none"), Recovery (task retries,
+"Recovering sessions" = `recovering.slots` (live chat/run sessions recovering
+from a stalled turn — sessions, not rows; both labels carry an info tip naming
+the distinction), stalled) —
+then one list, longest wait first, of every waiting/recovering task row and
+every non-running live slot with its state badge, id, reason, attempts (when
+>1) and age, folded past 8 rows with a "more not shown: N" line. A healthy /
+degraded badge sits in the title. Empty state is one line ("Nothing is waiting
+or recovering."); a gateway without a store gets a notice above the columns;
+a failed fetch renders through `ErrorNotice` with the agent hand-off on. Wait
+and lane names resolve through full-literal catalog-key maps
+(`pages.tasksCapacityCard.state_*`, `lane_*`) so the i18n key-refs gate sees
+every label; an unknown wire token renders as itself. Tests:
+`test/test_api_tasks.py` (26; tmp store, fake manager, real token middleware
+for the auth case, route order), `website/src/test/TasksCapacityCard.test.tsx`.
+
 ### Key Endpoints
 
 **AutoNudge maintenance**: `maintenance_service()` gives administrative recovery one authoritative store view and holds a per-data-home transaction lock across its full cleanup; service startup and public `add()` / `update()` / `remove()` transactions take the same lock, so maintenance cannot scan a temporary in-memory absence from a removal that later rolls back or race an external reactivation. The maintenance view owns unserialized cleanup mutations while its transaction is held. A per-loop quiesce signal wakes an update/removal already queued behind that transaction instead of letting a firing timer and maintenance wait on each other's lock; cleanup retains and ultimately removes the durable row. A caller-authorized arm carries a commit-time session predicate into `add()`, evaluated only after it owns this transaction, so an arm validated before cleanup cannot recreate the archived slot afterward. Startup holds the lock across load, repair, timer arming, and singleton publication, while concurrent maintenance waits and then reuses the published live service. An offline view never arms timers or publishes the singleton. `deactivate_and_wait()` persists an inactive restart marker and waits for both the timer captured before the update and any replacement installed while that update waited. Administrative recovery removes the marker only after its dependent worker cleanup succeeds. Persistence is the commit point for every mutation: failed add/update writes restore the prior live loop and timer state, while failed removal restores the in-memory row (and its timer when active), leaving the same durable view visible for an immediate retry.

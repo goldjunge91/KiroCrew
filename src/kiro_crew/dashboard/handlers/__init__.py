@@ -492,6 +492,15 @@ from kiro_crew.dashboard.handlers.taskrunner import (  # noqa: E402, F401
     api_taskrunner_update_plan,
     api_taskrunner_update_task,
 )
+
+# ── Durable task queue + capacity view (handlers/tasks.py) ──
+from kiro_crew.dashboard.handlers.tasks import (  # noqa: E402, F401
+    api_task_action,
+    api_task_cancel,
+    api_task_detail,
+    api_tasks_list,
+    api_tasks_summary,
+)
 from kiro_crew.dashboard.handlers.telemetry import (  # noqa: E402, F401
     api_beacon_status,
     api_collection_status,

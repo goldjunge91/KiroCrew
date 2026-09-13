@@ -318,8 +318,76 @@ class Project:
 - `cancel(task_id)` cancels specific task; `cancel()` cancels all
 - Completed cron runs are pruned on new start; other completed runs retain bounded history.
 - `_tasks` cleaned in `finally` block (no leaks)
-- `start_background()` and `execute_plan()` enforce `_MAX_CONCURRENT_TASKS` before changing run state, so rejected admission cannot leave a partially started run.
+- `start_background()` and `execute_plan()` enforce `_MAX_CONCURRENT_TASKS` before changing run state, so rejected admission cannot leave a partially started run. With a task admission attached (below) the guard is skipped: the lane meters the steps, so an over-limit run queues instead of being refused.
 - Replanned steps also reset sessions after execution (no leaks in `_try_replan`)
+
+## Durable task queue (`taskq.adapters.runner`)
+
+`attach_task_admission(admission)` routes the runner through the shared task
+store (`docs/system-specs/modules/taskq.md`, § Runner adapters). `None` (the
+default, and every test that does not attach one) keeps the legacy behaviour.
+With an admission attached:
+
+| Unit | Row | Lifecycle |
+|---|---|---|
+| a run | `taskrunner:<task_id>` (`kind=taskrunner_step`, `params={task_id, name, spec_path, steps, safe_retry}`) | `_taskq_begin_run` accepts + `claim_only`s it (no lane slot: the run executes nothing itself) right before `_execute_tasks`, so `safe_retry = bool(run.branch_name)` is known; `_taskq_end_run` settles it from the final status: `completed → done`, `failed → failed`, `paused` / `cancelled → cancelled` (an operator decision ends this execution; a resume is a NEW row, so the adopter never restarts what the operator stopped) |
+| a step | `taskrunner:<task_id>:task<N>` (child of the run row, `params={task_id, index, title, safe_retry}`, `scope_ref={auto_approve, agent}`) | `_taskq_admit_step` accepts it (write-before-ack; a refused write fails the step closed, it never runs off the record) and `await admission.admit(...)` -- memory-pressure DEFER, a lane slot by effective cap, `claim` under a lease -- BEFORE the step opens a session; `_execute_single_task` settles it `done` / `failed` / `cancelled` |
+
+A step re-run after a failure (retry, replan, resume) gets `~N` suffixed ids so the
+earlier outcome stays on the record. The lane is `system` for a run whose
+`source` is `cron` or `hook`, else the session the run was started from
+(`_run_session_keys`).
+
+Inside a step (`task_executor.execute_task(..., taskq=handle)`):
+
+- **Stop reason.** `EVENT_COMPLETE` goes through `classify_stop_reason`; a
+  non-success raises `_TurnNotCompleted` inside the attempt. `stalled` /
+  `recovering` consult the recovery ladder's L3 rung
+  (`admission.decide_recovery`, or `default_ladder()` bounded by
+  `STOP_RECOVERY_MAX_RETRIES` when no ladder is attached): a `retry` decision
+  writes the row `running → recovering` with `next_run_at = now + delay`,
+  releases the lane slot, waits `_recovery_delay(delay)` (a module seam), then
+  `reclaim`s the row under a NEW generation -- the interrupted turn's late
+  writes are fenced as `stale_result` -- and re-runs the turn with a prompt that
+  names the stall. An exhausted rung ends the step FAILED with `task.result`
+  (the partial) kept and `task.error` saying so. `cancelled` and a
+  non-retryable `failed` end the step FAILED at once, partial kept; a retryable
+  `error:` goes through the ordinary bounded retry ladder. Without a `taskq`
+  handle the stall goes through that same ladder immediately (no delay), which
+  is what `test_subagent_stop_reason_consistency.py` pins.
+- **Dependency signal.** An exception `taskq.dependency.classify_exception`
+  recognises (or one carrying `dependency_signal`) parks the row in
+  `waiting_dependency` (`admission.yield_dependency`), slot released, the
+  session resident; the coordinator's wake (or `admission.tick()` at
+  `retry_at`) re-admits it through capacity and re-runs the turn without
+  spending an attempt. Terminal signals (auth, permanent parameter error) and
+  more than `DEFAULT_MAX_ATTEMPTS` waits fail the step.
+- **Input wait.** The runner adapter's `waiting_input` / `answer_input` pair
+  (`taskq/adapters/runner.py`) parks a row with its lane slot released and
+  wakes it with the operator's answer; a step re-dispatched after a crash
+  replays a persisted, not-yet-consumed answer (`admission.recorded_answer`)
+  under `## Operator input` and marks it consumed only once the step has
+  durably completed. The controlled terminal whose per-handle question would
+  drive a TaskRunner step into this wait ships in a follow-up PR; until then
+  the executor never enters `waiting_input` on its own. Never auto-answered.
+
+### Adoption after a restart
+
+The boot reconciler has no adapter for `taskrunner_step`, so it only drops the
+dead lease and stamps `awaiting_adapter`; `legacy import` rows arrive
+`recovering`. `attach_task_admission` schedules one `adopt_task_rows()` sweep
+(a concurrent explicit call joins it rather than adopting twice), which runs
+`taskq.adapters.runner.adopt_orphaned_rows`:
+
+| Row | Verdict |
+|---|---|
+| run row, `is_safe_retry` (`params.safe_retry`, i.e. the run had a git worktree, or class `none` / `idempotent_key`) | `recovering`, then `execute_plan(task_id)` -- only steps that did not PASS re-run (`runs.json` / `progress.md` is the checkpoint) |
+| run row, not safe (legacy import, no worktree) | `unknown_side_effect`; the run stays `paused`, a "Run not auto-resumed" notice tells the operator to review and resume by hand |
+| step row, safe | `failed` ("interrupted by a gateway restart; re-run on resume") -- the resume creates a fresh `~N` row for it |
+| step row, not safe | `unknown_side_effect` |
+| still leased by this incarnation | skipped |
+
+Pinned by `test/test_taskrunner_taskq.py` and `test/test_taskq_runner_adapter.py`.
 
 ## Pause / Resume
 
@@ -337,6 +405,7 @@ On gateway restart, any task with `status == "running"` is automatically transit
 - Prevents zombie tasks that appear running but have no backing asyncio task
 - User can resume manually from dashboard
 - Persisted via `runs.json` — status survives restart
+- With a task admission attached, a git-coordinated run is resumed automatically from its checkpoint by the adoption sweep (§ Durable task queue); one without a worktree stays paused for the user
 
 ### Force Approval Gates
 

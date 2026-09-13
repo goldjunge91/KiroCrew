@@ -1,6 +1,6 @@
 ---
 title: Durable Run Coordinator — typed lifecycle, idempotent commands, and recoverable delivery
-status: draft
+status: superseded
 revision: v1
 author: Kyle Seaman, with Codex
 created: 2026-08-22
@@ -10,7 +10,7 @@ doc-pr:
 implementation-prs: []
 tracking-issues: []
 supersedes: []
-superseded-by: []
+superseded-by: [rfc-overload-resilience.md]
 ---
 # RFC: Durable Run Coordinator — typed lifecycle, idempotent commands, and recoverable delivery
 

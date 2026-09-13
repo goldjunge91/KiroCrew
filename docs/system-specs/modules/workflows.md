@@ -206,6 +206,15 @@ outside any combinator
 The run-global slot is held only across the model call, so no thunk holds a slot
 while waiting for another to release one.
 
+A third bound sits beneath both when the service has a task admission attached
+(`WorkflowService(task_admission=...)` / `attach_task_admission`): every
+`ctx.agent()` call is a `workflow_agent` row admitted through the shared runner
+lane (`taskq.adapters.runner`, § Agent execution adapters below). The lane's
+bound is the LIVE effective cap the adaptive controller moves
+(`RunnerLane.set_effective_cap`; `agent.adaptive_concurrency_mode=fixed` pins
+it), so a pressure decision lowers workflow fan-out together with the subagent
+queue, and live workers never exceed `min(max_workers, lane.effective)`.
+
 ### Progress
 
 ```python
@@ -729,6 +738,16 @@ state, like `state.subagents` / `state.sessions`. It owns one `RunRegistry` (wit
 `WorkflowRunStore` unless `persist=False`) and builds a fresh `WorkflowRunner` per
 run.
 
+After the dashboard (or the headless API server) is up, the gateway's
+`_wire_runner_admission` builds ONE `RunnerAdmission`
+(`taskq.adapters.runner.runner_admission_for` over the subagent manager's
+store and effective cap) and attaches it to both the TaskRunner and this
+service; the manager's `DependencyCoordinator` gets the admission's `on_wake`
+(and its `on_fail`, as a wake) through `coordinator.subscribe(...)`, so a 429
+seen by a workflow agent call and one seen by a sub-agent share one retry
+schedule. With no coordinator (durable queue off) the manager's reaper pump
+calls the admission's own `tick()`. Shutdown detaches it (`attach_task_admission(None)`).
+
 Entry points: `author`, `start`, `start_from_intent`, `status`, `result`,
 `list_runs`, `cancel`, `rerun_subtree`, `list_definitions`, `get_definition`,
 `save_definition`, `update_definition`, and `start_definition`, plus the trusted
@@ -864,6 +883,22 @@ Pool init failure is caught and falls back to `build_agent_fn`, so pooling can
 never break a run start. The runner's `on_complete` hook fires on every exit path
 (success, failure, cancellation) to shut the pool down, so warm sessions are always
 released.
+
+- **`agent_pool.admitted_agent_fn`** (the task-queue wrapper, applied by
+  `WorkflowService._runner` to WHICHEVER of the two adapters above it chose,
+  when a `RunnerAdmission` is attached). Each `ctx.agent()` call becomes the row
+  `workflow:{run_id}:agent{n}` (`kind=workflow_agent`, `params={run_id, call,
+  agent, session, lane}`, `provider=<model override>`, class `unknown`):
+  written before the call runs (write-before-ack), admitted through the lane
+  (memory-pressure defer, effective-cap slot, lease + generation), marked
+  `running`, and settled `done` / `failed` / `cancelled` from the outcome. A
+  dependency error the adapters recognise parks the row in `waiting_dependency`
+  with its slot released and re-runs the call on the wake, at most
+  `DEFAULT_MAX_ATTEMPTS` times; terminal signals fail it. The lane for a run is
+  its launching `session_key`, or `system` when the run has none or was
+  launched by a cron / hook (`lane_for`). Pinned by the taskq tests in
+  `test_workflows_agent_pool.py` (cap beneath `max_workers`, a mid-run cap
+  change, `fixed` mode, rows per call, failure and rate-limit settlement).
 
 The gateway pins workflow agent concurrency at **4** on purpose, rather than
 sizing it from `resolve_max_subagents()`: because the pool keeps a separate

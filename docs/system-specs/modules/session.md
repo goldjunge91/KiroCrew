@@ -1889,6 +1889,98 @@ import. The unbounded-growth *input* (foreign interpreters in the agent
 subtree inheriting the prefix) is closed separately by the sandbox env scrub —
 see [security](security.md) § Conditional Python-interpreter env strip.
 
+## Recovery ladder (`recovery/policy.py`, `recovery/ladder.py`)
+
+Every layer that retries reads ONE schedule. `RecoveryPolicy` is exponential
+backoff (`base * 2**(attempt-1)`, base `agent.recovery_backoff_base_secs`=2s,
+cap `agent.recovery_backoff_max_secs`=120s) with EQUAL jitter (a delay is drawn
+from `[raw/2, raw]` -- full jitter can draw a near-zero delay and hot-loop a
+layer whose failure is not transient yet); a server-stated `retry_after` is a
+floor, never ignored, and still capped so a hostile hint cannot park a task.
+Attempts are counted per unit (`RecoveryTracker`: a slot key, a backend key, a
+runtime id, the daemon) and forgotten after a cooldown, so a unit that failed a
+day ago starts at attempt 1. The ladder is tried bottom-up and each rung is
+bounded; escalation happens only when the rung below exhausted its attempts:
+
+| layer | unit | trigger | cleanup deadline | attempts before escalation | action |
+|---|---|---|---|---|---|
+| `L1_tool_call` | slot | JSON-RPC error classed `recoverable_infra`: the MCP stub's `-32001 capacity` (with `retry_after_secs`), backend gone, spawn-queue timeout | -- | 3 | re-issue the call: one continuation on the same session (`chat_runner`, below); task stays running |
+| `L2_backend` | backend key | `BackendGone`, initialize timeout, breaker OPEN | per-backend shutdown budget (`POOL_SHUTDOWN_SECS`) | 2 | `gatewayd._respawn_backend_for_stub` under the spawn gate |
+| `L3_acp_runtime` | runtime | `AcpRuntimeDead`, stall past the idle window, `session/new` abandoned | `TOTAL_SHUTDOWN_BUDGET_SECS` + process-tree kill | 2 | rebuild the runtime, `session/load` if continuable; task `recovering` |
+| `L4_gatewayd` | daemon | liveness ping failed 3x AND no fresh self-report AND no backend progress | daemon drain | one respawn per 600s window (the second escalates) | `GatewayManager._run_watchdog` respawn; stubs reconnect within their 600s budget |
+| `L5_gateway` | gateway | none automatic | -- | 0 | ONE notification per escalation; the user restarts. Never a `kirocrew restart`. |
+
+**Where the rungs are recorded.** L1 for the main chat is `chat_runner`'s infra branch (below); for a sub-agent it is `subagent_manager/run.py::_yield_for_infra_retry`, which takes the ladder's delay and parks the run on the dependency coordinator's `mcp_gateway:<class>` scope ([subagent.md](subagent.md)). L2 is `gatewayd._respawn_backend_for_stub`: a completed respawn is `record_restart(L2_backend)` + `observe_success(L2, server)`, a give-up is `observe_failure(L2, server)` (the breaker's OPEN cooldown is the wait between rungs; the ladder counts, it does not sleep there). L3 is counted by the sub-agent run when the parent's shared runtime is unavailable (`observe_failure(L3, runtime:<parent>)`; the dedicated process stays the per-run recovery, the runtime's rebuild belongs to its owning session). L4 is the gatewayd supervisor. Distinct from these per-rung attempt counts is `SESSION_RECOVERY_MAX_ATTEMPTS` (3), the IN-PLACE budget for continuing one ACP session on the same runtime — the main chat's tool-stall / stale_recover nudges and pipe-death re-queues and the sub-agent's stop recovery all read it (`acp.types.STOP_RECOVERY_MAX_RETRIES` is its re-export).
+
+Overload never enters the ladder: pressure lowers caps and pauses admission
+([adaptive-concurrency](adaptive-concurrency.md)); only a unit that stopped
+making progress AND failed an independent probe is torn down. L4 is `pinned`:
+its floor/cap (1s/60s) are what the stub's 600s reconnect budget is sized
+from, so the `agent.recovery_*` knobs move every layer but that one.
+
+The layers read the schedule instead of holding literals:
+`mcp_gateway/manager.py::_RESPAWN_BACKOFF_START_SECS/_MAX_SECS` are
+`LADDER.layer(L4).base_secs/max_secs` and every doubling goes through
+`GatewayManager._next_respawn_backoff` (doubled, capped, jittered);
+`acp/client.py::_ACP_RESPAWN_BACKOFF_S` is L3's base; `taskq/model.py`'s
+`recovery_backoff_secs` is the bare schedule (deterministic -- the dispatcher
+jitters when it wakes a row). `RecoveryLadder` emits
+`kirocrew.recovery.{attempts,escalations,duration_secs,restarts}` and, given a
+task id, one `task_events(kind="recover")` row per decision.
+
+**L1 in the chat runner.** `AcpSessionHandle` classifies every tool result
+once, at the protocol layer (`classify_infra_error` -> `handle.last_infra_error`,
+cleared at turn start): the stub's `-32001` error object or its serialised
+text, `class=capacity` + `retry_after_secs`, and a closed set of gateway
+`recoverable_infra` markers; a result longer than 2000 chars is a document,
+not an error, and never matches. At end of turn, when the turn ended normally
+and the LAST tool result was such an error, `chat_runner` asks the ladder; on
+`retry` it shows a notice, waits the jittered delay (`_recovery_delay`, a
+module seam), and queues ONE continuation (`build_infra_retry_prompt`, opening
+with `REFUSAL_RECOVERY_PREFIX` -- a capacity refusal is a tool refusal carried
+back to the model) that asks for the same call again -- never a verbatim
+replay of the user's message, because earlier calls this turn may have taken
+effect. The turn is un-landed (`_recovering_infra`, like `_recovering_promise`);
+a landed turn calls `observe_success(L1, slot.key)`. On `escalate` the runner
+stops retrying and says so.
+
+## Structured session health (`dashboard/session_health.py`)
+
+`GET /api/sessions/health` classifies every running slot from STRUCTURED state,
+in this order of authority: task rows (`taskq.TaskStore`), slot state
+(`_ChatSlot.running`, open `_approval_futures`, `_question_pending`,
+`_wait_state`, the recovery retry counters, children running for the slot), and
+ACP handle liveness (`awaiting_permission`, the in-flight tool and its dispatch
+age, `parked_for_secs`, the `_ingress_seq` / text-chunk / transcript progress
+markers). Each slot is exactly one of `running`, `queued`, `waiting_children`,
+`waiting_permission`, `waiting_dependency`, `waiting_input`, `recovering`,
+`stalled`, with evidence and age. Only `stalled` is a defect: a slot whose
+progress markers have not moved for `STALL_AFTER_SECS` (600s) with no wait
+reason and no liveness-oracle `WORKING` verdict. A permission wait is never a
+stall however old; a queued task is queue wait, not execution; a long tool call
+that keeps producing events is running. The snapshot (`snapshot_state`) is
+taken on the loop because it walks live objects; the classification
+(`SessionHealthMonitor.compute`), the store read and the log tail run off it.
+The `gateway.log` regex scan (`scan_log_for_stalls`) is a SECONDARY source: it
+adds evidence to a running slot and is the sole source only when no state
+objects are reachable; it never overrides a structured wait.
+
+Payload: `{generated_at, stalled{slot: {reason, since_ts, evidence, age_secs}},
+slots{slot: {classification, evidence, age_secs, since_ts, source}},
+waiting[{kind: slot|task, ..., reason}], recovering[...], queued{available,
+count, oldest_wait_secs, by_state}, effective_caps{lane_kind: {effective, ...}},
+degrade_reason, counts{running, queued, waiting, recovering, stalled},
+stall_after_secs, sources{slots, taskq, log}}`. `effective_caps` and
+`degrade_reason` come from sources the adaptive controller registers
+(`default_monitor().register_cap_source(lane_kind, fn)` /
+`register_pressure_source(fn)`); `subagents` is read from the manager directly.
+Each computation samples `kirocrew.taskq.depth{state}`,
+`kirocrew.taskq.oldest_wait_secs`, `kirocrew.taskq.effective_cap{lane_kind}` and
+`kirocrew.taskq.pressure_reason{reason}` -- every attribute a closed-set value.
+Tests: `test/test_session_health.py`, `test/test_sessions_health_cache.py`,
+`test/test_recovery_policy.py`, `test/test_recovery_ladder.py`,
+`test/test_recovery_l1_chat_runner.py`.
+
 ## Resource Budget (Gateway Mode)
 
 | Session | Key Pattern | Lifetime | Process |

@@ -14,6 +14,13 @@ from typing import TYPE_CHECKING, Callable
 
 from kiro_crew import git_coord, name_grant, platform_compat, shutdown_event
 from kiro_crew.acp.client import AcpProcessDied
+from kiro_crew.agent_sdk.drivers.acp_vocab import (
+    STOP_CLASS_CANCELLED,
+    STOP_CLASS_RECOVERING,
+    STOP_CLASS_STALLED,
+    STOP_RECOVERY_MAX_RETRIES,
+    classify_stop_reason,
+)
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.executors import run_in_embed_pool
 from kiro_crew.hooks import TOOL_AUTO_APPROVE, TOOL_DENY, fire_tool_hooks, get_global_hook_store
@@ -26,6 +33,7 @@ from kiro_crew.providers.base import (
     EVENT_TOOL_CALL,
     LLMEvent,
 )
+from kiro_crew.recovery.ladder import L3_ACP_RUNTIME, default_ladder
 from kiro_crew.safety_override import safety_override
 from kiro_crew.sandbox import (
     create_subprocess_limited,
@@ -44,12 +52,51 @@ from kiro_crew.task_models import (
     TaskStatus,
 )
 from kiro_crew.task_planner import group_parallel_tasks
+from kiro_crew.taskq.dependency import DEFAULT_MAX_ATTEMPTS as DEPENDENCY_MAX_ATTEMPTS
+from kiro_crew.taskq.dependency import classify_exception
+
+if TYPE_CHECKING:
+    from kiro_crew.taskq.adapters.runner import Admitted
 
 _MID_STREAM_COMPACT_PCT = 90.0
 
 
 class _ContextOverflow(Exception):
     """Raised when context usage exceeds threshold mid-stream."""
+
+
+class _TurnNotCompleted(Exception):
+    """The stream ended on a non-success stop reason (stall, cancel, error).
+
+    The task runner consumes the same ACP completions as the main chat and
+    the sub-agent run, so it maps them through the same classifier
+    (``classify_stop_reason``). Raised INSIDE the attempt's try, and handled by
+    its own branch in :func:`execute_task`: a ``stalled`` / ``recovering``
+    class re-runs the turn after the recovery ladder's L3 delay (the row is
+    ``recovering`` meanwhile), a ``cancelled`` or non-retryable ``failed``
+    class ends the step FAILED with its partial preserved, and a retryable
+    ``error:`` class goes through the existing bounded retry ladder.
+    """
+
+    def __init__(
+        self, stop_class: str, stop_reason: str, *, partial: bool, retryable: bool = False
+    ) -> None:
+        self.stop_class = stop_class
+        self.stop_reason = stop_reason
+        self.partial = partial
+        self.retryable = retryable
+        note = " — partial output preserved in the task result" if partial else ""
+        super().__init__(f"turn ended {stop_class} (stop_reason={stop_reason!r}){note}")
+
+    @property
+    def recoverable(self) -> bool:
+        return self.stop_class in (STOP_CLASS_STALLED, STOP_CLASS_RECOVERING)
+
+
+async def _recovery_delay(secs: float) -> None:
+    """Module seam for the ladder's wait between a stalled turn and its re-run."""
+    if secs > 0:
+        await asyncio.sleep(secs)
 
 
 if TYPE_CHECKING:
@@ -95,10 +142,18 @@ async def execute_single_task(
     log_task_fn: Callable,
     extract_lesson_fn: Callable,
     session_key: str = "",
+    taskq: "Admitted | None" = None,
 ) -> bool:
-    """Execute one task with approval gate, self-review, and memory update."""
+    """Execute one task with approval gate, self-review, and memory update.
+
+    ``taskq`` is the step's admitted task-queue row (``taskq.adapters.runner``)
+    when the runner has one attached; it carries the stop-reason recovery and
+    the dependency / input waits through the shared store. ``None`` is the
+    legacy path.
+    """
     if not session_key:
         session_key = f"{SESSION_PREFIX}:{run.task_id}:task{task.index}"
+    _exec_kw = {"taskq": taskq} if taskq is not None else {}
 
     task.status = TaskStatus.IN_PROGRESS
     now = _time.time()
@@ -201,6 +256,7 @@ async def execute_single_task(
         work_dir,
         on_notify,
         session_key,
+        **_exec_kw,
     )
     run.last_task_time = _time.time()
 
@@ -234,6 +290,7 @@ async def execute_single_task(
                 work_dir,
                 on_notify,
                 session_key,
+                **_exec_kw,
             )
             if success and run.branch_name:
                 try:
@@ -289,21 +346,53 @@ async def execute_task(
     work_dir: Path,
     on_notify: Callable,
     session_key: str = "",
+    taskq: "Admitted | None" = None,
 ) -> bool:
     """Execute a single task with retries and process recovery.
 
     Separate budgets:
     - Logic/test failures: up to MAX_RETRIES attempts
     - Process crashes (AcpProcessDied): up to MAX_RECOVERIES, not counted as attempts.
+    - Stalled / recovering turns (stop reason): the recovery ladder's L3 rung
+      (``taskq.admission.ladder`` when attached, the process default
+      otherwise) bounds the re-runs and spaces them; not counted as attempts.
+    - A dependency signal (429, 5xx, auth) parks the step in
+      ``waiting_dependency`` through ``taskq`` and re-runs it when woken; not
+      counted as an attempt. Terminal signals fail the step.
     """
     if not session_key:
         session_key = f"{SESSION_PREFIX}:{run.task_id}:task{task.index}"
     recoveries = 0
     compactions = 0
+    stop_recoveries = 0
+    dependency_waits = 0
     attempt = 0
     previous_error = ""
     consecutive_same_error = 0
     result_prefix = ""
+
+    # Operator answers applied to this step's prompt. They are marked consumed
+    # (``input_consumed``) only once the step has durably COMPLETED: a crash
+    # between applying an answer and the turn finishing must leave it
+    # replayable, or the re-dispatched step asks the operator again.
+    applied_answers: list[str] = []
+
+    def _consume_applied_answers() -> None:
+        if taskq is None:
+            return
+        for question_id in applied_answers:
+            taskq.admission.consume_answer(taskq.task_id, question_id)
+        applied_answers.clear()
+
+    if taskq is not None:
+        # A step re-dispatched after a crash that landed between the operator's
+        # answer and the re-admission: the answer lives on the row's wake event
+        # (never only in RAM), so the resumed turn sees it exactly as the
+        # uninterrupted turn would have.
+        recorded = taskq.admission.recorded_answer(taskq.task_id)
+        if recorded is not None:
+            applied_answers.append("recovered")
+            task.description = f"{task.description}\n\n## Operator input\n{recorded}\n"
 
     while attempt < MAX_RETRIES:
         attempt += 1
@@ -567,6 +656,21 @@ async def execute_task(
 
             final_result = result_prefix + result_text
             task.result = redact_credentials(redact_exfiltration_urls(final_result)[0])[0]
+            # EVENT_COMPLETE only says the stream ended: a watchdog stall, a
+            # runtime cancel or a transport death must not become a PASSED
+            # step. Same mapping as chat_runner / subagent run.py.
+            _stop = classify_stop_reason(
+                str(getattr(_complete_event, "stop_reason", "") or "")
+                if _complete_event is not None
+                else ""
+            )
+            if not _stop.is_success:
+                raise _TurnNotCompleted(
+                    _stop.name,
+                    _stop.stop_reason,
+                    partial=bool(result_text),
+                    retryable=bool(_stop.retryable),
+                )
             sessions.record_success(session_key)
             sessions.check_context_usage(session_key, client)
 
@@ -673,11 +777,113 @@ async def execute_task(
 
         except asyncio.CancelledError:
             raise
+        except _TurnNotCompleted as tnc:
+            # ``task.result`` already carries the flagged partial (set before
+            # the classifier ran); every branch below preserves it.
+            task.error = str(tnc)
+            if tnc.recoverable and taskq is not None:
+                # Stalled / recovering: the recovery ladder's L3 rung (the ACP
+                # runtime) says whether one more re-run is allowed and how
+                # long to wait; the row is ``recovering`` for the wait and is
+                # re-claimed under a new generation before the re-run.
+                stop_recoveries += 1
+                reason = f"{tnc.stop_class}: {tnc.stop_reason}"
+                decision = taskq.admission.decide_recovery(taskq, unit=session_key, reason=reason)
+                if decision is not None:
+                    retry = decision.retry
+                    delay = float(decision.delay_secs)
+                else:
+                    retry = stop_recoveries <= STOP_RECOVERY_MAX_RETRIES
+                    delay = (
+                        default_ladder().backoff_secs(L3_ACP_RUNTIME, stop_recoveries)
+                        if retry
+                        else 0.0
+                    )
+                if not retry or attempt >= MAX_RETRIES:
+                    try:
+                        await sessions.reset(session_key)
+                    except Exception:
+                        logger.debug("Session reset after a stalled turn failed", exc_info=True)
+                    task.status = TaskStatus.FAILED
+                    task.error = (
+                        f"{tnc.stop_class} ({tnc.stop_reason}) — in-place recovery exhausted "
+                        f"after {stop_recoveries} attempt(s) — partial result preserved"
+                    )
+                    return False
+                taskq.recovering(reason=reason, delay_secs=delay)
+                await on_notify(
+                    f"\u267b\ufe0f Task {task.index}: turn {tnc.stop_class}",
+                    f"{tnc.stop_reason} — re-running in {delay:.0f}s (recovery {stop_recoveries})",
+                    run=run,
+                )
+                await _recovery_delay(delay)
+                await taskq.reclaim()
+                taskq.running({"index": task.index, "recovery": stop_recoveries})
+            elif not tnc.recoverable and (
+                tnc.stop_class == STOP_CLASS_CANCELLED or not tnc.retryable
+            ):
+                # A runtime cancel or a refusal is not a logic failure to
+                # re-prompt around: the step ends with what it produced.
+                task.status = TaskStatus.FAILED
+                task.error = f"{tnc.stop_class} ({tnc.stop_reason}) — partial result preserved"
+                return False
+            # Then the bounded retry ladder every failed attempt goes through:
+            # a stall without a task queue, and a retryable ``error:`` (pipe
+            # death, process exit) with or without one. The retry prompt names
+            # the stall and continues from the partial -- never a bare re-run.
+            logger.warning("Task %d attempt %d failed: %s", task.index, attempt, tnc)
+            await sessions.record_failure(session_key)
+            try:
+                await sessions.reset(session_key)
+            except Exception:
+                logger.debug("Session reset between retries failed", exc_info=True)
+            if previous_error and task.error == previous_error:
+                consecutive_same_error += 1
+                if await _check_error_loop(task, consecutive_same_error, on_notify, run):
+                    return False
+            else:
+                consecutive_same_error = 0
+            previous_error = task.error
+            run.last_task_time = _time.time()
+            if attempt < MAX_RETRIES:
+                continue
+            task.status = TaskStatus.FAILED
+            return False
         except Exception as exc:
             task.error = str(exc)
             logger.warning("Task %d attempt %d failed: %s", task.index, attempt, exc)
             await sessions.record_failure(session_key)
 
+            # A dependency error (a 429 with Retry-After, a 5xx, an auth
+            # failure) is not a logic failure: the step parks in
+            # ``waiting_dependency`` and its lane slot is released until the
+            # coordinator wakes it. Terminal signals end the step.
+            signal = classify_exception(exc) if taskq is not None else None
+            if signal is not None and taskq is not None:
+                dependency_waits += 1
+                if not signal.retryable or dependency_waits > DEPENDENCY_MAX_ATTEMPTS:
+                    task.status = TaskStatus.FAILED
+                    task.error = (
+                        f"dependency {signal.dependency_scope} {signal.kind}: {signal.detail}"
+                    )
+                    return False
+                await on_notify(
+                    f"\u23f3 Task {task.index}: waiting on {signal.dependency_scope}",
+                    f"{signal.kind}: {signal.detail or exc}",
+                    run=run,
+                )
+                resumed = await taskq.admission.yield_dependency(taskq, signal)
+                if not resumed:
+                    task.status = TaskStatus.FAILED
+                    task.error = (
+                        f"dependency {signal.dependency_scope} unavailable: "
+                        f"{signal.detail or exc}"
+                    )
+                    return False
+                taskq.running({"index": task.index, "woken_from": signal.dependency_scope})
+                run.last_task_time = _time.time()
+                attempt -= 1
+                continue
             # Reset session between retries to avoid StreamReader corruption
             # ("readuntil() called while another coroutine is already waiting")
             try:
@@ -730,6 +936,7 @@ async def execute_task(
 
         task.status = TaskStatus.PASSED
         task.error = ""
+        _consume_applied_answers()
         return True
 
     task.status = TaskStatus.FAILED

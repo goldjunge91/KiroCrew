@@ -1494,6 +1494,12 @@ class AcpProvider(LLMProvider):
             mcp_server_name=e.mcp_server_name,
             diff_old_text=e.diff_old_text,
             diff_path=e.diff_path,
+            # Typed execution-layer status (``kirocrew/status`` / the watchdog's
+            # ``waiting_input`` classification). The consumers read it here:
+            # chat_runner's tool-stall continuation takes ``wait_reason`` from
+            # it before the evidence text, and the sub-agent run loop yields
+            # its lane slot (``waiting_input`` WaitRecord) on it.
+            status=e.status,
         )
 
     async def stream(self, message: str) -> AsyncIterator[LLMEvent]:

@@ -229,6 +229,70 @@ class TestCapChangesAndTheQueue:
             loop.close()
 
 
+class TestCapChangeVersusAdaptiveClamp:
+    """A config cap change moves the CEILING; the adaptive bound sits under it.
+
+    ``set_effective_cap`` (the adaptive controller's seam) and ``apply_limits``
+    (the user's cap) write two different fields; every admission read site sees
+    ``min`` of the two. Neither path ever writes the other's value.
+    """
+
+    def test_reload_raises_the_ceiling_but_the_adaptive_bound_holds(self) -> None:
+        mgr = _mgr(max_concurrent=4)
+        mgr.set_effective_cap(2)
+        fresh = KiroCrewConfig()
+        fresh.agent.max_subagents = 8
+        mgr.apply_limits(fresh)
+        assert mgr.user_max_concurrent == 8
+        assert mgr.max_concurrent == 2
+
+    def test_reload_below_the_adaptive_bound_clamps_to_the_new_ceiling(self) -> None:
+        mgr = _mgr(max_concurrent=8)
+        mgr.set_effective_cap(6)
+        fresh = KiroCrewConfig()
+        fresh.agent.max_subagents = 3
+        mgr.apply_limits(fresh)
+        assert mgr.max_concurrent == 3
+        # Lifting the adaptive bound later cannot exceed the ceiling.
+        assert mgr.set_effective_cap(None) == 3
+
+    def test_adaptive_raise_pumps_the_queue_like_a_config_raise(self) -> None:
+        mgr = _mgr(max_concurrent=5)
+        mgr.set_effective_cap(3)
+        mgr._running_count = 3
+        mgr._spawn_stagger_secs = 0.0
+        mgr._last_spawn_ts = 0.0
+        mgr.spawn = MagicMock(return_value=None)  # type: ignore[method-assign]
+        mgr._emit_queue_depth = MagicMock()  # type: ignore[method-assign]
+        mgr._queue.append({"task": "queued work", "parent_session_key": "p", "batch_id": ""})
+        mgr.set_effective_cap(4)
+        mgr.spawn.assert_called_once()
+
+    def test_adaptive_pause_admits_nothing_and_cancels_nothing(self) -> None:
+        mgr = _mgr(max_concurrent=8)
+        mgr._running_count = 3
+        mgr.set_effective_cap(0)
+        assert mgr.max_concurrent == 0
+        assert mgr._running_count == 3
+        should_queue, slot_free = mgr._admission._should_stagger_queue_impl(1e9)
+        assert should_queue is True and slot_free is False
+
+    @pytest.mark.asyncio
+    async def test_dispatched_reload_never_shrinks_the_ceiling_to_the_bound(self) -> None:
+        mgr = _mgr(max_concurrent=4)
+        mgr.set_effective_cap(1)
+        fresh = KiroCrewConfig()
+        fresh.agent.max_subagents = 6
+        with patch("kiro_crew.subagent.resolve_max_subagents", return_value=6):
+            await _dispatch(fresh, "agent.max_subagents")
+            # A second, unrelated reload takes the "sizing unchanged" path and
+            # must keep the USER cap, not adopt the adaptive value as ceiling.
+            fresh.agent.completion_keep = "tail"
+            await _dispatch(fresh, "agent.completion_keep")
+        assert mgr.user_max_concurrent == 6
+        assert mgr.max_concurrent == 1
+
+
 class TestSubscription:
     def test_manager_registers_on_the_process_watcher(self) -> None:
         mgr = _mgr()
