@@ -4847,6 +4847,14 @@
         "usage_tracking_is_not_available_for": "Usage tracking is not available for {{provider}}."
       },
       "vectorMemoryCard": {
+        "legacy_vectors_warning": "These vectors predate the record of their model file. If you changed that file, reapply it in Embedding Model settings to rebuild them.",
+        "legacy_vectors_warning_path_error": "These vectors predate the record of their model file, and the file at the configured path cannot be used right now. Fix the model path first, then apply it to rebuild them.",
+        "verification_pending": "Model verification is running. Memory uses keyword search meanwhile.",
+        "verification_failed": "The model file {{path}} could not be read for verification. Make sure the file exists and is readable, then apply it again.",
+        "download_error_detail": "The bundled model could not be downloaded. Check your network or proxy, then retry.",
+        "model_error_path": "{{message}} Path: {{path}}",
+        "repair_unknown": "Some memory stores could not be checked, so the rebuild is not confirmed for all of them. The check retries automatically while this page is open, and a closed store is rebuilt when it next opens. If this keeps showing, check the gateway log.",
+        "repair_pending": "The rebuild after the model change is still in progress: {{vectors}} memories still need a new vector, {{invalidation}} open stores still hold old vectors to clear, and {{deferred}} closed or unavailable stores will be rebuilt when they next open.",
         "column_importance": "Importance",
         "column_score": "Score",
         "column_text": "Text",

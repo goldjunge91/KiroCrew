@@ -1041,8 +1041,8 @@ async def test_result_and_list(monkeypatch) -> None:
 
 async def test_run_ids_are_deterministic_monotonic() -> None:
     svc = WorkflowService(sessions=FakeSessions([]))
-    a = svc._new_run_id()
-    b = svc._new_run_id()
+    a = await svc._new_run_id()
+    b = await svc._new_run_id()
     assert a == "wf_000001" and b == "wf_000002"
 
 

@@ -69,6 +69,7 @@ from kiro_crew.task_reporter import (  # noqa: F401  (NotifyCallback re-exported
     notify,
     save_progress,
 )
+from kiro_crew.workflow_memory import private_task_operation
 
 if TYPE_CHECKING:
     from kiro_crew.context import ContextBuilder
@@ -612,6 +613,7 @@ class TaskRunner:
 
     # ── Plan Mode ──
 
+    @private_task_operation
     async def plan(
         self,
         input_text: str = "",
@@ -882,6 +884,7 @@ class TaskRunner:
             "force_approval": task.force_approval,
         }
 
+    @private_task_operation
     async def execute_plan(
         self,
         task_id: str,
@@ -1750,6 +1753,7 @@ class TaskRunner:
         )
         return False
 
+    @private_task_operation
     async def retry_from_task(self, task_id: str, from_task: int, agent: str = "") -> str:
         run = self._resolve_task(task_id)
         if not run:
@@ -2220,7 +2224,9 @@ class TaskRunner:
                 # then os.replace onto the final path so a crash/kill/full-disk
                 # mid-write can never leave a truncated registry that
                 # _load_runs would otherwise have to discard.
-                atomic_write(self._runs_path(), payload, fsync=True)
+                from kiro_crew.workflow_memory import write_task_snapshot
+
+                write_task_snapshot(self._runs_path(), payload, writer=atomic_write)
             except OSError:
                 logger.debug("Failed to persist runs", exc_info=True)
                 return
@@ -2266,8 +2272,10 @@ class TaskRunner:
             )
             return
         try:
-            items = json.loads(raw)
-        except (ValueError, OSError) as exc:
+            from kiro_crew.workflow_memory import WorkflowMemoryError, read_task_snapshot
+
+            items = json.loads(read_task_snapshot(path, public_payload=raw))
+        except (ValueError, OSError, WorkflowMemoryError) as exc:
             # Never silently discard run state on a corrupt/truncated file:
             # surface the corruption loudly and preserve the bad file as a
             # sidecar for recovery instead of returning an empty registry.

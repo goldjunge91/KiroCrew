@@ -3630,7 +3630,7 @@ async def start_dashboard(
     # --- Dynamic Workflows ---
     try:
         from kiro_crew.dashboard.handlers import workflows as wf_handlers
-        from kiro_crew.dashboard.workflow_inject import inject_workflow_result
+        from kiro_crew.dashboard.workflow_inject import inject_bound_workflow_result
         from kiro_crew.security import redact_credentials, redact_exfiltration_urls
         from kiro_crew.workflows.service import WorkflowService
 
@@ -3685,7 +3685,11 @@ async def start_dashboard(
                     logger.warning("workflow %s auto-turn failed", run_id, exc_info=True)
 
             try:
-                inject_workflow_result(state, run_id, snapshot, on_injected=_auto_turn)
+                delivery = asyncio.create_task(
+                    inject_bound_workflow_result(state, run_id, snapshot, on_injected=_auto_turn)
+                )
+                state._background_tasks.add(delivery)
+                delivery.add_done_callback(state._background_tasks.discard)
             except Exception:
                 logger.debug("workflow on_done injection failed", exc_info=True)
 
@@ -3730,6 +3734,7 @@ async def start_dashboard(
 
         state.workflow_service = WorkflowService(
             sessions=sessions,
+            context_builder=state.context_builder,
             on_done=_wf_on_done,
             on_event=_wf_on_event,
             now_fn=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

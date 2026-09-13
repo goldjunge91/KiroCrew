@@ -23,11 +23,15 @@ import hashlib
 import json
 import logging
 import os
+import stat
 from pathlib import Path
 from typing import Optional
 
+from kiro_crew import platform_compat
 from kiro_crew.config.paths import config_dir
+from kiro_crew.pinned_fs import fd_real_path
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+from kiro_crew.workflow_memory import private_payload_path, read_binding
 
 # Optional dependency (gate F1): the workflows engine must stay importable without
 # the full app/config stack. Imported at module top via try/except so the
@@ -116,6 +120,9 @@ class WorkflowRunStore:
         if safe != run_id:
             digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:12]
             safe = f"{safe}-{digest}" if safe else digest
+        binding = read_binding(run_id)
+        if binding is not None and binding["memory_store"]:
+            return private_payload_path(run_id)
         return self._runs_dir / f"{safe}.json"
 
     def save(self, run_id: str, store_json: dict) -> None:
@@ -131,7 +138,13 @@ class WorkflowRunStore:
         except Exception:  # noqa: BLE001
             logger.debug("workflow store: serialize failed for %s", run_id, exc_info=True)
             return
+        read_binding(run_id, required=bool(store_json.get("execution_binding_version")))
         path = self._path_for(run_id)
+        if path.parent != self._runs_dir:
+            from kiro_crew import platform_compat
+
+            platform_compat.make_owner_only_dir(path.parent)
+            platform_compat.restrict_dir_to_owner(path.parent)
         tmp = path.with_suffix(".json.tmp")
         try:
             tmp.write_text(payload, encoding="utf-8")
@@ -169,15 +182,67 @@ class WorkflowRunStore:
         Bad/corrupt files are skipped (never raise). The registry decides how to
         rehydrate (e.g. demote a 'running' run to failed-interrupted).
         """
-        if not self._runs_dir.is_dir():
-            return []
+        roots = [self._runs_dir]
+        try:
+            roots.append(private_payload_path("discovery").parent)
+        except Exception as exc:
+            logger.debug(
+                "workflow store: private discovery root unavailable (%s)", type(exc).__name__
+            )
         out: list[tuple[float, dict]] = []
-        for f in self._runs_dir.glob("*.json"):
+        for root in roots:
             try:
-                obj = json.loads(f.read_text(encoding="utf-8"))
-                if isinstance(obj, dict) and obj.get("run_id"):
-                    out.append((f.stat().st_mtime, obj))
-            except Exception:  # noqa: BLE001 - skip corrupt files
-                logger.debug("workflow store: skip unreadable %s", f, exc_info=True)
+                if not root.is_dir():
+                    continue
+                resolved_root = root.resolve()
+                files = list(root.glob("*.json"))
+            except Exception as exc:
+                logger.debug("workflow store: discovery root unavailable (%s)", type(exc).__name__)
+                continue
+            for f in files:
+                try:
+                    # Resolve the trusted root once, not each candidate: legitimate
+                    # data-home aliases are allowed, redirects after this point are not.
+                    # Validate and read the same inode, including its mtime. Workflow
+                    # payloads exceed the small identity-record reader's size cap.
+                    fd = platform_compat.open_file_no_reparse(f, nonblocking=True)
+                    try:
+                        info = os.fstat(fd)
+                        opened = fd_real_path(fd)
+                        if (
+                            not stat.S_ISREG(info.st_mode)
+                            or info.st_nlink != 1
+                            or (
+                                platform_compat.IS_POSIX
+                                and info.st_uid != platform_compat.local_user_id()
+                            )
+                            or opened is None
+                            or Path(opened) != resolved_root / f.name
+                        ):
+                            continue
+                        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as stream:
+                            obj = json.load(stream)
+                    finally:
+                        os.close(fd)
+                    if not isinstance(obj, dict) or not isinstance(obj.get("run_id"), str):
+                        continue
+                    run_id = obj["run_id"]
+                    binding = read_binding(
+                        run_id, required=bool(obj.get("execution_binding_version"))
+                    )
+                    private = binding is not None and bool(binding["memory_store"])
+                    if private != (root != self._runs_dir):
+                        continue
+                    if private and f != private_payload_path(run_id):
+                        continue
+                    out.append((info.st_mtime, obj))
+                except Exception as exc:  # malformed data grants no restored execution authority
+                    logger.debug(
+                        "workflow store: skip unreadable record %s (%s)",
+                        hashlib.sha256(f.name.encode("utf-8", errors="surrogatepass")).hexdigest()[
+                            :12
+                        ],
+                        type(exc).__name__,
+                    )
         out.sort(key=lambda t: t[0])
         return [obj for _, obj in out]

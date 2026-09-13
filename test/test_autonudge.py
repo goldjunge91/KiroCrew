@@ -5173,13 +5173,16 @@ class TestSentinelPathRepair:
         # Idempotent: a second pass must not append another segment either.
         assert _an.repair_sentinel_path(_an.repair_sentinel_path(original)) == original
 
-    def test_unnormalized_path_escaping_legacy_is_preserved(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("home_parent", ["plain", ".kiro/crew/scratch"])
+    def test_unnormalized_path_escaping_legacy_is_preserved(
+        self, tmp_path, monkeypatch, home_parent
+    ):
         """``~/.kirocrew/../workspace/STOP`` normalizes OUTSIDE the legacy root.
 
         A purely lexical prefix test would treat it as legacy-contained and
         rewrite an external workspace sentinel to the wrong location.
         """
-        home = tmp_path / "home"
+        home = tmp_path / home_parent / "home"
         current = home / ".kiro" / "crew"
         current.mkdir(parents=True)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
@@ -5190,7 +5193,7 @@ class TestSentinelPathRepair:
         # Preserved verbatim — it normalizes outside the legacy root, so there is
         # nothing to re-home, and rewriting it would point at the wrong place.
         assert repaired == original
-        assert ".kiro/crew" not in repaired
+        assert not Path(repaired).resolve().is_relative_to(current.resolve())
 
     def test_live_legacy_rooted_workspace_is_not_rehomed(self, tmp_path, monkeypatch):
         """An absolute workspace dir INSIDE the legacy tree must be left alone.

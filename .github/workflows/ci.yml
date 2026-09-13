@@ -2491,6 +2491,13 @@ jobs:
           export I18N_BASE_REF
           npm run i18n:render
 
+      - name: Require real private workflow MCP execution
+        env:
+          KIROCREW_E2E: "1"
+          KIROCREW_E2E_REQUIRE: "1"
+          KIROCREW_STRICT_ON_LOOP_PERSIST: "1"
+        run: python -m pytest -q -n0 --no-cov --timeout=300 test/e2e/test_private_workflow_memory.py
+
       - name: Run E2E (smoke + Playwright)
         # KIROCREW_E2E=1 is set by `setup.py test_e2e` itself. KIROCREW_E2E_REQUIRE=1
         # turns environment-resolution misses (missing website dir, Playwright CLI,

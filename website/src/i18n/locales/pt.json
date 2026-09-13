@@ -12069,6 +12069,14 @@
         "usage_tracking_is_not_available_for": "O acompanhamento de uso não está disponível para {{provider}}."
       },
       "vectorMemoryCard": {
+        "legacy_vectors_warning": "Estes vetores foram criados antes do registro do arquivo do modelo. Se você alterou esse arquivo, aplique-o novamente nas configurações do modelo de embeddings para reconstruí-los.",
+        "legacy_vectors_warning_path_error": "Estes vetores foram criados antes do registro do arquivo do modelo, e o arquivo no caminho configurado não pode ser usado agora. Corrija primeiro o caminho do modelo e depois aplique-o para reconstruí-los.",
+        "verification_pending": "A verificação do modelo está em andamento. Enquanto isso, a memória usa a busca por palavras-chave.",
+        "verification_failed": "Não foi possível ler o arquivo do modelo {{path}} para verificação. Confirme que o arquivo existe e pode ser lido e depois aplique-o novamente.",
+        "download_error_detail": "Não foi possível baixar o modelo incluído. Verifique sua rede ou proxy e tente novamente.",
+        "model_error_path": "{{message}} Caminho: {{path}}",
+        "repair_unknown": "Alguns armazenamentos de memória não puderam ser verificados, então a reconstrução não está confirmada para todos. A verificação é repetida automaticamente enquanto esta página estiver aberta, e um armazenamento fechado é reconstruído na próxima vez que for aberto. Se isto continuar aparecendo, verifique o log do gateway.",
+        "repair_pending": "A reconstrução após a troca de modelo ainda está em andamento: {{vectors}} memórias ainda precisam de um novo vetor, {{invalidation}} armazenamentos abertos ainda têm vetores antigos para limpar e {{deferred}} armazenamentos fechados ou indisponíveis serão reconstruídos na próxima vez que forem abertos.",
         "column_importance": "Importância",
         "column_score": "Pontuação",
         "column_text": "Texto",

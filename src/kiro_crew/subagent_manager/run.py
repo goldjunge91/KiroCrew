@@ -920,6 +920,9 @@ class RunEventCoordinator(ManagerComponent):
             provider_type=self._manager._provider_label_of(client),
             model_window=_sub_window,
             context_groups=_groups,
+            context_provider=client,
+            agent=agent or None,
+            resumed=_resumed,
         )
         # The one place the resolved scope and its cost are both known — without
         # this, "the sub-agent didn't know X" is undebuggable after the fact.

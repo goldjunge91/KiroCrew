@@ -12069,6 +12069,14 @@
         "usage_tracking_is_not_available_for": "Il monitoraggio dell’utilizzo non è disponibile per {{provider}}."
       },
       "vectorMemoryCard": {
+        "legacy_vectors_warning": "Questi vettori precedono la registrazione del file del modello. Se hai modificato il file, riapplicalo nelle impostazioni del modello di embedding per ricostruirli.",
+        "legacy_vectors_warning_path_error": "Questi vettori precedono la registrazione del file del modello, e il file nel percorso configurato al momento non è utilizzabile. Correggi prima il percorso del modello, poi applicalo per ricostruirli.",
+        "verification_pending": "Verifica del modello in corso. Nel frattempo, la memoria usa la ricerca per parole chiave.",
+        "verification_failed": "Impossibile leggere il file del modello {{path}} per la verifica. Assicurati che il file esista e sia leggibile, poi applicalo di nuovo.",
+        "download_error_detail": "Impossibile scaricare il modello incluso. Controlla la rete o il proxy, poi riprova.",
+        "model_error_path": "{{message}} Percorso: {{path}}",
+        "repair_unknown": "Alcuni archivi di memoria non sono stati verificati, quindi la ricostruzione non è confermata per tutti. Il controllo si ripete automaticamente finché questa pagina resta aperta, e un archivio chiuso viene ricostruito alla prossima apertura. Se il messaggio continua a comparire, controlla il log del gateway.",
+        "repair_pending": "La ricostruzione dopo il cambio di modello è ancora in corso: {{vectors}} ricordi attendono ancora un nuovo vettore, {{invalidation}} archivi aperti contengono ancora vecchi vettori da cancellare e {{deferred}} archivi chiusi o non disponibili verranno ricostruiti alla prossima apertura.",
         "column_importance": "Importanza",
         "column_score": "Punteggio",
         "column_text": "Testo",

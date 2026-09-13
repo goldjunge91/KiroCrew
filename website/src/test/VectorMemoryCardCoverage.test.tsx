@@ -1014,3 +1014,176 @@ describe('VectorMemoryCard — embedding setup warning', () => {
     expect(screen.queryByTestId('embedding-setup-warning')).not.toBeInTheDocument()
   })
 })
+
+
+describe('VectorMemoryCard localized backend status', () => {
+  afterEach(async () => { await i18next.changeLanguage('en') })
+
+  it('renders coded warning and error in Chinese while keeping the settings action', async () => {
+    await i18next.changeLanguage('zh-CN')
+    setupApi({ emb: {
+      ...ACTIVE_EMB,
+      setup_warning: 'Backend warning fallback', setup_warning_code: 'legacy_embedding_vectors',
+      setup_error: 'Backend error fallback', setup_error_code: 'model_path_not_found',
+      setup_error_params: { path: '/models/missing.gguf' },
+      repair: { generation: 'r', pending_invalidation: 1, pending_vectors: 3, deferred_stores: 2 },
+    } })
+    renderWithProviders(<VectorMemoryCard />)
+    const notice = await screen.findByTestId('embedding-setup-warning')
+    expect(notice).toHaveTextContent('这些向量')
+    expect(within(notice).getByRole('link')).toHaveAttribute('href', '#embed-model-path')
+    expect(screen.queryByText('Backend warning fallback')).not.toBeInTheDocument()
+    expect(screen.queryByText('Backend error fallback')).not.toBeInTheDocument()
+    expect(await screen.findByText(/路径：\/models\/missing.gguf/)).toBeInTheDocument()
+    // With the file missing, the warning tells the user to fix the path first, not to reapply it.
+    expect(notice).toHaveTextContent('先修正模型路径')
+    // The standing-rebuild summary is rendered once, on the Embedding Model card, not here.
+    expect(screen.queryByText(/待生成新向量/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/待重建向量/)).not.toBeInTheDocument()
+  })
+
+  it('folds the raw backend exception under a localized known-code notice', async () => {
+    await i18next.changeLanguage('zh-CN')
+    const raw = 'memory.embed_model_path could not be read: [Errno 5] Input/output error'
+    setupApi({ emb: {
+      ...ACTIVE_EMB,
+      setup_error: raw, setup_error_code: 'model_verification_failed',
+      setup_error_params: { path: '/models/model.gguf', error: raw },
+    } })
+    renderWithProviders(<VectorMemoryCard />)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('/models/model.gguf')
+    expect(alert).toHaveTextContent('重新应用')
+    expect(alert).not.toHaveTextContent('Errno')
+    const details = screen.getByTestId('embedding-setup-diagnostic')
+    expect(details.tagName).toBe('DETAILS')
+    expect(details).not.toHaveAttribute('open')
+    expect(within(details).getByText(raw)).toHaveAttribute('translate', 'no')
+  })
+
+  it('offers no diagnostic fold for a path code, whose body already says it all', async () => {
+    setupApi({ emb: {
+      ...ACTIVE_EMB,
+      setup_error: 'no file', setup_error_code: 'model_path_not_found',
+      setup_error_params: { path: '/models/missing.gguf', error: 'no file' },
+    } })
+    renderWithProviders(<VectorMemoryCard />)
+    await screen.findByRole('alert')
+    expect(screen.queryByTestId('embedding-setup-diagnostic')).not.toBeInTheDocument()
+  })
+})
+
+
+describe('EmbeddingModelCard path state gates Apply', () => {
+  const MISSING = {
+    ...ACTIVE_EMB, model_source: 'custom', model_path: '/models/missing.gguf', model_id: 'custom-model', model_dim: 2,
+    setup_error: 'The model path points at a file that does not exist', setup_error_code: 'model_path_not_found',
+    setup_error_params: { path: '/models/missing.gguf', error: 'The model path points at a file that does not exist' },
+    setup_warning: 'legacy', setup_warning_code: 'legacy_embedding_vectors',
+    reembed: { step: 'idle' },
+  }
+
+  it('shows the known path error under the field and disables Apply on first load', async () => {
+    const { default: EmbeddingModelCard } = await import('../pages/overview/EmbeddingModelCard')
+    setupApi({ emb: MISSING })
+    Object.assign(api, { vectorValidateEmbedModel: vi.fn(), vectorApplyEmbedModel: vi.fn() })
+    renderWithProviders(<EmbeddingModelCard />)
+    const card = screen.getByTestId('embed-model-card')
+    const error = await screen.findByTestId('embed-model-path-status-error')
+    expect(error).toHaveTextContent('No file at that path.')
+    expect(error).not.toHaveTextContent('points at a file')
+    expect(within(card).getByRole('button', { name: /apply/i })).toBeDisabled()
+    expect(screen.getByDisplayValue('/models/missing.gguf')).toBeInTheDocument()
+  })
+
+  it('lets the live check override the stale status once the user edits or re-checks the path', async () => {
+    const { default: EmbeddingModelCard } = await import('../pages/overview/EmbeddingModelCard')
+    setupApi({ emb: MISSING })
+    const validate = vi.fn(async () => ({ ok: true, size_bytes: 2 * 1024 * 1024 }))
+    Object.assign(api, { vectorValidateEmbedModel: validate, vectorApplyEmbedModel: vi.fn() })
+    renderWithProviders(<EmbeddingModelCard />)
+    await screen.findByTestId('embed-model-path-status-error')
+    const input = screen.getByDisplayValue('/models/missing.gguf')
+    // The file was restored in place: one blur re-checks the SAME path and re-enables Apply.
+    fireEvent.blur(input)
+    await waitFor(() => expect(validate).toHaveBeenCalledWith('/models/missing.gguf'))
+    await waitFor(() => expect(screen.queryByTestId('embed-model-path-status-error')).not.toBeInTheDocument())
+    await waitFor(() => expect(within(screen.getByTestId('embed-model-card')).getByRole('button', { name: /apply/i })).toBeEnabled())
+  })
+
+  it('still lets an emptied path revert to the bundled model', async () => {
+    const { default: EmbeddingModelCard } = await import('../pages/overview/EmbeddingModelCard')
+    setupApi({ emb: MISSING })
+    Object.assign(api, { vectorValidateEmbedModel: vi.fn(), vectorApplyEmbedModel: vi.fn() })
+    renderWithProviders(<EmbeddingModelCard />)
+    await screen.findByTestId('embed-model-path-status-error')
+    const input = screen.getByDisplayValue('/models/missing.gguf')
+    fireEvent.change(input, { target: { value: '' } })
+    expect(screen.queryByTestId('embed-model-path-status-error')).not.toBeInTheDocument()
+    fireEvent.blur(input)
+    await screen.findByText(/revert to the bundled model/)
+    expect(within(screen.getByTestId('embed-model-card')).getByRole('button', { name: /apply/i })).toBeEnabled()
+    expect(api.vectorValidateEmbedModel).not.toHaveBeenCalled()
+  })
+
+  it('renders the standing rebuild once, in user vocabulary, with the three counts kept apart', async () => {
+    const { default: EmbeddingModelCard } = await import('../pages/overview/EmbeddingModelCard')
+    setupApi({ emb: {
+      ...ACTIVE_EMB, model_path: '', reembed: { step: 'deferred' },
+      repair: { generation: 'r', pending_invalidation: 2, pending_vectors: 5, deferred_stores: 1 },
+    } })
+    Object.assign(api, { vectorValidateEmbedModel: vi.fn(), vectorApplyEmbedModel: vi.fn() })
+    renderWithProviders(<><VectorMemoryCard diagnosticsOnly /><EmbeddingModelCard /></>)
+    const line = await screen.findByTestId('embed-model-repair-status')
+    expect(line).toHaveTextContent('5 memories still need a new vector')
+    expect(line).toHaveTextContent('2 open stores still hold old vectors')
+    expect(line).toHaveTextContent('1 closed or unavailable stores')
+    expect(line).not.toHaveTextContent(/\b7\b/)
+    expect(screen.getAllByText(/still need a new vector/)).toHaveLength(1)
+  })
+
+  it('does not hide an invalidation-only pending state', async () => {
+    const { default: EmbeddingModelCard } = await import('../pages/overview/EmbeddingModelCard')
+    setupApi({ emb: {
+      ...ACTIVE_EMB, model_path: '', reembed: { step: 'deferred' },
+      repair: { generation: 'r', pending_invalidation: 3, pending_vectors: 0, deferred_stores: 0 },
+    } })
+    Object.assign(api, { vectorValidateEmbedModel: vi.fn(), vectorApplyEmbedModel: vi.fn() })
+    renderWithProviders(<EmbeddingModelCard />)
+    expect(await screen.findByTestId('embed-model-repair-status')).toHaveTextContent('3 open stores still hold old vectors')
+  })
+
+  it('names the retry and the log for an unknown scope instead of promising a fix', async () => {
+    const { default: EmbeddingModelCard } = await import('../pages/overview/EmbeddingModelCard')
+    setupApi({ emb: { ...ACTIVE_EMB, model_path: '', reembed: { step: 'deferred' }, repair: { generation: 'r', unknown_scope: true } } })
+    Object.assign(api, { vectorValidateEmbedModel: vi.fn(), vectorApplyEmbedModel: vi.fn() })
+    renderWithProviders(<EmbeddingModelCard />)
+    const line = await screen.findByTestId('embed-model-repair-status')
+    expect(line).toHaveTextContent('retries automatically')
+    expect(line).toHaveTextContent('gateway log')
+  })
+})
+
+
+describe('embedding model apply shares status with vector memory', () => {
+  it('clears the sibling warning without remounting either card', async () => {
+    const { default: EmbeddingModelCard } = await import('../pages/overview/EmbeddingModelCard')
+    let applied = false
+    setupApi()
+    Object.assign(api, { vectorApplyEmbedModel: vi.fn(async () => { applied = true; return { ok: true } }) })
+    vi.mocked(api.vectorEmbeddingStatus).mockImplementation(async () => ({
+      ...ACTIVE_EMB, model_path: '/models/model.gguf', model_id: 'custom-model', model_dim: 2,
+      setup_warning_code: applied ? '' : 'legacy_embedding_vectors',
+      setup_warning: applied ? '' : 'legacy warning',
+      reembed: { step: applied ? 'done' : 'idle' },
+    }))
+    renderWithProviders(<><EmbeddingModelCard /><VectorMemoryCard diagnosticsOnly /></>)
+    await screen.findByTestId('embedding-setup-warning')
+    const card = screen.getByTestId('embed-model-card')
+    fireEvent.click(within(card).getByRole('button', { name: /apply/i }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Change model' }))
+    await waitFor(() => expect(applied).toBe(true))
+    await waitFor(() => expect(screen.queryByTestId('embedding-setup-warning')).not.toBeInTheDocument())
+  })
+})

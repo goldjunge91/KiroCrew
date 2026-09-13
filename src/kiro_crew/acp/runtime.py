@@ -766,6 +766,7 @@ class AcpRuntime:
         self._model = model
         self._sandbox_mode = sandbox_mode
         self._private_memory = private_memory is True
+        self._native_launch_sources: dict[str, str] = {}
         if self._private_memory:
             from kiro_crew.member_memory_auth import require_private_memory_mcp_backend
 
@@ -1229,9 +1230,11 @@ class AcpRuntime:
                 environ=dict(os.environ),
                 home=Path.home(),
                 sandbox_mode=self._sandbox_mode,
+                private_memory=self._private_memory,
             )
         )
         self._kas_host_auth = plan.host_auth
+        self._native_launch_sources = dict(plan.native_context_documents)
         return plan
 
     async def spawn(self) -> None:
@@ -3288,6 +3291,18 @@ class AcpRuntime:
             kas_custom_agents=kas_agents,
         )
 
+        projected_sources: dict[str, str] = {}
+        if self._private_memory:
+            from kiro_crew.member_essential_context import projected_resource_documents
+
+            for definition in kas_agents or ():
+                if definition.get("id") == active_agent:
+                    projected_sources.update(
+                        await asyncio.to_thread(
+                            projected_resource_documents, definition, str(session_work_dir)
+                        )
+                    )
+
         budget = await self._session_start_budget()
         self._session_inits_in_flight += 1
         session_id = ""
@@ -3423,6 +3438,17 @@ class AcpRuntime:
             )
         else:
             await handle.drain_init(no_report_ceiling=0.0)
+
+        if active_agent == self._agent and str(session_work_dir) == str(self._work_dir):
+            handle.native_context_documents.update(self._native_launch_sources)
+        handle.native_context_documents.update(projected_sources)
+        # Inline prompt bytes and file resources come from the same activated
+        # wire definition. Conditional and indexed resources remain native.
+        for definition in kas_agents or ():
+            if definition.get("id") == active_agent and isinstance(definition.get("prompt"), str):
+                handle.native_context_documents[f"template://{active_agent}#prompt"] = definition[
+                    "prompt"
+                ]
 
         logger.info("Created session %s on runtime PID %d", session_id, self._pid or 0)
         return handle

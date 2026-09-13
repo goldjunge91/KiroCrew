@@ -82,6 +82,7 @@ class RunHandle:
     # False when the durable store had to redact source bytes (or provenance is
     # unknown). Such source remains usable for display/rerun, but not promotion.
     source_is_original: bool = True
+    execution_binding_version: int = 0
     args: dict = field(default_factory=dict)
     agent_results: dict = field(default_factory=dict)  # call_index → result (resume cache)
     # call_index → bounded reason that call failed. Kept next to agent_results so a
@@ -123,6 +124,7 @@ class RunHandle:
             "author": self.author,
             "session_key": self.session_key,
             "source_format": self.source_format,
+            "execution_binding_version": self.execution_binding_version,
             "driver": self.driver,
             "task_id": self.task_id,
             "capabilities": list(self.capabilities),
@@ -202,6 +204,7 @@ class RunHandle:
             "author": self.author,
             "session_key": self.session_key,
             "source_format": self.source_format,
+            "execution_binding_version": self.execution_binding_version,
             "driver": self.driver,
             "task_id": self.task_id,
             "capabilities": list(self.capabilities),
@@ -247,6 +250,7 @@ class RunHandle:
             author=obj.get("author", ""),
             session_key=obj.get("session_key", ""),
             source_format=obj.get("source_format", "python"),
+            execution_binding_version=obj.get("execution_binding_version", 0),
             driver=obj.get("driver", "workflow"),
             task_id=obj.get("task_id", ""),
             capabilities=tuple(obj.get("capabilities") or ()),
@@ -600,6 +604,7 @@ async def start_background_run(
     session_key: str = "",
     source: str = "",
     source_is_original: bool = True,
+    execution_binding_version: int = 0,
     args: Optional[dict] = None,
     workflow_id: str = "",
     workflow_slug: str = "",
@@ -621,6 +626,7 @@ async def start_background_run(
         session_key=session_key,
         source=source,
         source_is_original=source_is_original,
+        execution_binding_version=execution_binding_version,
         args=args or {},
         workflow_id=workflow_id,
         workflow_slug=workflow_slug,

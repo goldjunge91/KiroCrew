@@ -11733,6 +11733,14 @@
         "usage_tracking_is_not_available_for": "{{provider}} 不支持用量跟踪。"
       },
       "vectorMemoryCard": {
+        "legacy_vectors_warning": "这些向量生成时尚未记录模型文件。如果你更换过该文件，请在嵌入模型设置中重新应用，以重建向量。",
+        "legacy_vectors_warning_path_error": "这些向量生成时尚未记录模型文件，而当前配置路径下的文件暂时无法使用。请先修正模型路径，再应用以重建向量。",
+        "verification_pending": "正在校验模型。此期间记忆使用关键词搜索。",
+        "verification_failed": "无法读取模型文件 {{path}} 进行校验。请确认文件存在且可读，然后重新应用。",
+        "download_error_detail": "无法下载内置模型。请检查网络或代理，然后重试。",
+        "model_error_path": "{{message}} 路径：{{path}}",
+        "repair_unknown": "部分记忆存储暂时无法检查，因此尚未确认全部重建完成。此页面打开期间会自动重试检查，已关闭的存储会在下次打开时重建。如果一直显示此提示，请查看 gateway 日志。",
+        "repair_pending": "更换模型后重建仍在进行：{{vectors}} 条记忆待生成新向量，{{invalidation}} 个已打开存储仍有旧向量待清除，{{deferred}} 个已关闭或不可用存储将在下次打开时重建。",
         "column_importance": "重要性",
         "column_score": "得分",
         "column_text": "内容",

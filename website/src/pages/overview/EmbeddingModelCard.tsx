@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Cpu, CheckCircle, XCircle, Loader2 } from 'lucide-react'
 import { Trans } from 'react-i18next'
 import { api } from '../../api/client'
 import { Card, CardTitle, Btn, Input, Badge } from '../../components/ui'
 import Modal from '../../components/Modal'
 import { i18nT } from '../../i18n/t'
+import { isModelPathErrorCode, type EmbeddingSetupFields } from './embeddingStatusText'
 import { SettingRef } from '../../components/settingRef/SettingRef'
 
 /** Live re-embed progress, mirrored from the backend's ReembedProgress. */
@@ -15,7 +17,7 @@ export interface ReembedState {
   error?: string
 }
 
-export interface EmbedModelStatus {
+export interface EmbedModelStatus extends EmbeddingSetupFields {
   model_id?: string
   model_dim?: number
   model_source?: string  // 'default' | 'custom'
@@ -37,6 +39,7 @@ export function reembedBar(r: ReembedState | undefined): { widthPct: number; ind
   const total = r.total ?? 0
   const done = r.done ?? 0
   const frac = total > 0 ? Math.min(100, Math.max(0, Math.round((done / total) * 100))) : null
+  if (r.step === 'deferred') return { widthPct: 0, indeterminate: true }
   if (r.step === 'applying') return { widthPct: 30, indeterminate: true }
   if (r.step === 'running') {
     return frac == null ? { widthPct: 30, indeterminate: true } : { widthPct: frac, indeterminate: false }
@@ -140,6 +143,7 @@ export function embedModelErrorCode(err: unknown): string {
 const POLL_MS = 2000
 
 export default function EmbeddingModelCard() {
+  const queryClient = useQueryClient()
   const [status, setStatus] = useState<EmbedModelStatus | null>(null)
   const [path, setPath] = useState('')
   const [touched, setTouched] = useState(false)
@@ -153,35 +157,45 @@ export default function EmbeddingModelCard() {
     try {
       const s = await api.vectorEmbeddingStatus() as EmbedModelStatus
       setStatus(s)
+      await queryClient.cancelQueries({ queryKey: ['member-memory', 'default', 'embedding-status'] })
+      queryClient.setQueryData(['member-memory', 'default', 'embedding-status'], s)
       // Seed the field from config once, so the user edits their real value
       // rather than retyping it. Never clobber in-progress typing.
       if (!touched) setPath(s.model_path || '')
     } catch { /* the Memory card surfaces connection errors */ }
-  }, [touched])
+  }, [touched, queryClient])
 
   useEffect(() => { load() }, [load])
 
   // Poll only while something is in flight, then stop — the same discipline the
   // Memory card's download poll uses, so an idle dashboard is not chatty.
   useEffect(() => {
-    const busy = reembedBusy(status?.reembed)
-    if (busy && !pollRef.current) {
-      pollRef.current = setInterval(load, POLL_MS)
-    } else if (!busy && pollRef.current) {
-      clearInterval(pollRef.current)
-      pollRef.current = null
-    }
+    const deferred = status?.reembed?.step === 'deferred'
+    const busy = reembedBusy(status?.reembed) || deferred
+    if (!busy) return
+    const timer = setInterval(load, deferred ? 30000 : POLL_MS)
+    pollRef.current = timer
+    return () => { clearInterval(timer); pollRef.current = null }
   }, [status?.reembed, load])
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
   const isCustom = status?.model_source === 'custom'
-  const activePath = status?.model_path || ''
-  const dirty = touched && path.trim() !== activePath
   const reembed = status?.reembed
   const busy = reembedBusy(reembed)
   const pct = reembedPct(reembed)
   const bar = reembedBar(reembed)
+
+  // The configured path is unusable (file moved, deleted, unreadable) and the
+  // field still shows that path: say so under the field and keep Apply off,
+  // because submitting it would fail with the same error. This is derived, not
+  // stored, and yields to what the user does next: editing the path or blurring
+  // the field runs the live check, whose verdict replaces this one. So a file
+  // restored in place needs one blur to re-enable Apply, an edited path is judged
+  // on its own, and an emptied field still reverts to the bundled model.
+  const statusPathError = status && !touched && !checked && !checking && isModelPathErrorCode(status.setup_error_code)
+    ? embedModelErrorMessage({ code: status.setup_error_code, error: status.setup_error })
+    : null
 
   const check = useCallback(async () => {
     const p = path.trim()
@@ -222,7 +236,7 @@ export default function EmbeddingModelCard() {
             {/* A gated candidate reports dim 0 until it finishes loading, and the
               * status endpoint passes that through — rendering "· 0d" mid-swap.
               * Treat an unknown width as an unknown model. */}
-            {status?.model_id && status.model_dim
+            {status?.model_id && status.model_dim && status.model_active !== false
               ? i18nT('pages.overview.embedModel.active', { model: status.model_id, dim: status.model_dim })
               : i18nT('pages.overview.embedModel.active_unknown')}
           </span>
@@ -246,6 +260,12 @@ export default function EmbeddingModelCard() {
         />
         <div className="text-[11px] text-muted mt-1">{i18nT('pages.overview.embedModel.path_hint')}</div>
 
+        {statusPathError && (
+          <div className="text-[11px] mt-1.5 flex items-start gap-1 text-danger" data-testid="embed-model-path-status-error">
+            <XCircle className="lucide-inline" />
+            <span>{statusPathError}</span>
+          </div>
+        )}
         {checking && (
           <div className="text-[11px] text-muted mt-1.5 flex items-center gap-1">
             <Loader2 className="lucide-inline animate-spin" /> {i18nT('pages.overview.embedModel.checking')}
@@ -273,7 +293,7 @@ export default function EmbeddingModelCard() {
           <Btn
             primary
             onClick={() => setConfirmOpen(true)}
-            disabled={!dirty || busy || applying || checking || checked?.ok === false}
+            disabled={!status || busy || applying || checking || checked?.ok === false || !!statusPathError}
           >
             {applying ? i18nT('pages.overview.embedModel.applying') : i18nT('pages.overview.embedModel.apply')}
           </Btn>
@@ -284,9 +304,20 @@ export default function EmbeddingModelCard() {
         {reembed && reembed.step !== 'idle' && (
           <div className="mt-3.5 pt-3 border-t border-border">
             <div className="flex items-center justify-between text-[13px] mb-1.5">
-              <span>
+              {/* The standing-rebuild summary renders HERE and only here: this is
+                * the card that owns Apply, so the numbers sit next to the control
+                * that changes them. The Vector Memory card keeps its own 30s
+                * refetch but does not repeat this line. */}
+              <span data-testid={reembed.step === 'deferred' ? 'embed-model-repair-status' : undefined}>
                 {reembed.step === 'applying' && i18nT('pages.overview.embedModel.loading_model')}
                 {reembed.step === 'running' && i18nT('pages.overview.embedModel.reembedding')}
+                {reembed.step === 'deferred' && (status?.repair?.unknown_scope
+                  ? i18nT('pages.overview.vectorMemoryCard.repair_unknown')
+                  : i18nT('pages.overview.vectorMemoryCard.repair_pending', {
+                    invalidation: status?.repair?.pending_invalidation ?? 0,
+                    vectors: status?.repair?.pending_vectors ?? 0,
+                    deferred: status?.repair?.deferred_stores ?? 0,
+                  }))}
                 {reembed.step === 'done' && i18nT('pages.overview.embedModel.reembed_done')}
                 {reembed.step === 'failed' && i18nT('pages.overview.embedModel.reembed_failed')}
               </span>

@@ -132,6 +132,13 @@ class GatewayHandle:
     #: Bound diagnostics provider (exit status, stderr tail, stdout tail).
     #: ``None`` for handles built outside :func:`spawn_feature_gateway`.
     _diagnostics: Optional[Callable[[], str]] = None
+    _restart: Optional[Callable[[], "GatewayHandle"]] = None
+
+    def restart(self) -> "GatewayHandle":
+        """Restart this harness-owned process, retaining its isolated data home."""
+        if self._restart is None:
+            raise GatewaySpawnError("This handle has no active harness supervisor")
+        return self._restart()
 
     def diagnostics(self) -> str:
         """Exit status plus the stderr and stdout tails of the child, for a
@@ -882,6 +889,28 @@ def _end_escaped_descendants(escaped: dict[int, str]) -> bool:
         time.sleep(0.05)
 
 
+def _launch_gateway(
+    home: Path, env: dict[str, str], *, fixture: str | None, approval: str, crons: bool
+) -> subprocess.Popen:
+    """Launch only our test gateway; no caller-supplied executable or argv."""
+    cmd = [sys.executable, "-m", "kiro_crew", "gateway", "--test-mode"]
+    if fixture is not None:
+        cmd.extend(["--seed", fixture])
+    cmd.extend(["--approval", approval])
+    if not crons:
+        cmd.append("--no-crons")
+    return subprocess.Popen(
+        cmd,
+        # Seeding replaces home atomically; do not keep cwd on its old inode.
+        cwd=home.parent,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=platform_compat.IS_POSIX,
+        creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
+    )
+
+
 @contextlib.contextmanager
 def spawn_feature_gateway(
     fixture: str = "minimal",
@@ -972,43 +1001,7 @@ def spawn_feature_gateway(
             "KIROCREW_SKIP_MODEL_DOWNLOAD": "1",
         }
 
-        cmd = [
-            sys.executable,
-            "-m",
-            "kiro_crew",
-            "gateway",
-            "--test-mode",
-            # ``--seed`` populates the (empty) tmp KIROCREW_HOME from the named
-            # fixture (empty / minimal / rich) before binding the dashboard.
-            # Atomic with the gateway start: a bad fixture name → gateway exits
-            # with seed's exit code before READY, which the readline loop below
-            # surfaces as a GatewaySpawnError with stderr.
-            "--seed",
-            fixture,
-            "--approval",
-            approval,
-        ]
-        if not crons:
-            # Suppress scheduled jobs by default — a stray cron firing during
-            # an unrelated test is a hard-to-diagnose source of flakes. Tests
-            # that specifically exercise the cron path opt back in via
-            # ``crons=True``.
-            cmd.append("--no-crons")
-        proc = subprocess.Popen(
-            cmd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            # Process-group isolation so teardown can reap the whole tree and
-            # child MCP servers / kiro-cli sessions don't outlive their parent
-            # holding ports open. The two kwargs are passed EXPLICITLY (never
-            # **unpacked) per platform-compat.md: on POSIX start_new_session
-            # calls setsid so killpg reaps the group and creationflags=0 is a
-            # no-op; on Windows there is no setsid and CREATE_NEW_PROCESS_GROUP
-            # is what makes the tree taskkill /T-reapable.
-            start_new_session=platform_compat.IS_POSIX,
-            creationflags=platform_compat.CREATE_NEW_PROCESS_GROUP,
-        )
+        proc = _launch_gateway(home, env, fixture=fixture, approval=approval, crons=crons)
 
         # Drain stderr asynchronously into a list so the buffer can't fill
         # and deadlock the subprocess. Using a daemon thread is fine: it
@@ -1034,6 +1027,8 @@ def spawn_feature_gateway(
             pump.start()
 
         known_descendants: dict[int, str] = {}
+        running = True
+        active = True
         try:
             ready = _wait_for_ready_line(
                 proc, timeout=timeout, stderr_buffer=stderr_buffer, pump=pump
@@ -1068,6 +1063,44 @@ def spawn_feature_gateway(
                     f"--- stdout after READY (last) ---\n{out}"
                 )
 
+            def _restart() -> GatewayHandle:
+                nonlocal proc, pump, stderr_buffer, known_descendants, running
+                if not active or not running:
+                    raise GatewaySpawnError("The harness supervisor is no longer active")
+                if not _terminate_process_group(proc, known_descendants):
+                    raise GatewaySpawnError(
+                        "The previous gateway tree did not stop; restart refused"
+                    )
+                running = False
+                # No seed on restart: persisted bindings and payloads are the input.
+                proc = _launch_gateway(home, env, fixture=None, approval=approval, crons=crons)
+                running = True
+                known_descendants = {}
+                stderr_buffer = []
+                if proc.stderr is not None:
+                    threading.Thread(
+                        target=_drain_stderr, args=(proc.stderr, stderr_buffer), daemon=True
+                    ).start()
+                pump = _StdoutPump(proc.stdout) if proc.stdout is not None else None
+                if pump is not None:
+                    pump.start()
+                restarted = _wait_for_ready_line(
+                    proc, timeout=timeout, stderr_buffer=stderr_buffer, pump=pump
+                )
+                if pump is not None:
+                    pump.handoff()
+                port = int(restarted["port"])
+                token = str(restarted["token"])
+                return GatewayHandle(
+                    url=f"http://localhost:{port}/?token={token}",
+                    port=port,
+                    token=token,
+                    home=home,
+                    proc=proc,
+                    _diagnostics=_diagnostics,
+                    _restart=_restart,
+                )
+
             handle = GatewayHandle(
                 url=url,
                 port=port,
@@ -1075,10 +1108,12 @@ def spawn_feature_gateway(
                 home=home,
                 proc=proc,
                 _diagnostics=_diagnostics,
+                _restart=_restart,
             )
             yield handle
         finally:
-            exited = _terminate_process_group(proc, known_descendants)
+            active = False
+            exited = _terminate_process_group(proc, known_descendants) if running else True
     finally:
         # Clean up the tmp home only once the gateway is confirmed gone: a
         # tree kill that failed (a protected descendant, an access denial on

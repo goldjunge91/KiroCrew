@@ -136,7 +136,13 @@ records its own billing and removes that provider after release. It never uses
 the shared V1 background provider. The default background path is unchanged.
 
 Memory content endpoints honor the selected store for import, context preview
-and observability. Legacy Markdown migration is Global V1 only and refuses a
+and observability. During validated private preferences/projects writes,
+identity or filesystem failures return a stable `503 store_unavailable`, without
+including exception text or local store paths in the response. The gateway log
+retains the store, exception type and reason through operational-log credential
+redaction. These failures preserve both profile documents; owner authorization
+still precedes the write, and invalid essential content remains a distinct 400.
+Legacy Markdown migration is Global V1 only and refuses a
 named store; private members copy selected starting knowledge through the owner
 workflow. Automatic episode promotion refuses V2, where changes and forgetting
 remain explicit. Embedding configuration continues to describe the installation.
@@ -707,6 +713,33 @@ Structured memory system backed by SQLite + FAISS + in-process embeddings (vendo
 The store subscribes to the `memory` section in `__init__`, and `reconfigure(memory_cfg)` pushes the retrieval settings onto the running instance: `semantic_confidence_threshold`, `episodic_dedup_threshold`, `episodic_max_results`, `episodic_max_count`, the `decay_rates` table (re-sanitized, not copied) and the `semantic_keys` prefix list (rebuilt from the built-ins plus the configured extras). Everything the class copies out of config at construction is covered, so none of it waits for a gateway restart. Changing a decay rate also invalidates the resident episodic scoring set, which carries the rates it was built with and would otherwise keep ranking on the old curve with no row having moved.
 
 Embedding width is deliberately NOT touched. Changing `memory.embedding_dim` invalidates every stored vector, which is a re-embed rather than a value swap, so it stays boot-only and its apply path is the dashboard's embedding-model route.
+
+### Vector publication across processes
+
+Managed inference pins the actual shared backend before recording database
+provenance. Its signature must match the observed database signature, and a
+pending explicit rebuild refuses inference. Cache hits and coalesced requests
+use that same pinned backend. Results retain their signature and handled request
+through vector normalization; publication rechecks them under SQLite write
+admission. The installation config lock covers managed publication too, so a
+new explicit request cannot land between the final request check and commit.
+Recall checks the same result provenance before publishing its response.
+
+| Caller | Durable content and vector failure contract |
+|---|---|
+| `set_semantic` | Content commits first; failed vector admission, update or commit is logged and leaves the content saved. |
+| `write_lesson` | The rule's primary write must succeed; its vector tail is best effort. |
+| Lazy lesson backfill | A failed derived update does not prevent the primary lesson operation. |
+| `write_episodic` | Content and optional vector share the primary transaction; obsolete vectors become NULL, but primary transaction failures propagate. |
+| Three explicit backfills | Each vector has one transaction; failure propagates for repair reporting, with earlier committed rows retained. |
+| `recall` | No vector write; changed provenance discards the partial result and retries lexical retrieval. |
+
+`_vector_commit` owns derived transaction admission, commit and rollback. Its
+callers do not commit inside it. Failed admission never rolls back a transaction
+it did not start. Rollback failure closes the uncertain connection, retaining
+previously committed content and refusing further use of that connection.
+Resident vector indexes are discarded after rollback. This is per-record repair,
+not a transaction across every database or a guarantee against filesystem failure.
 
 ### Thread safety (`_db_lock`, `threading.RLock`)
 
@@ -1371,6 +1404,18 @@ disagrees with that owner is an error. V1 and unowned legacy stores retain
 their existing context path.
 
 The owner persona and execution prompt share one project-first template resolver.
+A distinct execution template contributes its admitted prompt, resources and
+context settings to the same complete snapshot and digest. Its changes or source
+removals refresh that snapshot without changing the private memory owner. Sources
+shared by both templates occur once; a source changing between their reads refuses
+preparation. Conditional guides on a framework without native selectors have
+an explicit activation path: a user `#guide` reference or a matching file path
+loads the guide's full current text into the snapshot. A supplied user-text span
+excludes generated prefixes from selection; a modify hook's replacement is the
+effective request. Other conditional guides remain guarded discovery pointers.
+Auto relevance and file paths first discovered through tools remain agent-driven:
+the pointer tells the agent to read the complete file when its condition holds,
+not to apply every conditional body unconditionally.
 A project override of a template takes precedence over its global copy. A
 relative `file://` prompt uses the project root when its template comes from the
 project's agents directory, and the user home when it comes from the global
@@ -1390,7 +1435,8 @@ execution template is the owner's template, its custom persona appears only in
 the per-turn essential envelope, not again in the session-start prompt. A
 different execution template still supplies its task instructions. An inherited
 exact product-prompt URI stays in the product session-start path, not in
-essentials. Essential sources continue to refresh on every private member turn.
+essentials. Essential sources are validated on every private member turn; their
+complete snapshot is submitted only when the conversation needs it.
 
 `ContextBuilder` injects the owner's identity, current permanent rules and
 bound custom-template persona on fresh, warm, resumed, post-compaction and
@@ -1426,7 +1472,19 @@ under, a link below the root is still refused. The managed-state isolation
 resolved spelling, so it fires for resolved candidates on symlinked-home hosts
 exactly as it does elsewhere.
 
-These essentials are refreshed from the current source on every member turn.
+These essentials are read and validated on every member turn. The builder
+stages a complete snapshot on the actual serving provider, which suppresses its
+wire envelope after successful consumption while its content, source list and
+scope remain unchanged. Fresh, resumed and post-compaction conversations receive
+a snapshot; changed content or scope receives one complete replacement, explicitly
+superseding sources absent from its source list. Ordinary private chats, member
+DMs, messaging, cron and delegated runs use the same provider receipt contract
+specified in [providers](providers.md#essential-context-delivery-contract).
+Admission, protected identity and permanent-rule checks are not cached by a
+receipt. A missing declared source still refuses; missing optional root guides
+change the snapshot instead. There is no mtime-only content cache or automatic
+retrieval on the warm path.
+
 They have a separate 64,000-character envelope, including wrappers and identity;
 an over-budget or refused essential aborts context construction with a named
 reason rather than truncating its tail. Ordinary session context yields space
@@ -2038,21 +2096,88 @@ A same-name/same-size weight replacement, or reuse of an explicit identity label
 made before the first verified stamp cannot be detected from the old metadata;
 this is the pre-upgrade identity limit. Weight changes after that stamp get a new
 digest, clear the compatibility list and invalidate vectors normally. Explicit
-model apply always removes the compatibility list. The rebuild decision comes
-from the prior settings captured by the config writer's locked mutation and is
-returned with its conditional rollback; verification completing during model
-loading therefore cannot be missed. Inheritance requires a non-empty list whose
-every item is a string. Status warnings, forced rebuild decisions and legacy
-alignment use the same validator; malformed scalar or mixed-list values grant
-no compatibility and show no inheritance warning. When the captured list is
-valid and non-empty, apply rebuilds vectors even for the same file and signature,
-using the existing backfill path. First verification emits one WARNING about inherited vectors;
+model apply always removes the compatibility list and commits a fresh
+`memory.embed_rebuild_generation` alongside the verified model settings. Every
+explicit apply requests a rebuild, including the same file and digest with no
+legacy labels left. Untouched upgrades have an empty generation and retain the
+compatibility behavior above.
+
+Each store records its handled generation in `memory_meta.embedding_rebuild_generation`.
+Alignment checks it before legacy restamping and equal-signature shortcuts.
+The store advances its in-process vector generation before invalidation, clears
+vectors through the existing physical relations, removes stale FAISS files and
+commits the signature and handled generation with the invalidation. SQLite
+immediate admission serializes the request check across connections. An index
+removal failure may leave cleared vectors but never acknowledges the request;
+a transaction failure preserves the previous database state. Existing NULL-only
+backfill repairs the cleared rows without resetting completed rows on retry.
+
+The request survives config rollback, partial failure and restart. Conditional
+rollback checks both this apply's model settings and request identity, preserves
+unrelated edits, and never erases the repair request. A competing model edit
+refuses rollback and leaves the candidate gated. Cached and late-opened V1/V2
+stores share alignment; non-mutating staleness checks also include the request,
+so pending stores use lexical retrieval rather than score stale vectors.
+
+`embedding-status` retains English `setup_warning` and `setup_error` diagnostics
+and adds stable `setup_warning_code`, `setup_error_code` and parameter objects.
+Known codes render fully localized copy that names a next step and never
+interpolates the backend's English exception: `model_verification_failed` keeps
+only `{{path}}`, `model_download_failed` takes no parameter, and both keep the raw
+text reachable through a collapsed "View details" block beside the notice
+(`embeddingSetupDiagnostic`), rendered `translate="no"`. Missing and unknown
+codes still fall back to their diagnostic prose as the body, so a new backend
+code is never swallowed. `model_active` reports the serving loaded backend
+separately. `repair` names its `open_stores` scope, pending invalidations,
+remaining live NULL vectors, deferred closed/unavailable stores and unknown scope.
+It does not open closed stores or claim they are repaired. Public re-embed status
+is `deferred` rather than `done` while that scope is incomplete. Progress counts
+cover open-store work, not a promise of whole-install completion. The dashboard
+renders the standing rebuild ONCE, on the Embedding Model card (the card that
+owns Apply), in user vocabulary with the three counts kept apart:
+`pending_vectors` is memory entries still waiting for a vector,
+`pending_invalidation` is open STORES still holding old vectors, and
+`deferred_stores` is closed or unavailable stores rebuilt when next opened. They
+are never summed, and a state where only the invalidation count is non-zero is
+still shown as pending. `unknown_scope` copy names what actually happens (the
+check retries automatically while the page is open; a closed store is rebuilt
+when it next opens; persistent display means read the gateway log) rather than
+promising that an unavailable store is repaired by opening it. The Vector Memory
+card keeps its 30-second refetch while a rebuild is pending but does not repeat
+the line.
+
+While `_apply_embedding_model` backfills, each store's
+`backfill_missing_embeddings` receives a per-store progress adapter
+(`_store_progress_adapter`) that offsets the store's own `(done, total)` stream by
+the rows earlier stores completed, folds the lesson-to-episode phase reset into a
+running offset instead of moving the bar backward, and never reports a total below
+what has been counted. The exact per-store count is still reconciled from the
+store's NULL count after it finishes, so final `done`/`total`, failures and the
+multi-store total are unchanged; the adapter only keeps the bar moving during a
+single store's sweep.
+
+The prior legacy labels are captured by the config writer's locked mutation.
+Inheritance requires a non-empty list whose every item is a string. Status
+warnings and legacy alignment use the same validator; malformed scalar or
+mixed-list values grant no compatibility and show no inheritance warning.
+First verification emits one WARNING about inherited vectors;
 embedding status keeps the same text in `setup_warning` until explicit apply.
 The warning is written for the operator, not in code vocabulary: the vectors
 predate the record of which model file produced them, and a changed file needs
 the model reapplied. The Memory tab's vector card renders it as a status notice
 with a link that moves focus to the Embedding Model card's path field, so the
-fix is reachable from the notice. This compatibility choice preserves unchanged custom installations but
+fix is reachable from the notice. When the same status also carries a
+`model_path_*` error code (the configured file is missing, unreadable or not a
+file), the warning swaps its "reapply" clause for "fix the model path first, then
+apply" (`legacy_vectors_warning_path_error`), and the Embedding Model card echoes
+the localized path error under its path field and keeps Apply disabled while the
+field still shows the configured path: submitting it would fail with the same
+error. That gate is DERIVED from the current status plus the field's edit and
+check state, never stored, so it yields to what the user does next: editing the
+path or blurring the field runs the live validate call, whose verdict replaces
+the status-derived one (a file restored in place needs one blur; an emptied field
+still reverts to the bundled model). A stale status can therefore never block a
+correction or a valid reapply of the same file. This compatibility choice preserves unchanged custom installations but
 does not prove the provenance of vectors created before any weight digest.
 Signatures retain the original SHA-256 encoding of `model_id|dim`, truncated to
 16 hex characters, so unchanged bundled vectors need no rebuild. Custom-model
@@ -4449,3 +4574,14 @@ offers **Keep editing** and **Discard changes**; keeping the draft leaves the
 original member and document mounted. Old initialization-error metadata is
 displayed as historical diagnostic text and does not suppress retry of a valid
 V1 conversation.
+
+### Private workflow execution
+
+Dynamic workflows bind their run and worker sessions through the existing
+protected session registry. The workflow identity is immutable across authoring,
+worker reuse, restart and subtree replay. Each private prompt is built after
+`inherit_session_memory` and store preparation; a provider template selects a
+role, never another store. Private run payloads remain under the hidden memory
+root. Worker MCP calls keep their real process/session proof and ordinary
+ownership checks. See [workflows](workflows.md) for the execution and access
+contract. Invalid or retired memory refuses execution without Global V1 fallback.

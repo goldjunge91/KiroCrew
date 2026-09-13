@@ -12069,6 +12069,14 @@
         "usage_tracking_is_not_available_for": "Le suivi de l’utilisation n’est pas disponible pour {{provider}}."
       },
       "vectorMemoryCard": {
+        "legacy_vectors_warning": "Ces vecteurs datent d’avant l’enregistrement de leur fichier de modèle. Si vous avez changé ce fichier, réappliquez-le dans les paramètres du modèle de plongement pour les reconstruire.",
+        "legacy_vectors_warning_path_error": "Ces vecteurs datent d’avant l’enregistrement de leur fichier de modèle, et le fichier du chemin configuré ne peut pas être utilisé pour l’instant. Corrige d’abord le chemin du modèle, puis applique-le pour les reconstruire.",
+        "verification_pending": "La vérification du modèle est en cours. La mémoire utilise la recherche par mots-clés en attendant.",
+        "verification_failed": "Impossible de lire le fichier de modèle {{path}} pour le vérifier. Vérifie que le fichier existe et qu’il est lisible, puis applique-le à nouveau.",
+        "download_error_detail": "Impossible de télécharger le modèle intégré. Vérifie ton réseau ou ton proxy, puis réessaie.",
+        "model_error_path": "{{message}} Chemin : {{path}}",
+        "repair_unknown": "Certains magasins de mémoire n’ont pas pu être vérifiés, la reconstruction n’est donc pas confirmée pour tous. La vérification est relancée automatiquement tant que cette page est ouverte, et un magasin fermé est reconstruit à sa prochaine ouverture. Si ce message persiste, consulte le journal du gateway.",
+        "repair_pending": "La reconstruction après le changement de modèle est toujours en cours : {{vectors}} souvenirs attendent encore un nouveau vecteur, {{invalidation}} magasins ouverts contiennent encore d’anciens vecteurs à effacer, et {{deferred}} magasins fermés ou indisponibles seront reconstruits à leur prochaine ouverture.",
         "column_importance": "Importance",
         "column_score": "Pertinence",
         "column_text": "Texte",

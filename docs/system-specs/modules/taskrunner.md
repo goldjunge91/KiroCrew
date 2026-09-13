@@ -766,3 +766,31 @@ Left/right split layout: 260px sidebar + detail/compose area.
   - **Tasks tab**: DAG/Phased view toggle with `DagView` and `PhasedView` components
 - **Action buttons**: Execute/Chat/Discard (planned), ■ Cancel (running), ↻ Restart/⏰ Schedule (completed/failed)
 - **WS-driven updates**: `push_refresh("taskrunner")` on every notification, 3s auto-refresh polling
+
+### Private task snapshot storage
+
+The public `runs.json` retains normal V1 rows. A private task contributes only
+its task ID and a private-payload reference there. Source, input, descriptions,
+results, errors and learned lessons are written first to an owner-only snapshot
+under `memory_stores/.task-runs`, using the existing serialized snapshot writer.
+The path is keyed by the owning public registry path, not a caller-supplied store.
+Restore resolves private references only through the hidden original rows and
+surviving protected `taskrunner:<id>:runtime` bindings. Editing a public reference
+cannot replace private content or select another memory store. Missing authority
+refuses hydration and preserves recovery material rather than loading a V1 task.
+Saved task-plan invocations have no spec file, so `save_progress` writes no
+project-visible progress file for those runs.
+Hidden rows that are no longer referenced remain available for recovery; only
+the public registry selects which runs are visible after restart. A later public
+write cannot erase an unreadable private run's preserved payload.
+
+### Private task diagnostics
+
+Planning, execution and retry derive a diagnostic scope from protected session
+identity. Their background tasks inherit that scope. TaskRunner, task executor,
+planner, reporter, git coordination and dynamic workflow logs emit only a stable
+opaque task token plus level or exception type while in that scope. Message
+arguments, exception text and tracebacks do not reach shared gateway logs.
+The original task error remains in the hidden task snapshot for owner recovery.
+Public tasks retain their existing diagnostic messages and tracebacks. This
+changes emitted diagnostics, not the sandbox or governance ceiling.

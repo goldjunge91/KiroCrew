@@ -1258,3 +1258,40 @@ def test_terminate_preserves_home_after_root_exits() -> None:
         with contextlib.suppress(OSError):
             proc.kill()
         proc.wait(timeout=10)
+
+
+@pytest.mark.parametrize("field", ["command", "argv", "args", "executable"])
+def test_gateway_launcher_rejects_command_input(tmp_path, monkeypatch, field):
+    from kiro_crew.testing import harness
+
+    with patch.object(harness.subprocess, "Popen") as spawn:
+        with pytest.raises(TypeError, match="unexpected keyword"):
+            harness._launch_gateway(
+                tmp_path,
+                {},
+                fixture=None,
+                approval="reads",
+                crons=False,
+                **{field: "request-supplied-command"},
+            )
+        spawn.assert_not_called()
+
+
+def test_gateway_launcher_fixed_command_and_restart_seed(tmp_path):
+    from kiro_crew.testing import harness
+
+    env = {"KIROCREW_HOME": str(tmp_path)}
+    with patch.object(harness.subprocess, "Popen") as spawn:
+        for fixture in ("minimal", None):
+            harness._launch_gateway(tmp_path, env, fixture=fixture, approval="reads", crons=False)
+            cmd = spawn.call_args.args[0]
+            expected = [sys.executable, "-m", "kiro_crew", "gateway", "--test-mode"]
+            if fixture is not None:
+                expected += ["--seed", fixture]
+            assert cmd == expected + ["--approval", "reads", "--no-crons"]
+            assert spawn.call_args.kwargs["cwd"] == tmp_path.parent
+            assert spawn.call_args.kwargs["env"] is env
+            assert spawn.call_args.kwargs["start_new_session"] == platform_compat.IS_POSIX
+            assert (
+                spawn.call_args.kwargs["creationflags"] == platform_compat.CREATE_NEW_PROCESS_GROUP
+            )

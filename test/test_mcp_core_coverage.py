@@ -696,27 +696,43 @@ class TestWorkflowAuthor:
 
 
 class TestWorkflowRun:
-    def test_refuses_to_start_without_strict_session_identity(self):
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {"workflow": "debug-project"},
+            {"source": "ctx.agent('x')"},
+            {"intent": "debug the project"},
+        ],
+    )
+    def test_refuses_to_start_without_strict_session_identity(self, args):
         with (
             patch.object(mcp_core, "_resolve_session_key_strict", return_value=""),
             patch.object(mcp_core, "_post") as mocked,
         ):
-            out = _call_tool("workflow_run", {"workflow": "debug-project"})
+            # The fixture still offers a lenient identity; it cannot authorize a run.
+            out = _call_tool("workflow_run", args)
 
-        assert "cannot verify caller identity" in out
+        assert "Cannot verify the current workflow caller" in out
+        assert "No workflow was started" in out
         mocked.assert_not_called()
 
-    def test_ad_hoc_run_keeps_the_existing_identity_fallback(self):
+    @pytest.mark.parametrize(
+        "args, endpoint",
+        [
+            ({"source": "ctx.agent('x')"}, "/api/workflows/run"),
+            ({"intent": "debug the project"}, "/api/workflows/run_intent"),
+        ],
+    )
+    def test_ad_hoc_run_passes_only_the_verified_identity(self, args, endpoint):
         with (
-            patch.object(mcp_core, "_resolve_session_key_strict", return_value=""),
+            patch.object(
+                mcp_core, "_resolve_session_key_strict", return_value="dashboard:verified"
+            ),
             patch.object(mcp_core, "_post", return_value={"run_id": "r-ad-hoc"}) as mocked,
         ):
-            out = _call_tool("workflow_run", {"source": "ctx.agent('x')"})
+            out = _call_tool("workflow_run", args)
 
-        mocked.assert_called_once_with(
-            "/api/workflows/run",
-            {"source": "ctx.agent('x')"},
-        )
+        mocked.assert_called_once_with(endpoint, args, session_key="dashboard:verified")
         assert "r-ad-hoc" in out
 
     def test_saved_workflow_reference_runs_exact_definition(self):

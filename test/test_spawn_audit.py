@@ -1481,7 +1481,12 @@ BENIGN_SPAWNS: frozenset[str] = frozenset(
         # agent-influenced input; sandboxing the probe would be circular for the
         # same reason as the other boot-time self-checks above.
         "slack/gateway.py::_warn_if_kiro_cli_outdated",
-        "testing/harness.py::spawn_feature_gateway",
+        # Only spawn_feature_gateway calls this helper, for initial boot and
+        # restart. It fixes sys.executable -m kiro_crew gateway --test-mode;
+        # no executable/argv parameter exists. Home/env come from the isolated
+        # test supervisor, never HTTP/MCP requests. Dynamic projected MCP
+        # commands in workflow_memory_scenario instead use sandboxed_spawn_argv.
+        "testing/harness.py::_launch_gateway",
         # Apple on-device speech (macOS only). None of these takes an agent-authored
         # command: the argv is a fixed toolchain path or the helper Kiro Crew itself
         # compiled. `_build_helper` runs swiftc over a file that ships inside the

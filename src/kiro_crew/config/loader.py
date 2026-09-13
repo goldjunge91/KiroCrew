@@ -3665,6 +3665,7 @@ class KiroCrewConfig:
                 embed_model_id=memory_data.get("embed_model_id", ""),
                 embed_model_stamp=memory_data.get("embed_model_stamp", []),
                 embed_model_legacy_ids=memory_data.get("embed_model_legacy_ids", []),
+                embed_rebuild_generation=memory_data.get("embed_rebuild_generation", ""),
                 semantic_confidence_threshold=_safe_float(
                     memory_data.get("semantic_confidence_threshold", 0.8), 0.8, 0.0, 1.0
                 ),

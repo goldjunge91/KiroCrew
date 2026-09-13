@@ -606,7 +606,17 @@ Properties that matter:
 - **Best-effort throughout:** every method swallows failures and logs at debug.
   The in-memory registry is authoritative; a storage failure must never break a
   run. `load_all` skips corrupt files and returns records oldest-file-first by
-  mtime.
+  mtime. Recovery resolves each discovery root once, allowing legitimate data-home
+  ancestor aliases. Each leaf is opened through the cross-platform no-reparse
+  helper; regular-file, single-link, POSIX ownership, exact resolved-root path
+  and JSON reads all use that same descriptor. Protected binding and private
+  payload placement checks still apply before registry hydration. Discovery errors
+  are isolated per root, including private-root resolution, so an unavailable
+  root cannot suppress valid records from the other root. Startup discovery logs
+  retain only the exception type and an opaque record digest, never paths,
+  exception bodies or tracebacks, even outside a private task context. Record
+  digest encoding tolerates surrogate filename characters so logging an unreadable
+  file cannot abort recovery of other records.
 
 `RunRegistry.load_persisted()` rehydrates on startup, fills only ids not already
 in memory, and re-runs eviction so a store with more records than `max_runs`
@@ -737,15 +747,23 @@ host lifecycle (`begin_host_run`, `bind_task`, `phase`, `log`, `step`, `pause`,
 `timeout_secs` property. Every trusted host lifecycle mutation is async when it can
 produce a durable checkpoint, so host drivers await the off-loop persistence path.
 
-Dynamic workflows do not yet support private member memory propagation. Service
-admission resolves the protected parent binding before authoring or creating a
-run, including source, intent, saved-definition and restored or edited
-subtree-rerun entry points. Both the author session and result-routing session
-are checked when supplied. Private identity refuses with
-`workflow_private_memory_unsupported`; unreadable identity refuses with
-`workflow_memory_unavailable`. Refusal creates no author, worker or run and
-preserves the parent's binding. Global V1 execution is unchanged. A saved
-task-plan started through this façade takes the same check before its driver.
+Dynamic workflows freeze a gateway-owned execution binding before scheduling.
+The immutable record lives below `member-memory-bindings/workflows`; a private
+run's source, results and replay cache live below the hidden
+`memory_stores/.workflow-runs` root. Ordinary run JSON, source, templates and
+session labels grant no private authority. New records carry an explicit binding
+version; missing or corrupt authority refuses rather than becoming legacy V1.
+
+Author attempts and pooled, overflow and named workers inherit the run's protected
+anchor before SessionManager allocation. Private prompts pass through
+`ContextBuilder.build_message` after store preparation. Named sessions are labels
+inside a run, not arbitrary existing session keys. Every send, warm reset and
+replay boundary revalidates the scope; invalidation fails without a V1 fallback.
+The author retains REJECT_ALL, and the existing tool and governance ceilings stay
+in force. Private access to run list/detail/cancel/rerun requires matching scope;
+owner-browser management retains owner authority. Reruns inherit protected run
+identity, not a current template or mutable caller field. Completion delivery
+checks the original binding before publishing private content.
 
 Host-driven runs carry `driver`, `source_format`, `task_id`, `capabilities`, and
 saved-definition provenance in every compact and full snapshot. `paused` is an
@@ -882,11 +900,11 @@ caller's `X-Session-Key` header becomes the run's `author` and `session_key`.
 Before author, source run, intent run, saved-definition run or subtree rerun
 calls the service, `internal_memory_scope` verifies the request's protected
 caller against its claimed session. Verification refusals pass through unchanged;
-a verified private store returns HTTP 409 with
-`workflow_private_memory_unsupported` before service dispatch. Omitting or
-replacing the session header cannot turn a private process into an unbound
-caller, and rerunning a Global V1 record still checks the current caller.
-Owner-browser and verified unbound V1 dispatch retain their existing behavior.
+a verified private caller may execute within that scope. Omitting or replacing
+the session header cannot turn a private process into an unbound caller. Run
+list/detail/cancel/rerun separately compare the caller with protected run identity.
+A run id never grants access to another store. Owner-browser and verified V1
+dispatch retain their authentication paths.
 
 | Route | Body / params | Response |
 |-------|---------------|----------|
@@ -934,11 +952,13 @@ user gets a synthesized answer rather than a raw blob.
 `workflow` reference, plus `input`, `name`, `args`, `budget_total`),
 `workflow_library_list`, `workflow_status`, `workflow_result`, `workflow_list`,
 `workflow_cancel`, and `workflow_rerun_subtree`. All share one exit path that
-redacts LLM-derived strings. Starting a saved workflow resolves the caller with
+redacts LLM-derived strings. Every workflow write resolves the caller with
 `_resolve_session_key_strict()` and passes that verified identity to the HTTP
 write, so a subagent cannot inherit an ancestor session and inject completion
-into the parent's chat. The pre-existing ad-hoc `source` and `intent` modes keep
-their existing request and identity path. Durable create and update operations
+into the parent's chat. Saved-definition, ad-hoc `source` and `intent` runs all
+refuse before HTTP when strict identity is unavailable, even if the lenient
+resolver finds an ancestor session. Authoring, cancellation and subtree reruns
+use the same strict identity rule. Durable create and update operations
 are deliberately absent from the model-facing MCP surface: only the dashboard's
 explicit human management and completed-session confirmation flows may call the
 mutation routes.
@@ -1174,3 +1194,35 @@ scripts, so the rate is a measurement and not a tautology.
 | Cron scheduling behind `CronPort` | [learn-cron-dashboard](learn-cron-dashboard.md) |
 | App manifest model for the Workflows app | [app-kit-platform](app-kit-platform.md) |
 | Example scripts | [examples/workflows](examples/workflows/README.md) |
+
+### Provider receipts and unavailable-store cancellation
+
+Private workflow prompt construction passes the acquired provider and actual
+resume state to `ContextBuilder.build_message(context_provider=...)`, after
+`prepare_store_vectors`. The provider's `EssentialDelivery` owns acknowledgment
+of a productive, successful raw terminal. Author and pool `is_new` flags describe
+lifecycle only; they never acknowledge essential delivery. Failed or cancelled
+attempts retain the full candidate, and a new conversation has its own receipt.
+
+Completion delivery checks protected run identity even when a supplied snapshot
+omits its binding-version field. A surviving hidden private payload cannot be
+classified as a legacy global run. Owner cancellation may use a valid protected
+run record without opening an unavailable member store; ordinary content reads
+and non-owner operations still require an active, matching memory scope.
+
+### Atomic run identity allocation
+
+Before returning a new `wf_NNNNNN` identity, the service atomically creates its
+permanent reservation under the existing protected workflow binding root.
+Concurrent services, threads and processes cannot receive the same ID. Failed
+or cancelled admission burns its reservation; restart cannot reuse it. A
+reservation contains no store or caller authority. Actual scope publication
+still uses the separate immutable, no-replacement binding record. Exact path
+comparisons ignore only Windows' optional extended-length prefix, including
+its UNC spelling; they never re-resolve the expected path or accept a different
+leaf or redirected directory.
+
+Saved task-plan execution passes the effective protected caller session to
+TaskRunner, including calls that supply only `author`. TaskRunner's existing
+runtime, worker and reviewer binding path then retains that private store;
+`author` cannot be silently discarded into a Global V1 execution.

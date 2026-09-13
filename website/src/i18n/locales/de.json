@@ -11901,6 +11901,14 @@
         "usage_tracking_is_not_available_for": "Nutzungserfassung ist für {{provider}} nicht verfügbar."
       },
       "vectorMemoryCard": {
+        "legacy_vectors_warning": "Diese Vektoren entstanden vor der Erfassung ihrer Modelldatei. Wenn Sie diese Datei geändert haben, wenden Sie sie in den Einstellungen des Einbettungsmodells erneut an, um die Vektoren neu zu erstellen.",
+        "legacy_vectors_warning_path_error": "Diese Vektoren entstanden vor der Erfassung ihrer Modelldatei, und die Datei unter dem eingestellten Pfad kann gerade nicht verwendet werden. Korrigiere zuerst den Modellpfad und wende ihn dann an, um die Vektoren neu zu erstellen.",
+        "verification_pending": "Das Modell wird geprüft. Der Speicher nutzt währenddessen die Stichwortsuche.",
+        "verification_failed": "Die Modelldatei {{path}} konnte zur Prüfung nicht gelesen werden. Stelle sicher, dass die Datei existiert und lesbar ist, und wende sie dann erneut an.",
+        "download_error_detail": "Das mitgelieferte Modell konnte nicht heruntergeladen werden. Prüfe dein Netzwerk oder deinen Proxy und versuche es dann erneut.",
+        "model_error_path": "{{message}} Pfad: {{path}}",
+        "repair_unknown": "Einige Speicher konnten nicht geprüft werden, daher ist die Neuerstellung nicht für alle bestätigt. Solange diese Seite offen ist, wird die Prüfung automatisch wiederholt, und ein geschlossener Speicher wird beim nächsten Öffnen neu erstellt. Bleibt diese Meldung bestehen, sieh im Gateway-Log nach.",
+        "repair_pending": "Die Neuerstellung nach dem Modellwechsel läuft noch: {{vectors}} Erinnerungen brauchen noch einen neuen Vektor, {{invalidation}} offene Speicher enthalten noch alte Vektoren zum Löschen, und {{deferred}} geschlossene oder nicht verfügbare Speicher werden beim nächsten Öffnen neu erstellt.",
         "column_importance": "Wichtigkeit",
         "column_score": "Relevanz",
         "column_text": "Inhalt",
