@@ -90,6 +90,8 @@ from kiro_crew.validation import (
     CHAT_FOLDER_MOVE_SESSION_SCHEMA,
     CHAT_FOLDER_TREE_SCHEMA,
     MCP_DASHBOARD_SCHEMAS,
+    OUTBOX_SEND_SCHEMA,
+    PEER_SEND_SCHEMA,
     SESSION_CLOSE_SCHEMA,
     SESSION_CREATE_SCHEMA,
     SESSION_READ_MESSAGE_SCHEMA,
@@ -115,6 +117,16 @@ SESSION_CONTROL_TOOLS: tuple[str, ...] = (
     "session_close",
     "session_send",
     "session_read_message",
+)
+
+#: The member inbox-model verbs (RFC member-inbox-model, M0). Identity-gated
+#: exactly like session control -- the caller's session key IS the member
+#: identity the route acts as -- and blocked for channel agents for the same
+#: reason. Listed separately so the two families can be advertised, gated and
+#: tested as the two surfaces they are.
+MEMBER_INBOX_TOOLS: tuple[str, ...] = (
+    "outbox_send",
+    "peer_send",
 )
 
 # The folder endpoints store ``name[:100]``. Mirroring the number here is what
@@ -376,6 +388,52 @@ def _tool_definitions() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["target", "message"],
+            },
+        },
+        {
+            "name": "outbox_send",
+            "description": (
+                "Crew-member wake only. Write your reply to the owner into your DM thread "
+                "(the projection the person reads). If you do not call it, your final text "
+                "becomes the reply automatically; call it to reply early, or more than once."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "body": {"type": "string", "description": "What the owner should read."},
+                    "refs": {
+                        "type": "object",
+                        "description": 'Optional structured refs (e.g. {"in_reply_to": "env_..."}).',
+                    },
+                },
+                "required": ["body"],
+            },
+        },
+        {
+            "name": "peer_send",
+            "description": (
+                "Crew-member wake only. Send a message to ANOTHER crew member by slug "
+                "(e.g. 'kirocrew-autofix' or 'member-kirocrew-autofix'). It lands in that "
+                "member's inbox as a peer_dm envelope and wakes them; a mirror row appears in "
+                "your own thread so the owner can see the exchange. Bounded server-side: a "
+                "causal hop cap, a per-member budget that only the owner's own message "
+                "refills, and a per-pair rate limit -- when refused, report to the owner "
+                "instead of retrying."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Target member slug or member-<slug> key.",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "The message, written to a colleague.",
+                    },
+                    "refs": {"type": "object", "description": "Optional structured refs."},
+                },
+                "required": ["to", "body"],
             },
         },
         {
@@ -1193,7 +1251,7 @@ def _refuse_tree_shaping_if_unverifiable(verb: str) -> tuple[str, str, str | Non
 def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
     """Dispatch one validated tool call."""
     caller_key = ""
-    if name in SESSION_CONTROL_TOOLS:
+    if name in SESSION_CONTROL_TOOLS or name in MEMBER_INBOX_TOOLS:
         # Authorization for all four is the CALLER'S IDENTITY: the route decides
         # what a session may reach from the key sent here. The lenient resolver
         # walks /proc ancestors, and a spawned subagent lives under its parent
@@ -1339,6 +1397,35 @@ def _call_tool_inner(name: str, args: dict[str, Any]) -> str:
         return (
             f"\U0001f4e8 Queued for `{target}` — it is mid-turn, so your message runs "
             "when the current turn ends. Poll with session_read_message."
+        )
+
+    if name == "outbox_send":
+        args = validate_tool_args(args, OUTBOX_SEND_SCHEMA)
+        resp = _post(
+            "/api/member-inbox/outbox",
+            {"body": args["body"], "refs": args.get("refs") or {}},
+            session_key=caller_key,
+        )
+        if resp.get("error"):
+            return f"Error: could not write to your thread: {resp['error']}"
+        return "\U0001f4dd Reply written to your DM thread."
+
+    if name == "peer_send":
+        args = validate_tool_args(args, PEER_SEND_SCHEMA)
+        resp = _post(
+            "/api/member-inbox/peer-send",
+            {"to": args["to"], "body": args["body"], "refs": args.get("refs") or {}},
+            session_key=caller_key,
+        )
+        if resp.get("error"):
+            code = resp.get("code", "")
+            hint = ""
+            if code in ("peer_dm_hop_limit", "peer_dm_budget_exhausted", "peer_dm_rate_limited"):
+                hint = " Do not retry; report to the owner with outbox_send instead."
+            return f"Error: could not message that member ({code}): {resp['error']}.{hint}"
+        return (
+            f"\U0001f4e8 Delivered to member `{resp.get('to', args['to'])}` (hop {resp.get('hop', '?')}); "
+            "they will wake on it. A mirror of your message is in your own thread."
         )
 
     if name == "session_read_message":

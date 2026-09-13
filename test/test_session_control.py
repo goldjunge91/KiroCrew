@@ -3241,6 +3241,25 @@ def test_one_caller_cannot_consume_everybody_elses_slots(tmp_path, monkeypatch):
     assert created["ok"] is True, "one caller's full share must not starve another"
 
 
+def test_member_wake_creator_cap_counts_under_the_folded_member_key(tmp_path, monkeypatch):
+    """A member's every wake is a fresh ``member-<slug>.wake-<n>`` slot, while the
+    workers it creates are attributed to the FOLDED member key. Counting the cap
+    under the raw wake key would read 0 on every wake and never bite -- the bound
+    that makes the verb safe to auto-approve, bypassed by the ordinary member
+    operating model. Count and attribution use the same key."""
+    state = _make_state(tmp_path)
+    wake = _slot(state, "member-radar.wake-1700000000000001", mode="member-wake")
+    wake.agent = "researcher"
+    _agent_resolves(monkeypatch, "default")
+    for i in range(sc.MAX_SLOTS_PER_CREATOR):
+        _slot(state, f"held-{i}")._created_by = "member-radar"  # what create_session writes
+    with pytest.raises(sc.SessionControlError) as err:
+        asyncio.run(sc.create_session(state, caller_session_key=_key(wake)))
+    assert err.value.code == "creator_slot_cap_reached"
+    assert state.creator_slot_count("member-radar") == sc.MAX_SLOTS_PER_CREATOR
+    assert state.creator_slot_count(wake.key) == 0  # the raw wake key owns nothing
+
+
 def test_slots_nobody_asked_for_are_charged_to_nobody(tmp_path):
     """A person's own tab and a fork reach ``get_or_create_slot`` unattributed.
 

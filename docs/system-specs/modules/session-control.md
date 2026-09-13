@@ -73,7 +73,9 @@ Creation copies two different kinds of state, and the split is deliberate.
 boundary; a child left in `default` would be both a boundary crossing and
 unaddressable by its own creator), inherits the caller's agent when none is
 named, takes that workspace's project directory as its cwd, and is attributed to
-the caller via `created_by` so the per-creator slot ceiling is countable.
+the caller via `created_by` so the per-creator slot ceiling is countable — counted and
+written under the same key, the folded member key for a member wake, so a member whose
+every wake is a fresh `member-<slug>.wake-<n>` meets the cap its workers accrue.
 
 **Approval posture** — the caller's `_trust` and `_trust_reads` transfer, so a
 trusted operator's dispatched worker does not stall on a prompt nobody is
@@ -256,6 +258,158 @@ is a separate capability and needs its own decision. Because the mount is
 session-scoped, no other session on the same agent template gains the tools,
 preserving the two-part grant for ordinary agents (the switch AND the
 per-agent server assignment).
+
+### Member inbox model: a flagged member's thread takes envelopes, not turns
+
+Milestone M0 of the member inbox model RFC
+([#10528](https://github.com/kirodotdev/KiroCrew/pull/10528)). When a member has
+`members.<slug>.inbox_model: true` in config, `send_to_target` runs
+`_inbox_model_shim` BEFORE `authorize_target`, and only when the resolved target
+is a member DM thread (`mode == "member"`) for a flagged slug — every other
+target falls through to the ordinary path untouched.
+
+* A **member caller** (its DM slot or a wake slot `member-<slug>.wake-<n>`) is
+  admitted by `kiro_crew.member_peer.peer_send` instead of the creator fence:
+  target resolves (`peer_dm_target_unknown`), global switch
+  `member_peer_dm.enabled` (`peer_dm_disabled`), receiver flagged
+  (`peer_dm_target_not_flagged`), opt-outs `members.<slug>.peer_dm.accept` /
+  `.send` (`peer_dm_opted_out`), causal hop `1 + max inbound peer_dm hop of the
+  calling wake` against the 6-hop constant (`peer_dm_hop_limit`, 429), per-member
+  unattended budget (12, constant) counted since the newest `user_dm` in the
+  sender's own inbox (`peer_dm_budget_exhausted`, 429), per-pair rate (12 per 10
+  minutes, constant) (`peer_dm_rate_limited`, 429), body checks; the SENDER must be flagged too
+  (`peer_dm_sender_not_flagged`, 409) so a member still on the session model keeps
+  today's reach. A config that cannot be read, was
+  discarded on load, or carries a `member_peer_dm` key of the wrong type refuses
+  `peer_dm_config_degraded` (503) rather than falling back to the permissive
+  default; a `members.<slug>.peer_dm` value that is not a mapping of booleans reads
+  as opted out. On success the send is JOURNALED through the sender's outbox
+  mirror: written FIRST (it is the budget record) with `delivery: pending` and
+  everything the receiver's envelope needs, then the receiver's inbox envelope,
+  then the mirror is stamped `delivered` (`failed` when the append raised). At
+  scheduler start `reconcile_peer_sends` finishes every mirror a crash left
+  `pending` — stamps it when the receiver has any trace of the envelope id,
+  otherwise rebuilds the envelope from the journal and appends it
+  (`recovered: true`), or marks it `failed` when the receiver is no longer
+  flagged — so the projection never shows as sent a message nobody received.
+  SEL records `peer_send` with `from`/`to`/`hop`/`pair_id`. No timed reset exists.
+* Any **other caller** is authorized exactly as before (`authorize_target`,
+  `operation="send"`) — on the slot KEY resolved first, not the raw title-resolvable
+  target, and the authorized slot must be that same object (`target_replaced`, 409,
+  otherwise), so a rename in the await window cannot authorize one thread while the
+  envelope lands in another's inbox — and its message becomes a `session_dm` envelope from
+  `session:<key>` — its own kind, so the wake reads it as "another session, not
+  the owner" and it never refills the member's budget, which only a `user_dm` (a
+  person typing in the thread) does.
+
+Storage: inbox, outbox and dead-letter live under `member-inbox/<slug>/`, a
+TOP-LEVEL leaf of the crew home that is bind-masked in every sandbox mode
+(`sandbox._CREW_HIDDEN_LEAVES`), materialised before every namespace spawn
+(`sandbox._CREW_PRECREATE_HIDDEN_DIR_LEAVES`, because the store is created lazily and a
+mask can only bind a path that exists when the sandbox starts) and fenced from agent
+file tools (`security.paths._CREW_SECRET_LEAVES`). Not the member's own directory (agent-writable)
+and not a child of `trust/` (writable in-sandbox for SEL appends, so a nested mask could
+be renamed around): an envelope forged on disk would bypass the peer admission and the
+`from == "user"` provenance the budgets rest on. Every reader and writer is the gateway.
+Every path built from an envelope id is gated on the minted shape
+`env_<13 digits>_<8 hex>`, so an id read back from disk can only ever name a file inside
+the member's own inbox.
+
+A wake awaits the slot's whole turn CYCLE (a promise-only reply auto-continued into a
+successor task is awaited to the end) before deciding success, and a turn whose recorded
+stop reason is anything other than `end_turn` or none (a provider timeout after partial
+output, a cancel, a stall, a refusal) is a failed wake — its partial text acks nothing;
+envelope ids carry a
+lock-protected sequence so two minted in one millisecond keep append order.
+A wake acts under the binding's `slot_key` (`member-<slug>` or, for a private V2
+memory generation, `member-<slug>.memory-<store>`) for its key prefix, ownership,
+ledger, memory store and mirror target, so a wake never crosses generations, and it
+runs in the member's workspace and project — the live thread's when it is loaded,
+otherwise resolved the way the thread opener resolves them (`_wake_workspace`).
+Wake keys are `<thread key>.wake-<ms><seq>`: unique across gateway restarts, so a
+new wake never reuses a persisted earlier wake's slot. Rollback folds nothing while
+a wake is still running for the member (it started before the flag flipped; no new one
+can start): a snapshot of the pending set would race that wake's claim and deliver an
+envelope twice, so the fold waits for the next message once the wake has ended.
+
+The person's message and the wake's reply are also appended to the member's DM
+thread and saved to its transcript, so the visible conversation survives a gateway
+restart; the intake broadcasts a `chat_done` for the thread slot, because the client
+started an optimistic local turn when it sent and nothing else would end it; the
+envelope and the outbox row remain the records; a thread that is not loaded gets the
+reply appended straight to its transcript on disk (the history log's own append, off
+the loop), so the conversation the person opens later carries it. The view may lag
+the record but never silently diverges from it: a transcript save that fails stamps
+the envelope or outbox row `view: pending`, and the next intake or wake restores
+those rows to the thread (`reconcile_thread_view`, re-saving the live window when it
+still holds the row, appending when it does not) before it processes anything,
+clearing the stamp only after a confirmed write. The rollback fold's `inject` row is
+staged without a broadcast and announced only after its propagating save; a failed
+save withdraws the row together with the append's bookkeeping, so nothing the client
+rendered outlives a delivery the store still owes.
+
+Every wake discards its own transcript on close (its durable record is the outbox
+row, the ledger and SEL) — a failed one too, because a timer-driven member under a
+persistent outage fails a fresh envelope every interval and the attempt ceiling bounds
+per envelope, not per member; diagnosis is the fixed reason label in the log plus the
+dead-letter notice and owner notification at the ceiling. A wake that ends with envelopes still pending is retried by
+the scheduler after a fixed delay, until the attempt ceiling dead-letters them; the
+dead-letter notice (a `system` envelope, `refs.dead_letter_notice`) is itself subject to
+the ceiling and is NOT re-noticed when it dead-letters, so a provider outage cannot
+become a notice-of-a-notice loop. Peer bodies are sanitized and length-checked BEFORE
+the pair rate is charged (the pair counter is one step under its own lock, since the
+pair is unordered and the callers hold per-sender locks), and a `peer_send` target must have a DM binding (what a
+wake needs to run) — a flagged slug with no binding is `peer_dm_target_unknown`, never
+an envelope that can never drain.
+
+Replies are idempotent per envelope: every `reply` row (from `outbox_send` or the
+runner's fallback) carries `in_reply_to`, the ids the wake drained — stamped by the
+runner, never taken from the model's refs — the runner's own reply is written complete
+in one durable write, and every route-written reply of the wake is stamped `completed`
+when the turn ends cleanly, before the ack (a failing stamp is logged and never skips
+the ack, which is what prevents redelivery in the first place). A redelivered envelope
+that a *completed* reply row names (the wake answered, then died before its ack) is
+acked without a second turn, so the owner never reads the same answer twice; an early
+reply from a wake that then failed ("on it…") is not stamped, so its batch runs again
+with that reply visible in the recent-exchange window. Wake slots are excluded
+from the member activity log (`record_activity`): the scheduler minted them, nobody
+picked the member for them, and one row per wake would grow with the timer.
+
+Retention: after each wake the member's acked, outbox and dead-letter rows are
+pruned to the newest 500 / 500 / 100 (`compact_member`), always keeping the newest
+`user_dm` because it anchors the peer-DM budget and every `peer_dm` mirror newer than
+that anchor because those rows are the unattended-send count; pending rows are never pruned, so
+the hot paths (`last_user_dm_at`, `peer_sends_since`, `recent_exchange`) stay bounded.
+The scheduler starts post-bind (`_kick_member_scheduler`, like the config watcher),
+never from `on_startup`.
+
+Rollback: turning `inbox_model` off while envelopes are pending strands nothing —
+the next message the person types into that thread first appends the pending
+envelopes — complete bodies — to the transcript as one `inject` row (the role cron
+notices use) and acks them only after that row is persisted, so the ack never precedes the durable
+delivery; a failed persist also withdraws the live row, so the following turn cannot
+consume a delivery the store still owes.
+
+Status: M0 is the backend and is exercised by unit tests only; the flag is not
+yet recommended for a real member until M1 lands the projection UI and the pod
+evidence (type → wake → reply; restart mid-queue → drain).
+
+The wake slot is the ephemeral execution context of the inbox model: it keeps the
+`member-` prefix so the provider mounts the dashboard server and applies the
+member grants, and `_member_owner_key` folds it back to `member-<slug>` at the two
+ownership sites — the `_created_by` a wake writes on a worker it creates, and the
+fence comparison — so the member's next wake still controls what an earlier wake
+opened. `slot_registry` admits the reserved prefix in mode `member-wake` as well
+as `member`. The two member tools `outbox_send`, `peer_send`
+(`/api/member-inbox/*`, strict-internal, identity = `X-Session-Key` of the wake)
+are in `_MEMBER_DASHBOARD_GRANTS` and inert for an unflagged caller. Acking is not
+a tool: the runner acks the whole batch when the turn ends cleanly and nothing else
+does — an ack the model could issue early would either lose work when the turn then
+fails or be a no-op the runner repeats, and M0 has no partial-ack use. A
+model's free-form `refs` (`outbox_send`, `peer_send`) is stripped of the keys the
+gateway owns (`RESERVED_REF_KEYS`: `completed`, `wake_key`, `in_reply_to`, `delivery`,
+`pair_id`, …) before the merge, so a wake steered by an untrusted envelope cannot
+stamp its own "on it…" row `completed` and have the owner's message acked without a turn.
 
 ### Cron callers: unattended admission, bounded by the same fence
 
@@ -532,6 +686,20 @@ and the same theme as the queued-drain re-check (#5911). The human ✕ path pass
 no check — the person owns the tab and closes it unconditionally.
 
 ## Configuration
+
+`members.<slug>.inbox_model` (bool, default **false**) opts one crew member into
+the inbox model above; `members.<slug>.wake_interval_secs` (number, ≥ 60) arms
+its `wake_timer` cadence; `members.<slug>.peer_dm.{accept,send}` (bool, default
+true) are the per-member opt-outs. `member_peer_dm.enabled` (bool, default true) is
+the crew-wide kill switch for member-to-member DM. Everything else is a constant,
+not config: redelivery (3 attempts), one wake's wall clock (600 s), and the peer
+bounds (6 hops, 12 unattended sends per member, 12 per pair per 10 minutes) — no
+operator has asked for other values and a config key is honoured forever; the RFC's
+open decision on their size is settled from SEL data first. `members` and
+`member_peer_dm` are modelled top-level sections of `KiroCrewConfig` (plain
+mappings, like `hooks`, so the loader neither warns about them as unrecognized nor
+coerces them); every reader validates the shape at the point of use and fails
+closed on a malformed value.
 
 `agent.session_control` (bool, default **true**). The grant that decides who may
 reach a peer session is the **agent config**, not this switch: the five tools come

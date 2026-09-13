@@ -2905,6 +2905,23 @@ SESSION_SEND_SCHEMA = ToolSchema(
     ],
 )
 
+OUTBOX_SEND_SCHEMA = ToolSchema(
+    tool_name="outbox_send",
+    fields=[
+        FieldSpec("body", str, required=True, max_len=MAX_LONG_STRING),
+        FieldSpec("refs", dict, required=False),
+    ],
+)
+
+PEER_SEND_SCHEMA = ToolSchema(
+    tool_name="peer_send",
+    fields=[
+        FieldSpec("to", str, required=True, max_len=MAX_SHORT_STRING),
+        FieldSpec("body", str, required=True, max_len=MAX_LONG_STRING),
+        FieldSpec("refs", dict, required=False),
+    ],
+)
+
 SESSION_READ_MESSAGE_SCHEMA = ToolSchema(
     tool_name="session_read_message",
     fields=[

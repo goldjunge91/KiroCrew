@@ -31,6 +31,7 @@ from kiro_crew.config.loader import KiroCrewAgentConfig
 from kiro_crew.dashboard.chat_handlers import _history_key_for
 from kiro_crew.members import (
     DM_SLOT_MODE,
+    WAKE_SLOT_MODE,
     MemberSlugError,
     dm_binding_path,
     member_dir,
@@ -40,6 +41,7 @@ from kiro_crew.members import (
 )
 
 CREW = "code-reviewer"
+SHARED_CREW = "shared-crew"
 OTHER = "other-agent"
 
 
@@ -682,7 +684,9 @@ class TestPinEnforcement:
                 assert (await resp.json())["code"] == "member_pin_mismatch"
         assert slot.agent == CREW
 
-    def _runner_harness(self, tmp_path, monkeypatch, *, mode, private=True, switch_to=OTHER):
+    def _runner_harness(
+        self, tmp_path, monkeypatch, *, mode, private=True, switch_to=OTHER, agent=None
+    ):
         from kiro_crew.config.loader import KiroCrewConfig
         from kiro_crew.dashboard.chat_runner import _run_chat
         from kiro_crew.memory_stores import provision_member_memory
@@ -690,6 +694,9 @@ class TestPinEnforcement:
         cfg = KiroCrewConfig.load()
         cfg.agents[CREW] = KiroCrewAgentConfig(kiro_agent="kirocrew")
         provision_member_memory(cfg, CREW)
+        # A second crew on the SHARED memory store: no private-memory binding,
+        # so on its slots only the mode arm of the veto can pin the agent.
+        cfg.agents[SHARED_CREW] = KiroCrewAgentConfig(kiro_agent="kirocrew")
         cfg.save()
         # No real provider or embedding process runs in this stream harness.
         # Keep private ownership and the protected session binding real.
@@ -720,8 +727,14 @@ class TestPinEnforcement:
 
         # Ordinary-mode control runs on an ordinary key: the constructor's
         # member-* reservation (correctly) refuses a bare member key.
-        slot_key = "member-code-reviewer" if mode == DM_SLOT_MODE else "chat-1-100"
-        agent = CREW if private else "default"
+        # A wake slot (`member-<slug>.wake-<n>`) runs the same identity as the
+        # thread and must be pinned by the same veto.
+        slug = agent if agent in (CREW, SHARED_CREW) else CREW
+        slot_key = {
+            DM_SLOT_MODE: f"member-{slug}",
+            WAKE_SLOT_MODE: f"member-{slug}.wake-1700000000000001",
+        }.get(mode, "chat-1-100")
+        agent = agent or (CREW if private else "default")
         slot = state.get_or_create_slot(slot_key, agent=agent, mode=mode)
         slot.append("user", "hello", "msg msg-u")
 
@@ -747,7 +760,11 @@ class TestPinEnforcement:
         return state, slot, _run_chat
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", [DM_SLOT_MODE, ""], ids=["member-dm", "ordinary-v2"])
+    @pytest.mark.parametrize(
+        "mode",
+        [DM_SLOT_MODE, WAKE_SLOT_MODE, ""],
+        ids=["member-dm", "member-wake", "ordinary-v2"],
+    )
     @pytest.mark.parametrize("switch_to", [OTHER, CREW], ids=["other-agent", "alias-collision"])
     async def test_mid_turn_agent_switch_is_vetoed_on_member_threads(
         self, tmp_path, monkeypatch, mode, switch_to
@@ -790,6 +807,35 @@ class TestPinEnforcement:
             "vetoed turn triggered the empty-response requeue — completed "
             "tool side effects would replay"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mode", [DM_SLOT_MODE, WAKE_SLOT_MODE], ids=["member-dm", "member-wake"]
+    )
+    async def test_mid_turn_agent_switch_is_vetoed_by_mode_alone(self, tmp_path, monkeypatch, mode):
+        """The mode arm of the veto, isolated from the private-memory arm.
+
+        A member on the shared memory store has no ``private_member`` binding,
+        so only ``is_member_mode(slot.mode)`` pins it -- and a WAKE slot runs
+        the member's identity and grants exactly like the DM thread. Reading
+        the DM mode literal there would let a provider-side switch land
+        mid-wake and run a foreign agent under the member's name.
+        """
+        state, slot, _run_chat = self._runner_harness(
+            tmp_path, monkeypatch, mode=mode, private=False, agent=SHARED_CREW
+        )
+
+        await _run_chat(state, slot, "test message")
+        await asyncio.gather(*state._background_tasks)
+
+        assert slot.agent == SHARED_CREW
+        assert not any(
+            c.args and c.args[0] == "slot_agent_switch" for c in state.broadcast_ws.call_args_list
+        )
+        assert not any(
+            "foreign agent output" in str(m.get("content", "")) for m in slot.messages
+        ), "events after the vetoed switch were still consumed"
+        state.sessions.reset.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_mid_turn_agent_switch_still_lands_on_ordinary_slots(self, tmp_path, monkeypatch):

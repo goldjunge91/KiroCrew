@@ -332,6 +332,12 @@ _CREW_SECRET_LEAVES: list[str] = [
     # straight off disk, and a corrupted record reads as ABSENT to the store —
     # silent loss the conductor cannot see. No legitimate file-tool reader.
     "work-ledger",
+    # Crew-member inbox model store (member_inbox.py): per-member envelopes whose
+    # ``from`` field is what the peer-DM budgets trust, plus the outbox mirrors
+    # that ARE the budget record. Written and read only by the gateway; a file
+    # tool that could plant a ``from: "user"`` envelope or delete a mirror row
+    # would bypass the admission chain the routes enforce.
+    "member-inbox",
     # The optional Playwright extension token. It removes the browser-side approval
     # click for an attach, so a process that could read it could attach to the
     # operator's logged-in browser without them seeing a prompt. The gateway hands

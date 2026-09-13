@@ -57,6 +57,8 @@ _KNOWN_CONFIG_SECTIONS: frozenset = frozenset(
         "dashboard",
         "tunnel",
         "hooks",
+        "members",
+        "member_peer_dm",
         "agents",
         "default_agent",
         "workspaces",

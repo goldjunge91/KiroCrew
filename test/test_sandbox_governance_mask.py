@@ -164,6 +164,9 @@ class TestSecretsAreMaskedInEveryMode:
         # Same model as ledger, two parties: the worker agent carries the full file
         # toolset, so an unmasked work-ledger lets it reach any conductor's records.
         "work-ledger",
+        # Member inbox-model envelopes: the peer-DM budgets trust the provenance
+        # in these files, so an agent-plantable envelope bypasses the admission.
+        "member-inbox",
         "backup",
         "browser-cookies.txt",
         "playwright-storage-state.json",

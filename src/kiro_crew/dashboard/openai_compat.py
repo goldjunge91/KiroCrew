@@ -366,7 +366,7 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
         # (with its machine-readable code) must fire BEFORE the generic
         # mismatch below, or a member mismatch surfaces as an ordinary
         # conflict and the pin is invisible to the caller.
-        if slot.mode == "member" and agent and agent != slot.agent:
+        if members_mod.is_member_mode(slot.mode) and agent and agent != slot.agent:
             sel().log_api_access(
                 caller=request.remote or "",
                 operation="openai_compat.chat",
@@ -389,7 +389,7 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
                 },
                 status=409,
             )
-        if slot.mode == "member":
+        if members_mod.is_member_mode(slot.mode):
             # Registry-drift fail-closed, mirroring the chat_send path: a
             # deleted crew's thread must not dispatch — the resolver would
             # fall back to the default agent and reply under the deleted
@@ -524,8 +524,8 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
     slot.drain()
 
     if agent:
-        if slot.mode == "member" and agent != slot.agent:
-            # Member DM threads are pinned to their crew. Only an EXISTING slot
+        if members_mod.is_member_mode(slot.mode) and agent != slot.agent:
+            # Member DM threads (and member wakes) are pinned to their crew. Only an EXISTING slot
             # can be in member mode (a slot this request just created carries
             # the caller's own mode), so no freshly_created cleanup applies.
             sel().log_api_access(

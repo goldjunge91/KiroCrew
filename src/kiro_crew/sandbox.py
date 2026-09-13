@@ -283,6 +283,16 @@ _CREW_HIDDEN_LEAVES: tuple[str, ...] = (
     # The conductor work ledger: a worker's full file toolset must not reach any
     # conductor's records except through the routes that check its binding.
     "work-ledger",
+    # Crew-member inbox / outbox / dead-letter envelopes (member_inbox.py). The
+    # peer-DM budgets and the "only the person refills it" rule rest on the
+    # provenance recorded in these files, and the admission chain (hop cap,
+    # rate, opt-outs) runs BEFORE a write -- so an envelope an agent could plant
+    # or a mirror row it could delete would bypass all of it. Every reader and
+    # writer is the gateway (wake prompts are built host-side), so HIDDEN rather
+    # than READONLY, and a TOP-LEVEL leaf rather than a child of ``trust/``: the
+    # mask covers the leaf, not its ancestors, and ``trust`` is agent-writable
+    # in-sandbox for SEL appends, so a child could be renamed around its seal.
+    "member-inbox",
     "cron-history",
     # The cron in-flight markers, masked rather than sealed read-only because
     # nothing in the sandbox reads one: they are written and cleared by the run
@@ -827,6 +837,12 @@ _CREW_PRECREATE_HIDDEN_DIR_LEAVES: tuple[str, ...] = (
     # Private memory has the same late-creation hazard: an agent spawned before
     # the first member must never gain access when that member's database appears.
     "memory_stores",
+    # The member inbox store is created lazily on the first envelope (``member_inbox``
+    # ``mkdir(parents=True)`` at every write), so on a fresh data home a sandbox spawned
+    # before the first member message would find it absent, get no mask, and see the
+    # directory the gateway creates later -- writable, which is a forged-envelope path
+    # around the peer admission chain and the ``from == "user"`` budget provenance.
+    "member-inbox",
 )
 
 #: The masked md-notebook leaves materialised before a namespace spawn, and what each

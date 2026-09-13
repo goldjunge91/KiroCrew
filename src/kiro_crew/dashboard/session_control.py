@@ -117,6 +117,18 @@ CRON_LINK_PREFIX = "cron:"
 APP_CRON_OWNER_PREFIX = "app:"
 
 
+def _member_owner_key(caller_key: str) -> str:
+    """Identity a member-wake slot key acts AS: the member's own key.
+
+    ``member-<slug>.wake-<n>`` is the ephemeral execution context of the inbox
+    model; ownership (what it created, what it may control) belongs to
+    ``member-<slug>``. Every other key is returned unchanged.
+    """
+    from kiro_crew.member_inbox import member_owner_key
+
+    return member_owner_key(caller_key)
+
+
 def _member_caller(caller_key: str) -> bool:
     """Whether *caller_key* is a crew member's pinned DM slot.
 
@@ -1178,8 +1190,11 @@ async def create_session(
     # person's own next chat tab gets the 429 -- the resource is bounded, but not
     # from anyone else's point of view. This is the bound that makes the verb safe
     # to auto-approve: the worst case of an automated creator looping on it is its
-    # own 50 slots, not everyone's 500.
-    if state.creator_slot_count(caller_key) >= MAX_SLOTS_PER_CREATOR:
+    # own 50 slots, not everyone's 500. Counted under the SAME key the new slot's
+    # ``_created_by`` is written with below -- the folded member key for a member
+    # wake -- or a member whose every wake is a fresh ``member-<slug>.wake-<n>``
+    # would read 0 on every count and never meet the cap it is meant to.
+    if state.creator_slot_count(_member_owner_key(caller_key)) >= MAX_SLOTS_PER_CREATOR:
         raise SessionControlError(
             f"per-caller slot cap reached ({MAX_SLOTS_PER_CREATOR})",
             code="creator_slot_cap_reached",
@@ -1211,7 +1226,11 @@ async def create_session(
         # person's own tab and a fork reach `get_or_create_slot` directly and stay
         # unattributed, so ordinary human use never consumes an automated caller's
         # share.
-        slot._created_by = caller_key
+        # Folded to the member's own key when the caller is a member WAKE
+        # (``member-<slug>.wake-<n>``): the worker belongs to the member, not to
+        # the ephemeral execution context that happened to open it, so the
+        # member's next wake can still control it. A no-op for every other key.
+        slot._created_by = _member_owner_key(caller_key)
         # The creator's interactive auto-approve grant follows the work it is
         # handing off. Without this a trusted operator dispatches a worker that
         # then blocks on an approval prompt nobody is watching -- the same failure
@@ -1593,10 +1612,9 @@ def authorize_target(
         # Workspaces are the memory boundary; reaching across one would let a
         # session act on work it cannot see.
         raise deny("target session belongs to a different workspace", "workspace_mismatch")
-    if (
-        _caller_is_ownership_fenced(state, caller_key)
-        and getattr(slot, "_created_by", "") != caller_key
-    ):
+    if _caller_is_ownership_fenced(state, caller_key) and getattr(
+        slot, "_created_by", ""
+    ) != _member_owner_key(caller_key):
         # The fence every exempted caller class is bounded by, plus anything they
         # created. It reaches ONLY the sessions the caller made itself
         # (`created_by` is written at birth and rehydrated on restart). Always
@@ -1910,6 +1928,113 @@ MAX_SEND_MESSAGE_CHARS = MAX_LONG_STRING
 _SEND_PROVENANCE = "[sent by session {caller} via session_send]\n\n"
 
 
+async def _inbox_model_shim(
+    state: "DashboardState",
+    *,
+    caller_session_key: str,
+    target: str,
+    body: str,
+) -> dict[str, Any] | None:
+    """Translate a ``session_send`` into an envelope when the target is a flagged member.
+
+    Returns ``None`` when the target is not a member thread on the inbox model,
+    so the caller falls through to the ordinary path. Raises
+    :class:`SessionControlError` with the peer-DM codes for a member caller that
+    the admission refuses.
+    """
+    from kiro_crew.member_inbox import (
+        InboxStore,
+        inbox_model_enabled,
+        make_envelope,
+        member_slug_from_key,
+    )
+    from kiro_crew.members import DM_SLOT_MODE
+
+    resolved = _resolve_slot(state, target)
+    if resolved is None or getattr(resolved, "mode", "") != DM_SLOT_MODE:
+        return None
+    to_slug = member_slug_from_key(resolved.key)
+    if not to_slug or not await asyncio.to_thread(inbox_model_enabled, to_slug):
+        return None
+
+    caller_key = caller_slot_key(state, caller_session_key)
+    if not caller_key:
+        raise SessionControlError(
+            "caller session could not be identified", code="caller_unidentified", status=403
+        )
+    sender_slug = member_slug_from_key(caller_key) if _member_caller(caller_key) else None
+    if sender_slug is not None:
+        from kiro_crew.member_peer import PeerSendError, peer_send
+
+        caller_slot = state.get_slot(caller_key)
+        inbound_hop = int(getattr(caller_slot, "_wake_inbound_hop", 0) or 0)
+        try:
+            # Store scans and fsyncs: off the loop, like every other filesystem
+            # step on the send path.
+            receipt = await asyncio.to_thread(
+                peer_send,
+                caller_key=caller_key,
+                sender_slug=sender_slug,
+                target=to_slug,
+                body=body,
+                inbound_hop=inbound_hop,
+                refs={"via": "session_send"},
+            )
+        except PeerSendError as exc:
+            raise SessionControlError(str(exc), code=exc.code, status=exc.status) from exc
+        return {
+            "ok": True,
+            "target": resolved.key,
+            "started": False,
+            "envelope": receipt["envelope_id"],
+            "kind": "peer_dm",
+        }
+
+    # Non-member caller: the ordinary gates decide whether it may reach this
+    # thread at all; only the delivery changes. Authorization runs on the slot
+    # KEY of what was resolved above -- a title is mutable, and the await between
+    # the two resolutions is a window in which a rename could make the raw
+    # target name a different slot -- and the authorized slot must be the very
+    # object resolved first, or the envelope is written to an inbox that was
+    # never authorized (same identity discipline as `close_target`).
+    authorized = authorize_target(
+        state, caller_session_key=caller_session_key, target=resolved.key, operation="send"
+    )
+    if authorized is not resolved:
+        raise SessionControlError(
+            "target changed while the send was being authorized; retry",
+            code="target_replaced",
+            status=409,
+        )
+    env = await asyncio.to_thread(
+        InboxStore(to_slug).append,
+        make_envelope(
+            to_slug=to_slug,
+            kind="session_dm",
+            body=sanitize_outbound(body),
+            from_=f"session:{caller_key}",
+            refs={"via": "session_send"},
+        ),
+    )
+    from kiro_crew.member_scheduler import notify_member
+
+    notify_member(to_slug, kind="session_dm")
+    _audit(
+        caller_session_key=caller_session_key,
+        operation="send",
+        slot_key=resolved.key,
+        outcome="allowed",
+        detail={"started": False, "chars": len(body), "envelope": env.id, "kind": "session_dm"},
+    )
+    return {
+        "ok": True,
+        "target": resolved.key,
+        "started": False,
+        "envelope": env.id,
+        "kind": "session_dm",
+    }
+
+
 async def send_to_target(
     state: "DashboardState",
     *,
@@ -1951,6 +2076,21 @@ async def send_to_target(
             code="message_too_long",
             status=400,
         )
+
+    # Inbox-model shim (RFC member-inbox-model, M0). A target that is a crew
+    # member's DM thread with ``members.<slug>.inbox_model: true`` does not run
+    # injected turns: the message becomes an envelope in that member's inbox and
+    # the scheduler wakes it. A MEMBER caller goes through the peer admission
+    # (hop / budget / rate / opt-out), which is what replaces the creator-fence
+    # refusal for peers; any other caller is authorized exactly as before and its
+    # message is translated to a ``session_dm`` -- its own kind, so the wake reads
+    # it as "another session, not the owner" and it never refills the member's
+    # peer budget (only a ``user_dm`` does that).
+    _shim = await _inbox_model_shim(
+        state, caller_session_key=caller_session_key, target=target, body=body
+    )
+    if _shim is not None:
+        return _shim
 
     slot = authorize_target(
         state,

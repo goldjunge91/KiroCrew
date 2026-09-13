@@ -200,7 +200,11 @@ class SlotRegistry:
                 )
             return existing, None
 
-        if name and name.casefold().startswith("member-") and mode != "member":
+        # Two admitted modes for the reserved prefix: the DM thread itself and the
+        # ephemeral ``member-wake`` execution context the inbox-model runner mints
+        # (``member-<slug>.wake-<n>``), which keeps the prefix so the provider
+        # treats it as the member and folds back to the member for ownership.
+        if name and name.casefold().startswith("member-") and mode not in ("member", "member-wake"):
             raise ValueError("member thread slots are created only via the member thread endpoint")
 
         minted_new = not name

@@ -121,7 +121,14 @@ def ledger_key(session_key: str) -> str:
         key = key[len("dashboard:") :]
     while key.startswith("dashboard_"):
         key = key[len("dashboard_") :]
-    return key
+    # A member wake (``member-<slug>.wake-<n>``) is an ephemeral execution
+    # context for a durable identity: every wake must read and write the
+    # MEMBER's ledger, so the wake suffix is folded away. Lossless for every
+    # other key (the fold is a no-op unless the key has the member prefix AND
+    # a numeric ``.wake-`` tail).
+    from kiro_crew.member_inbox import member_owner_key
+
+    return member_owner_key(key)
 
 
 def _store_name(slot_key: str) -> str:

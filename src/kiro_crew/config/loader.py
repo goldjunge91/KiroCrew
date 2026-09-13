@@ -2650,6 +2650,26 @@ class KiroCrewConfig:
         default_factory=dict,
         metadata=_meta("Hooks", "Script hook definitions keyed by hook ID."),
     )
+    # Crew-member inbox model (docs/system-specs/modules/session-control.md, Configuration).
+    # Plain mappings like ``hooks``: the readers in ``member_inbox`` /
+    # ``member_peer`` validate shape at the point of use and fail CLOSED on a
+    # malformed value, so no coercion happens here -- a wrong-typed value must
+    # stay visible as wrong, not be silently defaulted into "enabled".
+    members: dict = field(
+        default_factory=dict,
+        metadata=_meta(
+            "Members",
+            "Per-member settings keyed by member slug: inbox_model, "
+            "wake_interval_secs, peer_dm.accept, peer_dm.send.",
+        ),
+    )
+    member_peer_dm: dict = field(
+        default_factory=dict,
+        metadata=_meta(
+            "Member Peer DM",
+            "Global switch for member-to-member messages (enabled).",
+        ),
+    )
     slack_channels: dict[str, ChannelConfig] = field(
         default_factory=dict,
         metadata=_meta("Slack Channels", "Per-channel activation config."),
@@ -4094,6 +4114,8 @@ class KiroCrewConfig:
                 name_override=str(tunnel_data.get("name_override", "")),
             ),
             hooks=data.get("hooks", {}),
+            members=data.get("members", {}),
+            member_peer_dm=data.get("member_peer_dm", {}),
             agents=agents,
             default_agent=default_agent_val,
             workspaces=workspaces,
@@ -4619,6 +4641,8 @@ class KiroCrewConfig:
             "dashboard": asdict(self.dashboard),
             "tunnel": asdict(self.tunnel),
             "hooks": self.hooks,
+            "members": self.members,
+            "member_peer_dm": self.member_peer_dm,
             "agents": {name: asdict(agent_cfg) for name, agent_cfg in self.agents.items()},
             "default_agent": self.default_agent,
             "workspaces": {name: asdict(ws_cfg) for name, ws_cfg in self.workspaces.items()},

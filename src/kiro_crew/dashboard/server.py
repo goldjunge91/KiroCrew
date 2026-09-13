@@ -463,6 +463,11 @@ _STRICT_INTERNAL_API_PATHS = frozenset(
         "/api/session-control/close",
         "/api/session-control/send",
         "/api/session-control/read",
+        # Member inbox-model verbs (outbox_send / peer_send): same
+        # identity model as session control -- X-Session-Key IS the member the
+        # route acts as -- so the same strict posture.
+        "/api/member-inbox/outbox",
+        "/api/member-inbox/peer-send",
         # MCP-only structured monitor inspection. The caller selects its
         # session identity through X-Session-Key, so cookie authentication can
         # never authorize this leaf.
@@ -1422,6 +1427,24 @@ def _precompute_telemetry(state: "DashboardState") -> None:
         _log.debug("telemetry.record_event(gateway_start) failed", exc_info=True)
 
 
+def _deferred_member_inbox(handler_name: str) -> Callable:
+    """Bind a member-inbox route without importing the subsystem at boot.
+
+    Same shape and reason as :func:`_deferred_session_control`: the inbox model
+    is per-member opt-in (``members.<slug>.inbox_model``), so nothing of it loads
+    until a flagged member's wake calls a tool.
+    """
+
+    async def _route(request: web.Request) -> web.StreamResponse:
+        from kiro_crew.dashboard.handlers import member_inbox
+
+        handler = getattr(member_inbox, handler_name)
+        return await handler(request)
+
+    _route.__name__ = handler_name
+    return _route
+
+
 def _deferred_session_control(handler_name: str) -> Callable:
     """Bind a session-control route without importing the subsystem at boot.
 
@@ -1539,6 +1562,12 @@ def _register_mcp_routes(app: web.Application) -> None:
     )
     app.router.add_get(
         "/api/session-control/read", _deferred_session_control("api_session_control_read")
+    )
+    app.router.add_post(
+        "/api/member-inbox/outbox", _deferred_member_inbox("api_member_inbox_outbox")
+    )
+    app.router.add_post(
+        "/api/member-inbox/peer-send", _deferred_member_inbox("api_member_inbox_peer_send")
     )
     app.router.add_get("/api/browser/install", handlers.api_browser_install_get)
     app.router.add_put("/api/browser/token", handlers.api_browser_token_put)
@@ -3281,6 +3310,33 @@ def _register_config_watch(
     app.on_cleanup.append(_config_watch_shutdown)
 
 
+def _kick_member_scheduler(app: web.Application, state: DashboardState) -> None:
+    """Start the member inbox-model scheduler as a tracked task, post-bind.
+
+    Called by both gateway entrypoints only after ``_start_site`` has returned.
+    Constructed UNCONDITIONALLY: a member flagged on a running gateway (the flag
+    is read live) must find a scheduler to notify, or its first envelope would sit
+    unanswered until a restart. With no flagged member it is inert -- no lanes, no
+    timers. The import, the config read and the inbox scans all happen inside the
+    task (``start()`` dispatches the filesystem work to a worker thread), so
+    nothing here runs before the caller yields.
+    """
+
+    async def _boot() -> None:
+        from kiro_crew.dashboard.member_wake import run_member_wake
+        from kiro_crew.member_scheduler import MemberScheduler, set_scheduler
+
+        async def _wake(slug: str) -> None:
+            await run_member_wake(state, slug)
+
+        scheduler = MemberScheduler(_wake)
+        set_scheduler(scheduler)
+        app["member_scheduler"] = scheduler
+        await scheduler.start()
+
+    app["member_scheduler_boot"] = asyncio.get_running_loop().create_task(_boot())
+
+
 def _kick_config_watch(app: web.Application, state: DashboardState) -> None:
     """Start the live-config watcher as a tracked background task, post-bind.
 
@@ -4023,6 +4079,24 @@ async def start_dashboard(
 
     app.on_startup.append(_hooks_startup)
 
+    async def _member_scheduler_shutdown(app_: web.Application) -> None:
+        boot = app_.get("member_scheduler_boot")
+        if boot is not None and not boot.done():
+            boot.cancel()
+        scheduler = app_.get("member_scheduler")
+        if scheduler is not None:
+            from kiro_crew.member_scheduler import set_scheduler
+
+            await scheduler.stop()
+            set_scheduler(None)
+
+    # The member scheduler is NOT started from ``on_startup`` (those hooks run
+    # inside ``runner.setup()``, before the listener binds --
+    # ``no-new-work-on-gateway-boot-path``); both entrypoints call
+    # ``_kick_member_scheduler`` strictly after ``_start_site`` returns, like the
+    # config watcher. Only the cleanup hook is registered here.
+    app.on_shutdown.append(_member_scheduler_shutdown)
+
     async def _hooks_shutdown(app_: web.Application) -> None:
         # Stop the background pollers BEFORE the gateway hook shutdown sweep.
         # The reconciler and the dev-mode watcher can each LOAD/START app hooks
@@ -4425,6 +4499,7 @@ async def start_dashboard(
     _kick_connections_warm_scavenge(state)
     _kick_session_search_index(state)
     _kick_config_watch(app, state)
+    _kick_member_scheduler(app, state)
     # Same shape for the knowledge store's writer-locked orphan sweep: it left
     # the constructor (which runs pre-bind, on the loop) and runs here on a
     # worker thread once requests are already being served.
@@ -5224,6 +5299,7 @@ async def start_api_server(
     _kick_connections_warm_scavenge(state)
     _kick_session_search_index(state)
     _kick_config_watch(app, state)
+    _kick_member_scheduler(app, state)
 
     logger.info("API-only server listening on %s:%d", bind_addr, port)
 

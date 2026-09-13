@@ -46,8 +46,7 @@ class TestRegistryParity:
     def test_tool_module_is_mapped_for_in_process_listing(self) -> None:
         """Discovery reads tool names in-process; an unmapped server lists zero."""
         assert (
-            mcp_discovery._MANAGED_SERVER_TOOL_MODULES.get(DASH_SERVER)
-            == "kiro_crew.mcp_dashboard"
+            mcp_discovery._MANAGED_SERVER_TOOL_MODULES.get(DASH_SERVER) == "kiro_crew.mcp_dashboard"
         )
 
     def test_spec_carries_no_auto_approve(self) -> None:
@@ -71,7 +70,9 @@ class TestRegistryParity:
         """
         flagged = {n for n, s in agent._MANAGED_MCP_SERVERS.items() if s.get("opt_in")}
         assert set(mcp_cleanup.OPT_IN_BIN_MCP_SERVERS) == flagged
-        assert set(mcp_cleanup.ALWAYS_ON_BIN_MCP_SERVERS) == set(agent._MANAGED_MCP_SERVERS) - flagged
+        assert (
+            set(mcp_cleanup.ALWAYS_ON_BIN_MCP_SERVERS) == set(agent._MANAGED_MCP_SERVERS) - flagged
+        )
         assert set(mcp_cleanup.KIROCREW_BIN_MCP_SERVERS) == set(agent._MANAGED_MCP_SERVERS)
 
 
@@ -151,7 +152,10 @@ class TestDoctorTreatsItAsAssignedNotMissing:
             json.dumps(
                 {
                     "mcpServers": {
-                        n: {"command": "/usr/local/bin/kirocrew", "args": [f"mcp-{n.split('-', 1)[1]}"]}
+                        n: {
+                            "command": "/usr/local/bin/kirocrew",
+                            "args": [f"mcp-{n.split('-', 1)[1]}"],
+                        }
                         for n in mcp_cleanup.ALWAYS_ON_BIN_MCP_SERVERS
                     },
                     "tools": [f"@{n}" for n in mcp_cleanup.ALWAYS_ON_BIN_MCP_SERVERS],
@@ -281,9 +285,7 @@ class TestTheNameAloneIsNotOwnership:
         for name in mcp_cleanup.ALWAYS_ON_BIN_MCP_SERVERS:
             assert name in mcp_cleanup.STALE_MANAGED_MCP_SERVERS
 
-    def test_a_hand_written_grant_survives_cleanup(
-        self, tmp_path: Any, monkeypatch: Any
-    ) -> None:
+    def test_a_hand_written_grant_survives_cleanup(self, tmp_path: Any, monkeypatch: Any) -> None:
         """Including one whose invocation is byte-for-byte what we would write."""
         import json
 
@@ -346,7 +348,15 @@ class TestWhatThisSetGrants:
         "session_send",
         "session_read_message",
     }
-    GRANTED_TOOLS = FOLDER_TOOLS | SESSION_TOOLS
+    #: The member inbox-model verbs (RFC member-inbox-model, M0). Identity-gated
+    #: like the session tools and inert for any caller that is not a FLAGGED
+    #: member's wake (the routes refuse), so granting the set grants nothing new
+    #: to an ordinary session.
+    MEMBER_INBOX_TOOLS = {
+        "outbox_send",
+        "peer_send",
+    }
+    GRANTED_TOOLS = FOLDER_TOOLS | SESSION_TOOLS | MEMBER_INBOX_TOOLS
 
     def test_the_set_is_exactly_the_folder_tools(self) -> None:
         from kiro_crew import mcp_dashboard
@@ -379,10 +389,16 @@ class TestWhatThisSetGrants:
         names = {t["name"] for t in mcp_dashboard._tool_definitions()}
         folder = {n for n in names if n.startswith("chat_folder_")}
         session = {n for n in names if n.startswith("session_")}
+        # The third named class: the member inbox-model verbs. Named here, not
+        # inferred from a prefix, because their names are verbs of the member
+        # (ack / send), and pinned to the module's own tuple so the two cannot drift.
+        member_inbox = set(mcp_dashboard.MEMBER_INBOX_TOOLS)
         assert folder, "the folder-organization tools left this set"
         assert session, "the session-control tools left this set"
+        assert member_inbox <= names, "the member inbox-model tools left this set"
         # Nothing else rides along unannounced.
-        assert names == folder | session, (
-            f"{sorted(names - folder - session)} is neither folder organization nor "
-            "session control — name the class it belongs to before adding it here"
+        assert names == folder | session | member_inbox, (
+            f"{sorted(names - folder - session - member_inbox)} is neither folder "
+            "organization, session control nor the member inbox model — name the class "
+            "it belongs to before adding it here"
         )

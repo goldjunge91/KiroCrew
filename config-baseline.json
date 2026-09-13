@@ -7266,6 +7266,34 @@
       "defaultValue": {}
     },
     {
+      "path": "members",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Members",
+      "help": "Per-member settings keyed by member slug: inbox_model, wake_interval_secs, peer_dm.accept, peer_dm.send.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {}
+    },
+    {
+      "path": "member_peer_dm",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Member Peer DM",
+      "help": "Global switch for member-to-member messages (enabled).",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {}
+    },
+    {
       "path": "slack_channels",
       "kind": "core",
       "type": "object",

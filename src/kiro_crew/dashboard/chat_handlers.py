@@ -380,8 +380,8 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # for an app would be an existence oracle for slots it may not see) and
     # BEFORE the _human_seen attendance mark, so a denied request leaves the
     # slot exactly as it found it.
-    if slot.mode == "member" and agent and agent != slot.agent:
-        # Member DM threads are pinned to their crew. The generic mismatch
+    if members_mod.is_member_mode(slot.mode) and agent and agent != slot.agent:
+        # Member DM threads (and member wakes) are pinned to their crew. The generic mismatch
         # branch below would also refuse this, but the pin deserves its own
         # machine-readable refusal — and it must hold even for a member slot
         # whose agent is somehow empty (the elif below would otherwise adopt
@@ -391,7 +391,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
             {"error": "member thread agent is pinned", "code": "member_thread_agent_pinned"},
             status=409,
         )
-    if slot.mode == "member":
+    if members_mod.is_member_mode(slot.mode):
         # The pin also fails closed against REGISTRY drift, not just against
         # the request: an agentless send on a thread whose crew was deleted
         # would otherwise dispatch with a name the resolver no longer knows,
@@ -581,6 +581,19 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         return web.json_response(
             {"error": "message is required", "code": "message_required"}, status=400
         )
+
+    # Member inbox model (RFC member-inbox-model, M0): a flagged member's DM thread
+    # does not run the person's message as a turn on THIS slot. It becomes a
+    # ``user_dm`` envelope -- the only kind that refills the member's peer-DM
+    # budget, because ``from == "user"`` is set only here, where a person with a
+    # dashboard cookie (no app token) typed -- and the scheduler wakes the member
+    # immediately in an ephemeral execution context. The row is still appended
+    # to this thread so the conversation reads as one; the reply arrives the
+    # same way from the wake runner.
+    if slot.mode == members_mod.DM_SLOT_MODE and not request_app:
+        _inbox_receipt = await _member_inbox_intake(state, slot, message, user_meta)
+        if _inbox_receipt is not None:
+            return _inbox_receipt
 
     if slot.running or slot._in_stage_execution:
         # Mid-turn steer: inject into the RUNNING turn instead of queueing for
@@ -5007,6 +5020,172 @@ class SlotCloseError(Exception):
         self.status = status
 
 
+async def _member_inbox_intake(
+    state: DashboardState, slot: "_ChatSlot", message: str, user_meta: dict | None
+) -> web.Response | None:
+    """Turn a person's message into a ``user_dm`` envelope for a flagged member.
+
+    Returns ``None`` when the member is not on the inbox model so ``api_chat``
+    continues on its ordinary path -- after first folding any envelopes left
+    pending by a flag that was turned off into the thread as a durable
+    ``inject`` row (see :func:`_fold_stranded_envelopes`), so a rollback strands
+    nothing. Import-light and fail-closed: any error in the inbox layer falls
+    back to the session model rather than losing the send.
+    """
+    try:
+        from kiro_crew.member_inbox import (
+            FROM_USER,
+            InboxStore,
+            inbox_model_enabled,
+            make_envelope,
+            member_slug_from_key,
+        )
+
+        slug = member_slug_from_key(slot.key)
+        if slug is None:
+            return None
+        if not await asyncio.to_thread(inbox_model_enabled, slug):
+            await _fold_stranded_envelopes(state, slot, slug)
+            return None
+        from kiro_crew.dashboard.member_wake import (
+            _note_view_pending,
+            _persist_thread_row,
+            reconcile_thread_view,
+        )
+
+        # Rows an earlier intake or wake could not get into the transcript come
+        # back BEFORE this message's row, so the view keeps the record's order.
+        try:
+            await reconcile_thread_view(state, slug, slot.key)
+        except Exception:  # noqa: BLE001 - the view lags; the send still goes through
+            logger.warning("member inbox: view reconcile failed for %s", slot.key, exc_info=True)
+        store = InboxStore(slug)
+        env = await asyncio.to_thread(
+            store.append,
+            make_envelope(to_slug=slug, kind="user_dm", body=message, from_=FROM_USER),
+        )
+    except Exception:  # noqa: BLE001 - fall back to the session model, never drop the send
+        logger.warning(
+            "member inbox intake failed for %s; using session model", slot.key, exc_info=True
+        )
+        return None
+    meta = dict(user_meta or {})
+    meta["peer_dm"] = {"envelope_id": env.id, "kind": "user_dm"}
+    slot.append("user", message, "msg msg-u", meta=meta)
+    from kiro_crew.member_scheduler import notify_member
+
+    notify_member(slug, kind="user_dm")
+    # The envelope is the durable record; the thread row is the view, saved so a
+    # restart does not empty the visible conversation. A save that fails stamps
+    # the envelope `view=pending`; the next intake or wake restores the row
+    # (`reconcile_thread_view`) before it processes anything else.
+    if not await _persist_thread_row(state, slot, slot.key):
+        await _note_view_pending(store, env.id)
+    # No turn runs on THIS slot, but the client started an optimistic local turn
+    # when it sent, and only a `chat_done` for the slot ends it (the same shape a
+    # refused turn takes). Without it the composer stays "running" forever.
+    try:
+        state.broadcast_ws("chat_done", {"slot": slot.key})
+    except Exception:  # noqa: BLE001 - unblocking the composer is best-effort
+        logger.debug("member inbox intake: chat_done broadcast failed", exc_info=True)
+    return web.json_response({"ok": True, "inbox": True, "envelope_id": env.id})
+
+
+async def _fold_stranded_envelopes(state: DashboardState, slot: "_ChatSlot", slug: str) -> int:
+    """Rollback: ``inbox_model`` is off but envelopes are still pending.
+
+    Appends them to the thread as ONE ``inject`` row (the role cron notices use,
+    so the next turn's context carries it) and acks them only after that row is
+    persisted -- the ack follows the durable delivery, never precedes it, so a
+    crash in between redelivers rather than loses. Returns how many were folded.
+    """
+    from kiro_crew.member_inbox import InboxStore
+    from kiro_crew.member_scheduler import member_wake_running
+
+    if member_wake_running(slug):
+        # A wake that started before the flag was turned off is still draining:
+        # it will ack or redeliver what it claimed, and anything it has not
+        # claimed yet it may still claim before this fold could ack it -- a
+        # snapshot of the pending set here races that claim, and the same
+        # envelope would be delivered twice. Fold nothing this time; the next
+        # message folds whatever is still pending once the wake has ended (no
+        # new wake can start: the runner refuses an unflagged member).
+        return 0
+    store = InboxStore(slug)
+    pending = await asyncio.to_thread(store.pending)
+    if not pending:
+        return 0
+    lines = [
+        f"[INBOX — {len(pending)} envelope(s) arrived while this member was on the inbox model, "
+        "which is now off; they are delivered here in full]"
+    ]
+    for i, env in enumerate(pending, 1):
+        # COMPLETE bodies: this row is the only delivery these envelopes get
+        # before they are acked, so nothing may be truncated out of it. Each
+        # body is already bounded by the store's MAX_BODY_CHARS.
+        lines.append(f"{i}. kind={env.kind} from={env.from_} id={env.id}")
+        lines.extend(f"   {bl}" for bl in (env.body.rstrip().splitlines() or [""]))
+    fold_meta = {"kind": "stranded", "envelope_ids": [e.id for e in pending]}
+    # STAGED, not announced: the row joins the live window without a broadcast,
+    # so a save that fails can take it back completely -- a row already pushed
+    # to the client would stay on screen while the same envelopes fold again on
+    # the next message, delivered twice. The announcement follows the write.
+    row = slot.append(
+        "inject", "\n".join(lines), "msg", meta={"peer_dm": fold_meta}, broadcast=False
+    )
+    # ``append`` updates the live slot; the transcript on disk is what survives a
+    # crash, so the row is persisted with a PROPAGATING save (``best_effort=False``
+    # raises on a lock timeout or I/O failure) and the ack follows only a
+    # confirmed write. A failed save leaves the envelopes pending: redelivered,
+    # not lost -- and the LIVE row is withdrawn too, with the bookkeeping the
+    # append did, or the turn that follows would consume a delivery the store
+    # still owes.
+    from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
+
+    try:
+        saved = await save_slot_off_loop(state, slot, best_effort=False)
+    except Exception:
+        _withdraw_fold_row(slot, fold_meta)
+        raise
+    if not saved:
+        _withdraw_fold_row(slot, fold_meta)
+        raise RuntimeError("stranded-envelope row was not persisted; leaving envelopes pending")
+    await asyncio.to_thread(store.ack, [e.id for e in pending])
+    _announce_row(slot, row)
+    return len(pending)
+
+
+def _is_fold_row(row: Any, fold_meta: dict) -> bool:
+    meta = row.get("meta") if isinstance(row, dict) else None
+    return isinstance(meta, dict) and meta.get("peer_dm") is fold_meta
+
+
+def _withdraw_fold_row(slot: "_ChatSlot", fold_meta: dict) -> None:
+    """Take back the staged fold row for *fold_meta*: the live window, the
+    delivery queue a stream reader drains, and the durable row count."""
+    before = len(slot.messages)
+    slot.messages[:] = [row for row in slot.messages if not _is_fold_row(row, fold_meta)]
+    removed = before - len(slot.messages)
+    queue = getattr(slot, "_pending", None)
+    if isinstance(queue, list):
+        queue[:] = [row for row in queue if not _is_fold_row(row, fold_meta)]
+    total = getattr(slot, "total_messages", None)
+    if isinstance(total, int):
+        slot.total_messages = max(0, total - removed)
+
+
+def _announce_row(slot: "_ChatSlot", row: Any) -> None:
+    """Broadcast a row appended with ``broadcast=False`` once it is on disk --
+    the same gate ``_ChatSlot.append`` applies to a live append."""
+    on_message = getattr(slot, "_on_message", None)
+    if not on_message or getattr(slot, "_has_reader", False) or not isinstance(row, dict):
+        return
+    try:
+        on_message(slot.key, row)
+    except Exception:  # noqa: BLE001 - the row is durable; a missed push is a reload away
+        logger.debug("stranded-envelope row broadcast failed for %s", slot.key, exc_info=True)
+
+
 async def close_slot(
     state: DashboardState,
     slot: "_ChatSlot",
@@ -5949,8 +6128,8 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
     agent_name = body.get("agent", "")
     if agent_name and not _AGENT_NAME_RE.match(agent_name):
         return web.json_response({"error": "invalid agent name"}, status=400)
-    if slot.mode == "member" and agent_name != slot.agent:
-        # Member DM threads are pinned to their crew: refuse the switch before
+    if members_mod.is_member_mode(slot.mode) and agent_name != slot.agent:
+        # Member DM threads (and member wakes) are pinned to their crew: refuse the switch before
         # any state is touched. A same-name "switch" stays allowed — it is a
         # session reset, not a re-bind. Audited like every other pin denial
         # (the send path's guard emits the same event), so a probe against the

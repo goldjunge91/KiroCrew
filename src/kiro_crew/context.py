@@ -3406,13 +3406,13 @@ class ContextBuilder:
         # circular import: members' module graph is heavy and this file
         # sits below it in the layering (the same cycle-break
         # chat_persistence uses for the members module).
-        from kiro_crew.members import DM_SLOT_MODE as _member_mode
+        from kiro_crew.members import is_member_mode as _is_member_mode
 
         # User-profile / skills config, loaded once and ALSO consulted by the
         # member capability gate below — one read per context build.
         _cfg = KiroCrewConfig.load()
 
-        if mode == _member_mode and _member_backend_can_dispatch(_cfg):
+        if _is_member_mode(mode) and _member_backend_can_dispatch(_cfg):
             parts.append(
                 f"[CREW MEMBER OPERATING MODE]\n"
                 f'You are the crew member "{agent_label}". This pinned conversation is '

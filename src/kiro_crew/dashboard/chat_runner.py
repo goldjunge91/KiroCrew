@@ -224,7 +224,7 @@ from kiro_crew.llm_helpers import (
     usage_has_billing,
 )
 from kiro_crew.mcp_discovery import kirocrew_managed_names
-from kiro_crew.members import member_lifecycle, record_activity
+from kiro_crew.members import WAKE_SLOT_MODE, is_member_mode, member_lifecycle, record_activity
 from kiro_crew.messaging.display_safety import redact_for_display
 from kiro_crew.messaging.identity import publish_turn_identity
 from kiro_crew.messaging.link import (
@@ -7566,7 +7566,7 @@ async def _run_chat(
         # until the context build, and an aborted WARM_REINJECTION delivery is
         # covered by _needs_reinjection in the same finally-block re-arm.
         _member_session_start_pending = (
-            slot.mode == "member"
+            is_member_mode(slot.mode)
             and member_lifecycle(
                 is_new_session=is_new,
                 resumed=resumed,
@@ -7584,7 +7584,12 @@ async def _run_chat(
         # single gateway event loop with every other session — matching the
         # to_thread offloads used for the other file IO in this function.
         # record_activity is total, so no guard is needed here.
-        if is_new and slot.agent:
+        #
+        # A member WAKE slot is excluded: the scheduler minted it because an
+        # envelope landed, nobody picked the member for it, and every wake is a
+        # fresh slot -- so `via="chat"` rows from wakes would both misstate how
+        # the member was chosen and grow with the timer, not with human use.
+        if is_new and slot.agent and slot.mode != WAKE_SLOT_MODE:
             await asyncio.to_thread(
                 record_activity,
                 slot.agent,
@@ -8099,7 +8104,7 @@ async def _run_chat(
                 # `slot.agent` is the member the human picked (the crew name);
                 # the `agent=` above is the TEMPLATE it resolved to, which is
                 # why the member identity travels separately.
-                member=slot.agent if slot.mode == "member" and slot.agent else "",
+                member=slot.agent if is_member_mode(slot.mode) and slot.agent else "",
                 user_text_range=user_text_span(
                     _user_prepend_offset,
                     user_typed_len,
@@ -10610,8 +10615,12 @@ async def _run_chat(
             elif event.kind == EVENT_AGENT_SWITCHED:
                 new_agent, _ = redact_credentials(event.text)
                 new_agent, _ = redact_exfiltration_urls(new_agent)
+                # `is_member_mode`, not the DM mode alone: a member WAKE runs the
+                # same identity and grants on a `member-wake` slot, and a switch
+                # the veto missed there would leave a foreign agent running under
+                # the member's name for the rest of the wake.
                 if new_agent and (
-                    private_member or (slot.mode == "member" and new_agent != slot.agent)
+                    private_member or (is_member_mode(slot.mode) and new_agent != slot.agent)
                 ):
                     pinned_member = private_member or slot.agent
                     # V2 turns are pinned in every slot mode. Any provider-side

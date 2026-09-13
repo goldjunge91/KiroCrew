@@ -3492,6 +3492,10 @@ class _ChatSlot:
         "_detail_render_lock",
         "_last_stop_reason",
         "_created_by",
+        "_wake_slug",
+        "_wake_inbound_hop",
+        "_wake_outbox_sent",
+        "_wake_batch_ids",
         "_artifact",
         "_channel_folder_filed",
         "_resumed_count",
@@ -3787,6 +3791,17 @@ class _ChatSlot:
         #: person's own tab, a fork, a restore. Read by
         #: ``DashboardState.creator_slot_count`` for ``MAX_SLOTS_PER_CREATOR``.
         self._created_by: str = ""
+        #: Member inbox model (``member_wake``): set only on a ``member-wake`` slot.
+        #: ``_wake_slug`` names the member the wake runs for, ``_wake_inbound_hop``
+        #: is the max causal hop of the ``peer_dm`` envelopes the wake drained (what
+        #: ``peer_send`` inherits), ``_wake_outbox_sent`` records that the model
+        #: already wrote its reply so the runner does not write a second one,
+        #: ``_wake_batch_ids`` the envelope ids this wake drained (stamped into
+        #: every reply's ``in_reply_to`` -- the redelivery idempotency record).
+        self._wake_slug: str = ""
+        self._wake_inbound_hop: int = 0
+        self._wake_outbox_sent: bool = False
+        self._wake_batch_ids: list[str] = []
         # Artifact companion binding: set when this slot is a
         # companion chat session for an artifact (slug). At most one
         # non-archived slot per slug by convention — the frontend flow

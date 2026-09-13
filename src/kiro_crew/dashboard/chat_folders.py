@@ -22,6 +22,7 @@ from kiro_crew.dashboard.token_auth import caller_names_a_missing_slot, derive_c
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.llm_helpers import run_bg_oneliner
 from kiro_crew.loop_lock import LoopBoundLock
+from kiro_crew.members import is_member_mode
 from kiro_crew.sandbox import voice_runtime_workspace_conflict
 from kiro_crew.security import is_sensitive_path, redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
@@ -1501,7 +1502,7 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
     # absent from _VALID_MODES (mode cannot be SET here), and here it cannot
     # be UNSET either: member slots are born and retired only through the
     # member-thread endpoint.
-    if slot.mode == "member":
+    if is_member_mode(slot.mode):
         return web.json_response(
             {"error": "member thread mode is locked", "code": "member_mode_locked"},
             status=409,

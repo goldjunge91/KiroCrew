@@ -5923,6 +5923,12 @@ _CONDUCTOR_DASHBOARD_GRANTS: tuple[str, ...] = (
 _MEMBER_DASHBOARD_GRANTS: tuple[str, ...] = _CONDUCTOR_DASHBOARD_GRANTS + (
     "@kirocrew-dashboard/session_send",
     "@kirocrew-dashboard/session_stop",
+    # Inbox-model verbs (RFC member-inbox-model, M0). Inert unless the member is
+    # flagged ``members.<slug>.inbox_model: true`` -- the routes refuse an
+    # unflagged caller -- and bounded server-side (``peer_send``: causal hop cap,
+    # per-member budget refilled only by the owner, per-pair rate limit).
+    "@kirocrew-dashboard/outbox_send",
+    "@kirocrew-dashboard/peer_send",
 )
 
 

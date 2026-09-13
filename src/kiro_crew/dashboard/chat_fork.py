@@ -24,6 +24,7 @@ from kiro_crew.dashboard.state import (
 )
 from kiro_crew.history import carry_provenance
 from kiro_crew.history_projection import drop_persisted_tail_prefix as _drop_persisted_tail_prefix
+from kiro_crew.members import is_member_mode
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.sel import sel
 
@@ -869,7 +870,7 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     # allowlist deliberately cannot name "member".
     if mode_override is not None:
         fork_mode = mode_override
-    elif slot.mode == "member":
+    elif is_member_mode(slot.mode):
         fork_mode = ""
     else:
         fork_mode = slot.mode

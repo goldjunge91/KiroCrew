@@ -122,6 +122,20 @@ DM_BINDINGS_DIR_NAME = "member-bindings"
 #: every consumer with no filtering code of its own.
 DM_SLOT_MODE = "member"
 
+#: The ephemeral execution context the inbox model runs a wake in
+#: (``member_inbox.WAKE_SLOT_MODE``). A DIFFERENT mode from the DM thread so the
+#: sessions-list surface predicate excludes it and the pin/binding checks that
+#: guard the thread endpoint do not fire on it -- but it IS the member for
+#: everything that shapes the turn (identity block, rules, briefing, member
+#: prompt), which is what :func:`is_member_mode` exists to say in one place.
+WAKE_SLOT_MODE = "member-wake"
+
+
+def is_member_mode(mode: str | None) -> bool:
+    """Whether a slot runs AS a crew member: the DM thread or one of its wakes."""
+    return mode in (DM_SLOT_MODE, WAKE_SLOT_MODE)
+
+
 #: Slot-key prefix for member DM threads (``member-<slug>``), following the
 #: existing ``<kind>-<id>`` key convention (``chat-<N>-<ts>``, ``cron-<id>``).
 DM_SLOT_KEY_PREFIX = "member-"
