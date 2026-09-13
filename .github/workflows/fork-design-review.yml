@@ -376,7 +376,9 @@ jobs:
             consequence — and quote the diff hunk or description sentence it is
             grounded in. If you cannot trace a concrete consequence, DROP the
             finding. When unsure, lower the concern (prefer CONCERNS over BLOCK),
-            never invent one.
+            never invent one -- except where a BLOCK TRIGGER under VERDICT is
+            read off the diff or the description rather than judged; those are
+            facts, and a fact is not lowered.
 
             THE DESIGN GATE (INTERNAL REASONING — think through each silently;
             do NOT echo these questions or their answers in your output. They
@@ -468,13 +470,35 @@ jobs:
               forbids is a decision until a human says otherwise;
             - the PR says "Manual verification: N/A" (or equivalent) for a branch
               that only runs on a platform or in an environment CI does not
-              exercise.
+              exercise;
+            - CANNOT EVALUATE -- REQUIRED EVIDENCE MISSING: the change adds or
+              reshapes a user-visible surface (a page, panel, control set, or
+              the default mode of an existing one, under website/src/) and the
+              PR carries no rendered evidence of THIS revision -- no screenshot
+              or recording attached to its description (a
+              github.com/user-attachments asset) and none committed at HEAD
+              that THIS checkout can render (on a fork pull request the head is
+              never checked out, so a committed image is not evidence here --
+              the same rule the fork UX lane applies; the attachment is). An
+              image hosted off a commit outside this PR, or one the description
+              itself says shows another PR's state, is not evidence of this
+              revision. You cannot judge the shape of a surface you have not
+              seen, and a verdict you cannot reach must not read as advisory:
+              BLOCK, punchline opening `cannot evaluate: missing <screenshot or
+              recording of X>`, and `Clears when:` names the artifact. Absence
+              is read off the description and the diff, not judged, so the
+              tie-breaker above does not reach it. A change that renders
+              nothing new (a refactor, a test, a type) needs no evidence.
             FALSIFY BEFORE YOU BLOCK (mandatory, because BLOCK now blocks): for
             each BLOCK candidate, actively try to KILL it -- name the specific
             requirement the design fails, the concrete alternative that is
             better, and the consequence of shipping as-is. A candidate survives
             ONLY if you can state all three from the diff and the code you
-            opened. A matter of taste is never a BLOCK; "might" and "unclear"
+            opened (for the missing-evidence trigger the three are: the surface
+            the diff adds or reshapes, the description carrying no attachment
+            and the tree carrying no committed image for it, and the shape
+            question you therefore could not answer). A matter of taste is
+            never a BLOCK; "might" and "unclear"
             lower it ONLY when the tie-breaker above finds the consequence
             reversible. Budget: at most 1 BLOCK per review; if you have two, you
             are almost certainly describing one root design problem, so merge

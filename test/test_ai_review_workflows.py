@@ -2265,9 +2265,16 @@ class TestUxReviewReadsTheScreenshotsBlindFirst:
         assert "13. STATE-TRANSITION CONTINUITY" in prompt
         assert "YOU JUDGE THE SURFACE, NOT THE CODE" in prompt
         assert "### Evidence gaps" in prompt
-        # Evidence gaps cap the verdict; a hard swap and a misread primary
-        # control are decidable BLOCKs.
-        assert "the verdict cannot be PASS" in prompt
+        # An evidence gap is a BLOCK the lane reports as "cannot evaluate":
+        # a UI diff with no admissible screenshot, filed as CONCERNS, reads
+        # as green in readiness although nobody looked. A hard swap and a
+        # misread primary control are the other decidable BLOCKs. A
+        # cap-below-PASS wording lets an unevaluated change read green, so
+        # it is asserted absent.
+        assert "the verdict cannot be PASS" not in prompt
+        assert "cannot evaluate: missing" in prompt
+        assert "An evidence gap (lens 12 or 13)" in prompt
+        assert "or the evidence is incomplete" not in prompt
         assert "flag ? <Chip/> : <Card/>" in prompt
         # Scoped to a persistent, already-identified element: the mechanical
         # predicate must not fire on loading/empty/error conditionals.
@@ -7760,10 +7767,13 @@ class TestFirstPrinciplesProblemsFirstContract:
         assert 'Here "unclear" is the BLOCK case, not the CONCERNS case' in contract
         assert "the author can" in contract
         assert "Do not soften this to a Watch item" in contract
-        # The carve-outs stay a closed set of two; an open-ended third would
-        # put the tie-breaker back in charge of everything.
-        assert "there is no third" in contract
-        assert "The two exceptions are named at the" in contract
+        # The carve-outs stay a CLOSED set -- now four: (a) availability
+        # premise, (b) rider, (c) product shape without a recorded decision,
+        # (d) cannot evaluate. An open-ended fifth would put the tie-breaker
+        # back in charge of everything.
+        assert "there is no fifth" in contract
+        assert "The four exceptions are named at the" in contract
+        assert "there is no third" not in contract
         assert "The single exception is the combination" not in contract
 
     def test_undeclared_and_rides_along_are_inventory_tags_not_verdicts(self) -> None:
