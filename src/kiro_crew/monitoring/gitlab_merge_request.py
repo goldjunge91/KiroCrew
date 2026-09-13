@@ -34,7 +34,12 @@ _TIMEOUT_SECS = 30.0
 _MAX_OUTPUT_BYTES = 1024 * 1024
 _PAGE_SIZE = 100
 _MAX_PROVIDER_ITEMS = _PAGE_SIZE * 2
-_TERMINAL_STATES = {"merged", "closed"}
+_CANONICAL_STATES = {"opened": "open", "merged": "merged", "closed": "closed"}
+# Terminal means "no supplemental read can change the verdict", which is every
+# mapped state except the open one. Deriving it keeps the two from drifting.
+_TERMINAL_STATES = frozenset(
+    raw for raw, canonical in _CANONICAL_STATES.items() if canonical != "open"
+)
 
 GitLabFetch = Callable[[GitLabMergeRequestTarget, str], object]
 
@@ -222,10 +227,7 @@ def _facts(
     discussions_complete: bool = True,
 ) -> PullRequestFacts:
     raw_state = str(mr["state"]).lower()
-    state = {"opened": "open", "merged": "merged", "closed": "closed"}.get(
-        raw_state,
-        "unknown",
-    )
+    state = _CANONICAL_STATES.get(raw_state, "unknown")
     detailed_merge_status = str(mr.get("detailed_merge_status") or "").lower()
     legacy_merge_status = str(mr.get("merge_status") or "").lower()
     merge_status = detailed_merge_status or legacy_merge_status

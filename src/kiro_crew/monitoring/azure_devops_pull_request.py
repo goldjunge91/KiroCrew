@@ -30,7 +30,12 @@ from kiro_crew.monitoring.targets import (
 _TIMEOUT_SECS = 30.0
 _MAX_OUTPUT_BYTES = 1024 * 1024
 _MAX_EVIDENCE_ITEMS = 100
-_TERMINAL_STATUSES = {"completed", "abandoned"}
+_CANONICAL_STATUSES = {"active": "open", "completed": "merged", "abandoned": "closed"}
+# Terminal means "no supplemental read can change the verdict", which is every
+# mapped status except the open one. Deriving it keeps the two from drifting.
+_TERMINAL_STATUSES = frozenset(
+    raw for raw, canonical in _CANONICAL_STATUSES.items() if canonical != "open"
+)
 
 AzureFetch = Callable[[AzureDevOpsPullRequestTarget, str], object]
 
@@ -214,17 +219,14 @@ def _facts(
     ):
         raise ValueError("Azure DevOps response identity does not match the target")
     raw_state = str(pr["status"]).lower()
-    state = {"active": "open", "completed": "merged", "abandoned": "closed"}.get(
-        raw_state,
-        "unknown",
-    )
+    state = _CANONICAL_STATUSES.get(raw_state, "unknown")
     raw_merge = str(pr.get("mergeStatus", "")).lower()
     if raw_merge == "succeeded":
         mergeability = "mergeable"
-    elif raw_merge in {"conflicts", "failure"}:
-        mergeability = "conflicting" if raw_merge == "conflicts" else "blocked"
-    elif raw_merge in {"queued", "notset"}:
-        mergeability = "pending"
+    elif raw_merge == "conflicts":
+        mergeability = "conflicting"
+    elif raw_merge == "failure":
+        mergeability = "blocked"
     else:
         mergeability = "pending"
     checks: list[PullRequestCheck] = []
