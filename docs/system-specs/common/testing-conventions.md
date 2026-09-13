@@ -119,6 +119,12 @@ say), and then still pair it with a Windows counterpart.
 
 ### Patch the defining module, not a re-export
 
+Synthetic process trees must fix the gateway PID as well as the worker PIDs.
+Mixing `os.getpid()` with hardcoded fixture PIDs can overwrite the gateway's
+namespace record when a container's test worker has the same PID. Give each
+synthetic role a distinct identity, and replace the tested module's `os`
+reference rather than patching the process-wide `os.getpid`.
+
 `monkeypatch.setattr`/`patch` rebind a NAME in one module namespace. Code
 reads its globals from its **defining** module, so patching a package
 re-export (e.g. `kiro_crew.dashboard.handlers.X`, imported there from

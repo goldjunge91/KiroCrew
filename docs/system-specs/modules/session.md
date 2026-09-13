@@ -55,6 +55,30 @@ tests have moved off the corresponding legacy seam.
 
 ## Private member session ownership
 
+The organization scheduler opens a verified member's existing canonical DM
+through `ensure_member_thread`, the same trusted implementation as the
+owner-gated HTTP endpoint. Its synthetic wake has system origin and cannot
+choose a different private store. Busy owner conversations retain their slot;
+the scheduler returns admission and lets other members run. Every private
+dashboard turn rechecks organization membership after binding, including a warm
+owner conversation, so a retired identity cannot continue using a cached
+provider.
+
+During a trusted owner chat turn, `_run_chat` installs a runtime-only
+`_organization_owner_request` on the slot after publishing the turn identity.
+It binds that exact session key to a fresh request ID. `org_start_task` requires
+both this grant and the live turn after authenticating the private caller.
+The runner clears the grant at the start of its outer `finally`, including
+failure and cancellation. Restored slots have no grant; transcript text cannot
+restore one. Synthetic payloads and self-wakes cannot obtain it.
+The grant requires `_organization_owner_origin`, derived from the authenticated
+owner identity at dashboard chat ingress. `_directive_user_origin` denotes any
+authenticated human and is not owner authority. The owner fact travels outside
+client metadata through queued sends, drain and retries of the original request.
+Queue batches stop at an owner/non-owner boundary; a queue edit replaces the
+fact with the editor's verified authority. Transcript metadata and restored
+slots cannot mint it.
+
 An ordinary dashboard chat that has already used private member memory keeps
 that ownership for its lifetime. The agent-switch endpoint reads the protected
 binding for the effective session key before changing any slot fields, resetting

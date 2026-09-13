@@ -30,6 +30,7 @@ from kiro_crew.agent_files import (
 from kiro_crew.config.paths import kiro_agents_dir, project_agents_dir, project_kiro_dir
 from kiro_crew.executors import discovery_executor
 from kiro_crew.hooks import FileTooLargeError, safe_read_file_bytes
+from kiro_crew.organization import ORGANIZATION_AGENT_PREFIX
 from kiro_crew.security import is_sensitive_path
 from kiro_crew.sel import sel as _sel
 
@@ -1039,6 +1040,10 @@ def list_agents(
         user_candidates = 0
         user_parsed = 0
         for f in sorted(d.glob("*.json")):
+            # Compiled role policies belong to existing private members. They
+            # are runtime artifacts, not templates to sync into new members.
+            if f.name.startswith(ORGANIZATION_AGENT_PREFIX):
+                continue
             # AppleDouble sidecars are rejected by design, not by failure — a
             # directory holding only sidecars is empty of specs, not broken.
             if not f.name.startswith("._"):

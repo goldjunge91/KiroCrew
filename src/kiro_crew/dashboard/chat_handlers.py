@@ -230,7 +230,12 @@ def _sweep_stale_permissions(slot: "_ChatSlot") -> None:
 
 async def api_chat(request: web.Request) -> web.StreamResponse:
     """POST /api/chat — send message to a slot, stream response via SSE."""
+    from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
+
     state: DashboardState = request.app["state"]
+    organization_owner_origin = request.get(
+        "internal_auth"
+    ) is not True and is_owner_dashboard_request(request)
     body, body_err = await read_bounded_json(request, max_bytes=None)
     if body_err is not None:
         return body_err
@@ -678,6 +683,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
             slot,
             message,
             directive_user_origin=not bool(request_app),
+            organization_owner_origin=organization_owner_origin,
             send_id=normalize_send_id(user_meta.get("sendId")) if user_meta else None,
             attachments=attachment_meta(user_meta),
         )
@@ -712,6 +718,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
             message,
             meta=_hold_meta,
             directive_user_origin=not bool(request_app),
+            organization_owner_origin=organization_owner_origin,
         )
         _c, _ = redact_exfiltration_urls(message)
         _c, _ = redact_credentials(_c)
@@ -1066,6 +1073,7 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
                     slot,
                     message,
                     _directive_user_origin=not bool(request_app),
+                    _organization_owner_origin=organization_owner_origin,
                 )
             ),
         ),
@@ -4555,6 +4563,8 @@ async def api_chat_slot_queue_edit(request: web.Request) -> web.Response:
     matching queue item in place (order preserved).  Broadcasts a
     ``queue_edit`` WebSocket event so all connected clients update in sync.
     """
+    from kiro_crew.dashboard.handlers.source_providers import is_owner_dashboard_request
+
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
     queue_id = request.match_info["queue_id"]
@@ -4575,6 +4585,9 @@ async def api_chat_slot_queue_edit(request: web.Request) -> web.Response:
         queue_id,
         content,
         directive_user_origin=not bool(request.get("app", "")),
+        organization_owner_origin=(
+            request.get("internal_auth") is not True and is_owner_dashboard_request(request)
+        ),
     ):
         return web.json_response({"error": "queue item not found"}, status=404)
     # The stored text is what the edit normalized to (attachment markers are

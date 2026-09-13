@@ -71,6 +71,14 @@ no model load or inference.
 
 ## Verifying a change
 
+Atomic no-replace rename uses the platform wrapper where available. On Linux
+with an older C library, it uses the same kernel operation through `syscall`
+for explicitly mapped architectures; an unknown architecture still refuses.
+The fallback retains the occupied-destination error and never degrades to a
+check-then-rename sequence. Process-parent snapshots request PID and PPID with
+separate `ps -o` arguments: some supported `ps` versions interpret a combined
+headerless format as a custom header followed by only one column.
+
 CI holds all three platforms at the UNIT layer: the `backend-test` shards cover
 Linux, `backend-test-windows` covers Windows, and `backend-test-macos` covers
 macOS. All three run the whole suite, so a POSIX call that only works on Linux
