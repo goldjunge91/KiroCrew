@@ -502,7 +502,32 @@ A channel-neutral dispatch path that replaces the native `handle_message` stream
 4. `events.py` routes `interactive` Socket Mode event to `interactions.dispatch()`
 5. Approval/rejection sent to ACP, streaming resumes or stops
 6. Approval button message replaced with outcome text
-7. 120s timeout — auto-rejects if no click
+7. 120s timeout — steers an in-band approval-timeout notice into the running
+   turn (`build_refusal_steer_notice`, cause `approval_timeout`, bounded 5s,
+   best-effort), then auto-rejects. The model is told the prompt expired
+   unanswered instead of reading kiro-cli generic denial text as a human
+   refusal (dashboard precedent: PR #10217).
+
+### Claim-winner invariant (timeout arm ↔ `handle_interaction`)
+
+The pending-approval registry entry is claimed with `pop(key)` BEFORE any
+await, on both sides:
+
+- `_request_approval`'s timeout arm pops first; only when it wins the claim
+  does it steer and answer the wire (`reject_tool`). A lost claim means a
+  click is answering; the arm then waits (bounded 5s) for the click's real
+  outcome via the shielded waiter future, and on a hung click answers
+  best-effort via `_reject_orphaned_tool` rather than stranding the request.
+- `handle_interaction` pops at lookup. If its `approve_tool`/`reject_tool`
+  raises after claiming, it answers the wire itself (`_reject_orphaned_tool`)
+  and resolves the waiter — a timeout arm that already returned can never
+  claim again.
+
+Exactly one side ever answers a given `request_id`: a second answer lands in
+the ACP client's popped-options cancelled-outcome fallback, which cancels the
+whole turn. Every fallback rejection that reaches the wire is recorded in the
+SEL audit trail by `_reject_orphaned_tool`. Editors of either function must
+preserve this contract.
 
 ## Session Management
 
