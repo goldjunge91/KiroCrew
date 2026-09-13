@@ -407,6 +407,9 @@ export const defaultMessageRenderers: readonly MessageRenderer[] = [
           // A hidden invisible-only row draws nothing, so it cannot host the
           // footer; pass over it to the row that renders.
           if (isHiddenInvisibleAssistantRow(ctx.messages[j])) continue
+          // A system-notice row (compaction / session reload) draws a system
+          // card, not a reply, so it cannot end the turn either.
+          if (isSystemNoticeRow(ctx.messages[j])) continue
           if (ctx.messages[j].role === 'assistant' || ctx.messages[j].role === 'streaming') { nextRelevant = true; break }
         }
         if (!nextRelevant) showFooter = !ctx.running
