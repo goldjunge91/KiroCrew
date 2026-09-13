@@ -85,6 +85,7 @@ from kiro_crew.agent import (
     agent_spec_path,
     ensure_agent_materialized,
     managed_mcp_spec_entry,
+    require_fresh_derived_spec,
 )
 from kiro_crew.agent_discovery import _read_agent_spec, project_agent_files, project_agent_name
 from kiro_crew.agent_sdk.mcp_refs import parse_tools_refs
@@ -299,6 +300,10 @@ def _agent_spec_for(agent: str, work_dir: str | Path | None = None) -> dict[str,
     at all, and the claude spawn path -- unlike kiro-cli's ``--agent`` one -- has
     no other reason to write it. Best-effort and never raises.
 
+    A DERIVED agent (``kirocrew-worker``) is answered from the freshness gate's own
+    snapshot and reads nothing here -- see the comment at that branch for why a read
+    after the gate is a second observation rather than a tighter one.
+
     Reads through ``agent_discovery._read_agent_spec``, the module's documented
     ONE reader, rather than parsing the file here: the agents directory is
     user-writable and shared with other tools, so the guards it applies are the
@@ -311,6 +316,19 @@ def _agent_spec_for(agent: str, work_dir: str | Path | None = None) -> dict[str,
     ``"unknown"`` because a session is started from every channel Crew has.
     """
     ensure_agent_materialized(agent)
+    # Refuse a derived spec that predates the default rather than PROJECT it: this
+    # function's answer becomes the session's MCP surface, so a stale mirror here is
+    # the revoked server reaching the session.
+    snapshot = require_fresh_derived_spec(agent, work_dir)
+    if snapshot is not None and snapshot.spec is not None:
+        # ZERO reads below this line for a derived agent. The gate already read and
+        # verified those bytes, so re-reading the file here would be a SECOND
+        # observation of it -- and a revocation landing between the two would become the
+        # session's MCP surface as though it had been checked. No lock closes that gap:
+        # both halves are this process's own reads, so the second read is removed rather
+        # than re-verified. The project-spec branch below is unreachable for a derived
+        # agent anyway: the gate REFUSES a checkout that declares one.
+        return snapshot.spec
     project = _project_spec_path_for(agent, work_dir)
     if project is not None:
         return _read_agent_spec(project, operation="session_mcp_project_agent", source="unknown")

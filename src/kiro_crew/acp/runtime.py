@@ -790,6 +790,10 @@ class AcpRuntime:
         self._sandbox_cleanup: str | None = None
         self._bound_workspace_fd: int | None = None
         self._spawn_work_dir = str(self._work_dir)
+        # What the pre-spawn freshness check verified, for the post-handshake half of
+        # the bracket. ``None`` until a spawn takes it, and ``None`` for every agent
+        # that mirrors no other spec.
+        self._derived_spec_snapshot: Any = None
 
         # Recycling thresholds — see _is_stale(). Long-lived multiplexed
         # runtimes (e.g. the kirocrew-lite background runtime) have no
@@ -1198,12 +1202,15 @@ class AcpRuntime:
     async def _resolve_spawn_plan(self) -> SpawnPlan:
         """Pre-sandbox argv for this runtime's backend, built by its harness.
 
-        Every flag, every pre-spawn gate and every side effect belongs to the
-        host, and the two hosts shipped today share none of them: one takes its
-        agent and model on the command line and needs its spec on disk first, the
-        other takes both over the wire and decides per spawn who owns the
-        credential. A host added later answers all of that in its own file, which
-        is the whole reason the argv is not assembled here.
+        Every flag and every HOST-SPECIFIC pre-spawn gate belongs to the host, and
+        the two hosts shipped today share none of them: one takes its agent and
+        model on the command line and needs its spec on disk first, the other
+        takes both over the wire and decides per spawn who owns the credential. A
+        host added later answers all of that in its own file, which is the whole
+        reason the argv is not assembled here. The derived-spec freshness gate is
+        the one exception, and the comment on it below says why: it is the same
+        check for every host, and it opens a bracket the runtime's own handshake
+        closes.
 
         ONE reading of the environment drives both the search and the message
         that reports it, so a "not found (searched ...)" line can never name
@@ -1231,6 +1238,34 @@ class AcpRuntime:
                 sandbox_mode=self._sandbox_mode,
             )
         )
+        # The ONE derived-spec gate on this path, and the one host-level gate that is
+        # the runtime's rather than the harness's: it is the same check for every host,
+        # and it returns the snapshot the POST-handshake check compares against, so both
+        # ends of that bracket must belong to the object that drives the handshake.
+        #
+        # AFTER ``resolve_spawn`` on purpose. It is the LAST verification before the
+        # process is created, so nothing between it and the exec can re-derive: a gate
+        # that ran before the host's own pre-spawn work would let a re-derive land in
+        # between, and the child would then load the NEWER spec while the
+        # post-handshake check compared against the older snapshot and killed a valid
+        # session. It also puts the host's materialization self-heal FIRST, so a missing
+        # default spec is repaired on the path that can repair it instead of refused.
+        #
+        # Not inside the harness either, and not once per harness: that shape leaves one
+        # hole per host nobody named, and the two shipped hosts already disagreed about
+        # it -- only one of them gated.
+        #
+        # Converted to the runtime's abort type, like every other refusal on this path.
+        # One extra stat (and at most one hash) on a path that is already spawning a
+        # process.
+        from kiro_crew.agent import DerivedSpecStale, require_fresh_derived_spec
+
+        try:
+            self._derived_spec_snapshot = await asyncio.to_thread(
+                require_fresh_derived_spec, self._agent, self._work_dir
+            )
+        except DerivedSpecStale as exc:
+            raise AcpRuntimeError(str(exc)) from exc
         self._kas_host_auth = plan.host_auth
         return plan
 
@@ -1661,6 +1696,17 @@ class AcpRuntime:
             _prompt_caps = init_resp.get("agentCapabilities", {}).get("promptCapabilities", {})
             self._prompt_capabilities = _prompt_caps if isinstance(_prompt_caps, dict) else {}
             self._agent_version = agent_version_from_init(init_resp)
+
+            # The subprocess has now read its agent spec, which closes the window the
+            # pre-spawn snapshot opened: a write landing before this point is caught
+            # here, and one landing after cannot change what kiro-cli already loaded.
+            # Deliberately INSIDE the guard below -- it kills the process, reaps the
+            # PID-file entries and the protected-PID shield, then re-raises -- because
+            # a session that may have loaded an unverified spec must not survive, and
+            # leaving the process behind would be a worse outcome than the stale spec.
+            from kiro_crew.agent import require_unchanged_derived_spec
+
+            await asyncio.to_thread(require_unchanged_derived_spec, self._derived_spec_snapshot)
             self._initialized = True
             logger.info("AcpRuntime initialized (PID %d)", self._pid)
         except BaseException:
