@@ -9,6 +9,7 @@ import concurrent.futures
 import contextlib
 import hashlib
 import http.client
+import ipaddress
 import json
 import logging
 import os
@@ -756,10 +757,12 @@ def _shebang_argv(entry: Path) -> list[str]:
 # Lifecycle
 # ---------------------------------------------------------------------------
 
-def start_app_backend(app_name: str) -> AppProcess | None:
+def start_app_backend(app_name: str, gateway_port: int | None = None) -> AppProcess | None:
     """Start an app's backend process if it declares one.
 
     Returns the AppProcess on success, None if no backend declared.
+    *gateway_port* is only passed by the boot path — see
+    :func:`gateway_loopback_url` for why it exists and why runtime callers omit it.
     """
     manifest = get_app_manifest(app_name)
     if not manifest or not manifest.backend.entryPoint:
@@ -805,7 +808,7 @@ def start_app_backend(app_name: str) -> AppProcess | None:
     # app_backend_lifecycle_flock.
     try:
         with app_backend_lifecycle_flock(app_name):
-            result = _start_app_backend_body(app_name, manifest)
+            result = _start_app_backend_body(app_name, manifest, gateway_port)
     except Exception:
         _clear_failed_spawn_state(app_name)
         raise
@@ -1662,10 +1665,87 @@ def _provision_app_deps_locked(app_name: str, root: Path, pin: _PinnedDir) -> st
     return provision_error
 
 
-def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
+def gateway_loopback_url(declared_port: int | None = None) -> str:
+    """Loopback base URL of the gateway this process serves, for app backends.
+
+    Handed to every spawned backend as ``KIROCREW_GATEWAY_URL`` so third-party
+    code can call back into the gateway (``/api/token/local``, the reverse
+    proxy, the SDK) without guessing the port. ``minimal_env()`` is an
+    allowlist, so an operator cannot supply this from their shell — the gateway
+    is the only party that knows where it listens, and it must say so.
+
+    *declared_port* is the port the BOOT path is about to bind: the enabled
+    apps are started before the TCP site is up, so ``KIROCREW_BOUND_PORT`` is
+    not exported yet and the resolver below cannot see a ``--port`` override
+    (that override is a constructor argument, never the environment). ``0``
+    means an ephemeral bind (``--port auto``) whose number nobody knows yet,
+    and the answer is then ``""`` — the caller withholds the variable rather
+    than advertise a guess. The resolver's fallbacks at that moment are an
+    inherited ``KIROCREW_PORT``, the configured URL, another gateway's marker
+    or the default: every one of them is the wrong-port ``fetch failed`` this
+    variable exists to remove, dressed up as a documented fact. An absent
+    variable is honest; a backend can say "not available" instead of dialling
+    a stranger. Every later spawn — install, update, disable/enable, or the
+    next gateway restart — passes ``None`` and resolves through
+    :func:`kiro_crew.port_resolution.resolve_serving_port`, which prefers the
+    port this process actually bound over an inherited ``KIROCREW_PORT``.
+
+    Always ``127.0.0.1``: the dashboard may bind wider (``KIROCREW_BIND=0.0.0.0``
+    in a container), but a backend is a local child of this gateway and its
+    callback must never leave the host, so the loopback form is the one
+    advertised — the same shape the screencast ingress and the MCP core callback
+    use. The one bind that is NOT reachable on loopback — ``KIROCREW_BIND`` set to
+    a specific non-loopback interface address — gets the same treatment as the
+    unknown port: ``""``, so the variable is withheld rather than advertise a URL
+    that connection-refuses. The wildcard binds (``0.0.0.0``, ``::``) include
+    loopback and are fine; an unparsable value is ignored by
+    :func:`kiro_crew.dashboard.urls.bind_address_for` (which then binds
+    loopback), so it is fine too.
+
+    The import is function-local: ``port_resolution`` pulls in
+    ``dashboard.origin`` (aiohttp) at module scope, and this module sits on the
+    app-serving import path.
+    """
+    if not _gateway_listens_on_loopback():
+        return ""
+    if declared_port is None:
+        from kiro_crew.port_resolution import resolve_serving_port
+
+        port = resolve_serving_port()
+    else:
+        port = declared_port
+    if port <= 0:
+        return ""
+    return f"http://127.0.0.1:{port}"
+
+
+def _gateway_listens_on_loopback() -> bool:
+    """Whether ``127.0.0.1:<port>`` reaches this gateway's TCP site.
+
+    Mirrors the acceptance rule of :func:`kiro_crew.dashboard.urls.bind_address_for`:
+    an unset or unparsable ``KIROCREW_BIND`` binds loopback, a wildcard
+    (``0.0.0.0`` / ``::``) includes it, and only a specific non-loopback interface
+    address excludes it.
+    """
+    override = os.environ.get("KIROCREW_BIND", "").strip()
+    if not override:
+        return True
+    try:
+        addr = ipaddress.ip_address(override)
+    except ValueError:
+        return True  # bind_address_for ignores it and binds loopback
+    return addr.is_loopback or addr.is_unspecified
+
+
+def _start_app_backend_body(
+    app_name: str, manifest, gateway_port: int | None = None
+) -> AppProcess | None:
     """The spawn body, single-flighted by the STARTING placeholder set in
     :func:`start_app_backend`. Returns the real AppProcess on success or None on any
-    failure; the caller clears the placeholder on None/exception."""
+    failure; the caller clears the placeholder on None/exception.
+
+    *gateway_port* is the boot path's declared dashboard port (see
+    :func:`gateway_loopback_url`); ``None`` resolves the serving port."""
     root = app_dir(app_name)
     entry_point = manifest.backend.entryPoint
     # Module-style entry point (e.g. "kiro_crew.apps.builtins.<name>"):
@@ -1971,6 +2051,28 @@ def _start_app_backend_body(app_name: str, manifest) -> AppProcess | None:
         KIROCREW_HOME=str(config_dir()),
         **_platform_extra,
     )
+    # Where THIS gateway listens, loopback-only. Third-party backends need it
+    # to call back in (a hardcoded http://localhost:5476 breaks on a gateway
+    # started with --port 7790), and the allowlist above means the gateway is
+    # the only party that can tell them. A location, not a secret. Withheld —
+    # not guessed — when the port is not known yet (see gateway_loopback_url).
+    _gateway_url = gateway_loopback_url(gateway_port)
+    if _gateway_url:
+        env["KIROCREW_GATEWAY_URL"] = _gateway_url
+    elif not _gateway_listens_on_loopback():
+        logger.warning(
+            "App %s backend: this gateway binds KIROCREW_BIND=%s, which loopback does "
+            "not reach; KIROCREW_GATEWAY_URL is withheld",
+            app_name,
+            os.environ.get("KIROCREW_BIND", "").strip(),
+        )
+    else:
+        logger.warning(
+            "App %s backend is starting before this gateway's ephemeral port "
+            "(--port auto) is known; KIROCREW_GATEWAY_URL is withheld until the "
+            "app is next disabled and enabled, updated, or the gateway restarts",
+            app_name,
+        )
     # Inject the per-app proxy secret so the backend can verify the
     # X-KiroCrew-Proxy HMAC the gateway signs on every forwarded request
     # (CWE-306). Without it the loopback backend would trust any local caller.
@@ -3661,11 +3763,14 @@ def _reap_stale_app_backends() -> int:
     return len(reaped)
 
 
-def start_enabled_app_backends() -> list[str]:
+def start_enabled_app_backends(gateway_port: int | None = None) -> list[str]:
     """Start backends for all enabled apps that declare one.
 
     Called during gateway startup to restore app backends.
     Returns list of app names that were started.
+
+    *gateway_port* is the dashboard port the caller is about to bind, forwarded
+    to each backend as ``KIROCREW_GATEWAY_URL`` (see :func:`gateway_loopback_url`).
     """
     # Reap app backends left running by a prior (e.g. SIGKILLed) gateway
     # generation before starting the new one. See the RFC,
@@ -3835,7 +3940,7 @@ def start_enabled_app_backends() -> list[str]:
                 continue
         admitted.append(name)
 
-    return _start_backends_concurrently(admitted)
+    return _start_backends_concurrently(admitted, gateway_port)
 
 
 def _preclaim_fixed_ports(names: list[str]) -> None:
@@ -3868,7 +3973,9 @@ def _preclaim_fixed_ports(names: list[str]) -> None:
             logger.warning("Boot: fixed-port pre-claim for app %s skipped: %s", name, exc)
 
 
-def _start_backends_concurrently(names: list[str]) -> list[str]:
+def _start_backends_concurrently(
+    names: list[str], gateway_port: int | None = None
+) -> list[str]:
     """Spawn the given app backends in parallel; return those that started.
 
     Each app's spawn blocks on a survival grace window, so starting them one at a
@@ -3898,7 +4005,7 @@ def _start_backends_concurrently(names: list[str]) -> list[str]:
         max_workers=min(len(names), _BOOT_SPAWN_MAX_WORKERS),
         thread_name_prefix="app-boot",
     ) as pool:
-        futures = {pool.submit(start_app_backend, name): name for name in names}
+        futures = {pool.submit(start_app_backend, name, gateway_port): name for name in names}
         for future in concurrent.futures.as_completed(futures):
             name = futures[future]
             try:

@@ -251,7 +251,7 @@ def boot_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "reconcile_skills": [],
     }
 
-    def _start(name: str) -> AppProcess | None:
+    def _start(name: str, gateway_port: int | None = None) -> AppProcess | None:
         calls["started"].append(name)
         return None
 
@@ -639,7 +639,7 @@ class TestStartCoordination:
 
         monkeypatch.setattr(bmod, "get_app_manifest", lambda _n: _manifest("server.py"))
 
-        def _boom(_name: str, _manifest: Any) -> None:
+        def _boom(_name: str, _manifest: Any, _gateway_port: Any = None) -> None:
             raise RuntimeError("sandbox unavailable")
 
         monkeypatch.setattr(bmod, "_start_app_backend_body", _boom)
@@ -2616,6 +2616,139 @@ class TestSpawnEnvironment:
             bmod._start_app_backend_body("nosecret", _manifest("server.py"))
         assert "KIROCREW_PROXY_SECRET" not in seen["kwargs"]["env"]
 
+    def test_the_gateway_loopback_url_reaches_the_backend(
+        self, spawn_root: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Third-party backends call back into the gateway (``/api/token/local``,
+        the reverse proxy); minimal_env() strips every port hint an operator
+        could set, so the gateway must advertise where it listens. The boot path
+        passes its declared port because the TCP site is not bound yet."""
+
+        (spawn_root / "server.py").write_text("x = 1\n")
+        # Poison every fallback: a correct result must come from the declared
+        # port, not from a resolver that happens to agree.
+        monkeypatch.setenv("KIROCREW_BOUND_PORT", "5476")
+        monkeypatch.setenv("KIROCREW_PORT", "5476")
+        seen = _capture_popen(monkeypatch)
+        with pytest.raises(_StopSpawn):
+            bmod._start_app_backend_body("cb", _manifest("server.py"), gateway_port=7790)
+        assert seen["kwargs"]["env"]["KIROCREW_GATEWAY_URL"] == "http://127.0.0.1:7790"
+
+    def test_a_runtime_spawn_resolves_the_port_this_gateway_bound(
+        self, spawn_root: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Install / update / enable pass no port: the gateway is already
+        listening, so the exported bound port is the truth -- and it must beat an
+        inherited KIROCREW_PORT naming a sibling."""
+
+        (spawn_root / "server.py").write_text("x = 1\n")
+        monkeypatch.setenv("KIROCREW_PORT", "5476")
+        monkeypatch.setenv("KIROCREW_BOUND_PORT", "6123")
+        seen = _capture_popen(monkeypatch)
+        with pytest.raises(_StopSpawn):
+            bmod._start_app_backend_body("cb-runtime", _manifest("server.py"))
+        assert seen["kwargs"]["env"]["KIROCREW_GATEWAY_URL"] == "http://127.0.0.1:6123"
+
+    def test_an_ephemeral_boot_port_withholds_the_url_rather_than_guess(
+        self, spawn_root: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``--port auto`` declares 0: the number is not known until the site
+        binds, and every fallback the resolver has at that moment names some
+        OTHER listener. An absent variable is honest; a guessed one is the bug
+        this variable exists to remove."""
+
+        (spawn_root / "server.py").write_text("x = 1\n")
+        monkeypatch.delenv("KIROCREW_BOUND_PORT", raising=False)
+        monkeypatch.setenv("KIROCREW_PORT", "6777")  # a tempting wrong answer
+        seen = _capture_popen(monkeypatch)
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(_StopSpawn):
+                bmod._start_app_backend_body("cb-auto", _manifest("server.py"), gateway_port=0)
+        assert "KIROCREW_GATEWAY_URL" not in seen["kwargs"]["env"]
+        assert any("KIROCREW_GATEWAY_URL is withheld" in r.message for r in caplog.records)
+
+    def test_node_and_exec_backends_get_the_same_gateway_url(
+        self, spawn_root: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One env dict for every runtime: the variable is part of the backend
+        contract, not a Python-branch courtesy."""
+
+        monkeypatch.setattr(bmod, "_find_node_binary", lambda: "/usr/bin/node")
+        (spawn_root / "server.js").write_text("// noop\n")
+        seen = _capture_popen(monkeypatch)
+        with pytest.raises(_StopSpawn):
+            bmod._start_app_backend_body(
+                "cb-node", _manifest("server.js", backend_type="node"), gateway_port=7790
+            )
+        assert seen["argv"][0] == "/usr/bin/node"
+        assert seen["kwargs"]["env"]["KIROCREW_GATEWAY_URL"] == "http://127.0.0.1:7790"
+
+        if not bmod.platform_compat.IS_POSIX:
+            return  # exec backends are refused on native Windows
+        launcher = spawn_root / "run.sh"
+        launcher.write_text("#!/bin/sh\nexit 0\n")
+        launcher.chmod(0o755)
+        seen = _capture_popen(monkeypatch)
+        with pytest.raises(_StopSpawn):
+            bmod._start_app_backend_body(
+                "cb-exec", _manifest("run.sh", backend_type="exec"), gateway_port=7790
+            )
+        assert seen["argv"] == [str(launcher)]
+        assert seen["kwargs"]["env"]["KIROCREW_GATEWAY_URL"] == "http://127.0.0.1:7790"
+
+    def test_the_boot_path_threads_its_declared_port_to_every_spawn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """start_enabled_app_backends -> _start_backends_concurrently ->
+        start_app_backend: the port is an argument at every hop, never a global."""
+
+        received: dict[str, int | None] = {}
+
+        def _start(name: str, gateway_port: int | None = None) -> None:
+            received[name] = gateway_port
+
+        monkeypatch.setattr(bmod, "start_app_backend", _start)
+        monkeypatch.setattr(bmod, "_preclaim_fixed_ports", lambda _names: None)
+        assert bmod._start_backends_concurrently(["one", "two"], 7790) == []
+        assert received == {"one": 7790, "two": 7790}
+
+    def test_gateway_loopback_url_is_always_loopback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Never a configured host: a KIROCREW_BIND=0.0.0.0 container gateway
+        still hands its children a callback that cannot leave the host."""
+
+        assert bmod.gateway_loopback_url(7790) == "http://127.0.0.1:7790"
+        monkeypatch.setenv("KIROCREW_BOUND_PORT", "6123")
+        assert bmod.gateway_loopback_url() == "http://127.0.0.1:6123"
+        # 0 is "not known yet", not "resolve it": the bound port above is a
+        # tempting answer and must NOT be used for a declared-ephemeral spawn.
+        assert bmod.gateway_loopback_url(0) == ""
+
+    @pytest.mark.parametrize("bind", ["0.0.0.0", "::", "127.0.0.1", "::1", "not-an-ip", ""])
+    def test_a_loopback_reachable_bind_advertises_loopback(
+        self, monkeypatch: pytest.MonkeyPatch, bind: str
+    ) -> None:
+        """Wildcards include loopback; an unparsable KIROCREW_BIND is ignored by
+        bind_address_for (loopback bind); explicit loopback is loopback."""
+
+        monkeypatch.setenv("KIROCREW_BIND", bind)
+        assert bmod.gateway_loopback_url(7790) == "http://127.0.0.1:7790"
+
+    def test_a_specific_non_loopback_bind_withholds_the_url(
+        self, spawn_root: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """KIROCREW_BIND=10.0.0.5 binds ONLY that interface; 127.0.0.1:<port> would
+        connection-refuse. Same rule as the unknown port: withhold, never guess."""
+
+        monkeypatch.setenv("KIROCREW_BIND", "10.0.0.5")
+        assert bmod.gateway_loopback_url(7790) == ""
+        (spawn_root / "server.py").write_text("x = 1\n")
+        seen = _capture_popen(monkeypatch)
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(_StopSpawn):
+                bmod._start_app_backend_body("cb-bind", _manifest("server.py"), gateway_port=7790)
+        assert "KIROCREW_GATEWAY_URL" not in seen["kwargs"]["env"]
+        assert any("KIROCREW_BIND=10.0.0.5" in r.message for r in caplog.records)
+
     def test_an_audit_sink_failure_does_not_block_the_spawn(
         self, spawn_root: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3345,7 +3478,7 @@ class TestBootSpawnGating:
     def test_a_boot_spawn_error_is_isolated_even_if_the_audit_sink_is_down(
         self, boot_env: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _start(name: str) -> AppProcess | None:
+        def _start(name: str, gateway_port: int | None = None) -> AppProcess | None:
             if name == "bad":
                 raise RuntimeError("sandbox unavailable")
             boot_env["started"].append(name)
