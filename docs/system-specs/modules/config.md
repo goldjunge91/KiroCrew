@@ -1687,6 +1687,107 @@ class KiroCrewConfig:
     slack_dm_activation: str = "always"       # activation mode for DMs (D-prefix channels)
 ```
 
+### Crew member identity: the `agents` key is an id, `display_name` is the label
+
+A crew member is a Kiro custom agent plus a Kiro Crew wrapper (the `agents` row and
+`members/<id>/`). The row's KEY is the member's **id**: system-minted, immutable,
+inside the member-id grammar (`member_identity.MEMBER_ID_RE`, pinned byte-equal to
+`validation._AGENT_NAME_RE`, the grammar every keyed subsystem -- member dir, DM
+binding, slot `agent`, cron `agent`, governance identity -- already enforces). What
+a person reads and renames is `display_name` (free text, `""` = same as the id) plus
+`role` (job title). `member_identity.py` is a leaf module (no `kiro_crew.config`
+import) because the loader calls it during `load()`.
+
+- **Create** (`POST /api/agents`): the typed name is only ever the display name; the
+  id is minted from it inside the config lock (`mint_member_id`). For a name inside
+  the grammar the id IS the name, and `display_name` is stored as `""`, so a plain
+  create leaves the row byte-compatible with a pre-split one. A collision on the
+  minted id is a 409 `agent_exists` whose message names the typed name AND the id it
+  shortened to when they differ (the user never saw the id they collided on). A label
+  or role longer than `DISPLAY_NAME_MAX_LEN` (80, whitespace-collapsed) is refused
+  (`display_name_too_long` / `role_too_long`), never truncated: the credential check
+  runs on the WHOLE submitted value, and a stored prefix of a value it would have
+  refused is the exposure it exists to prevent (a label ending in a key, cut one byte
+  short, carries nineteen twentieths of that key past a check keyed on the full
+  pattern). On read, `normalize_display_name` turns an over-long hand-edited value
+  into `""` (label = id) for the same reason. A
+  credential-shaped label or role is refused
+  (`credential_shaped_name` / `credential_shaped_role`), the same rule the roster mask
+  applies on read.
+- **Rename** (`PUT /api/agents/{id}` with `display_name`) mutates the label only.
+  There is no key rewrite anywhere.
+- **Read**: `GET /api/agents` rows carry `display_name` (resolved: the id when the
+  row stores none) and `role` through `_roster_mask`; `GET /api/members` rows carry
+  them through the roster's credential / exfiltration-URL redactors. Both fields are
+  in `_AGENT_UNTRUSTED_TEXT_FIELDS`, which the dataclass-enumerating test pins.
+
+**`MIGRATE_MEMBER_IDS` (write-back migration).** A row whose key is outside the
+grammar -- the `case competition` incident: created, stored, and silently filtered
+out of every roster because a key with a space cannot address anything -- is re-keyed
+to a minted id with the typed string kept as `display_name`. Both halves call ONE
+function, `_rekey_malformed_member_ids`, so they cannot mint differently: the
+in-memory half on the parsed `cfg.agents` at every load, the on-disk half on the raw
+document inside `_apply_document_migrations` (re-decided against the document under
+the write lock, idempotent, never overwriting an existing id -- a collision takes the
+next `-N` suffix; `default_agent` follows; a `display_name` already stored survives).
+The `config.local.json` overlay's agent keys are passed to the on-disk half as
+`extra_taken`, so the base document never mints an id the merged view has already
+given to an overlay row. The overlay itself is never rewritten, so an overlay row
+keyed by a member's PRE-migration name (`agents["case competition"]` overriding the
+base row of that key) is re-keyed in memory before the merge by
+`_follow_migrated_member_ids_in_overlay`. The mapping it resolves through is the
+row's **`legacy_key`** -- the pre-migration key, written verbatim and permanently by
+both halves of the re-key (a row created with a well-formed id has none) -- never the
+display name, which a rename changes: the overlay must keep following the member
+after the most ordinary operation the split ships. Once the base holds
+`case-competition` with `legacy_key: "case competition"`, the overlay row (and an
+overlay `default_agent` spelled that way) is read under the id; a key the base still
+holds is left for the merge, and a legacy key two rows share (a hand-edited
+duplicate) leaves the row where it is. So the member does not split into the
+original without its overrides plus a phantom `-2` that re-arms the migration on
+every load. `save()` applies the same re-key to the overlay before
+`_subtract_overlay`, so the overlay's leaves are recognized under the emitted id and
+not copied into the base file. A warning names the key to rename in the overlay.
+`legacy_key` is loader bookkeeping: withheld from the `GET /api/agents` roster
+(contract test), masked like the other free-text identity fields on the config
+endpoint.
+
+The key is also what a private V2 memory store records as its owner, in three places
+that must agree (`memory_stores.owner_member` in config, the store's
+`member-memory.json` manifest, the `memory_meta` owner row in the database), so the
+migration carries ownership with the key and its ordering is chosen for the crash
+case, like the superseded-defaults adoption above:
+
+| Step (all inside the locked read-modify-write) | On failure |
+|---|---|
+| 1. re-key `agents`, `default_agent`, `memory_stores[*].owner_member` in the document | -- |
+| 2. `_reattribute_moved_members(document, moved, overlay stores)`: `memory_stores.rename_private_owner` renames the manifest and the database owner row of EVERY V2 store the member owns -- the base row's binding, every record whose `owner_member` the re-key moved, the store the overlay row keyed by the old name selects, and every store whose record lives only in the overlay's `memory_stores` and names the old key (a record is V2 when either document says so; the overlay is never written back, so a store missed here would keep the legacy owner for good, while the in-memory re-key follows the overlay record's owner on every load) -- each only where it still names the old key | raises -> the config write is skipped; the old key is still in the document, so the **next load re-runs the migration**, mints the same id from the same inputs, and the disk half is a no-op where it already landed |
+| 3. write `config.json` | a crash here leaves disk renamed and the document unwritten -- the same recoverable state as step 2 |
+
+Ownership records are therefore never on a different side of a failed write than the
+key. `rename_private_owner` never waits on a SQLite lock (`timeout=0`: `load()` runs
+synchronously, on the event loop when a handler loads config, so a busy database
+is a reason to retry on the next load, not to stall the gateway) and tolerates ONLY a
+missing `memory_meta` table (a legacy V1 file with no owner row); a locked or
+read-only database propagates and aborts the pass. The DM binding, the rules payload
+and a session's `agent` are not re-attributed because their writers validate the
+member name against the grammar first: an out-of-grammar row has none of them.
+
+A re-key this load decided but could not write (a contended lock, a degraded load,
+an exception) drops the validated-data cache in the ``finally``, exactly like a
+superseded-default adoption that did not land: the cache hit reads no overlay
+(``local_data = {}``), so a retry served from it would hand the on-disk half an empty
+``extra_taken`` and let it mint an id an overlay row already owns. The retry is
+therefore always a real read, overlay included.
+
+The in-memory pass and the locked pass agree unless a writer added a row between this
+load's read and the locked write; `_persist_config_migration` reports the ids the
+locked pass minted (`confirmed_member_moves`, only when its document reached disk) and
+`_follow_locked_member_moves` re-keys the parsed config to them, so a load never
+serves an id the document does not hold. Pinned end to end in
+`test/test_member_identity.py` (`TestLoaderMigration`, `TestMigrationFollowsOwnership`,
+`TestMigrationOrderingAndFailures`, `TestMigrationSeesTheOverlay`).
+
 ### Per-crew avatar override (`agents.*.avatar`)
 
 `KiroCrewAgentConfig.avatar` is a sparse override, exactly like the per-crew

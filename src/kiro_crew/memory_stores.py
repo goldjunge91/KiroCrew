@@ -1428,3 +1428,67 @@ def persist_member_config(
 
     update_config_locked(mutate=mutate)
     _invalidate_config_cache()
+
+
+def rename_private_owner(store: str, old: str, new: str) -> None:
+    """Re-attribute a private V2 store from member id *old* to *new*, on disk.
+
+    The member-id migration (``config.loader.MIGRATE_MEMBER_IDS``) re-keys an
+    ``agents`` row and its ``memory_stores[...].owner_member`` inside
+    ``config.json``; this is the filesystem half. Ownership is asserted from
+    THREE places that must agree — the config record, the store's manifest and
+    the ``memory_meta`` owner row inside the database — so a row re-keyed
+    without this step reads as an ownership mismatch and the member's memory
+    is refused. Each place is rewritten only when it still names *old*; a
+    manifest or database already naming *new* (a retried migration) is left
+    alone, and one naming a THIRD member is not touched — that is someone
+    else's store, and the config mismatch it leaves is the correct verdict.
+
+    Raises :class:`UnknownMemoryStore` for a store name outside the grammar;
+    lets ``OSError``/``sqlite3.Error`` propagate so the caller's locked
+    write-back aborts and the next load retries the whole migration. Never
+    waits on a lock (see the connect below): the caller may be on the event
+    loop, and a busy database is a reason to retry later, not to stall.
+    """
+    import sqlite3
+
+    from kiro_crew.atomic_write import atomic_write
+    from kiro_crew.memory_schema import OWNER_MEMBER_META_KEY
+
+    target = _named_store_dir(validate_memory_store_name(store))
+    manifest_path = target / MEMBER_MEMORY_MANIFEST
+    # A missing or unreadable manifest is NOT rewritten: there is no owner
+    # record to move, and inventing one would make a corrupt store readable.
+    try:
+        manifest: dict | None = _member_manifest(store)
+    except UnknownMemoryStore:
+        manifest = None
+    if manifest is not None and manifest.get("owner_member") == old:
+        manifest["owner_member"] = new
+        atomic_write(manifest_path, json.dumps(manifest), fsync=True)
+    database = target / MEMORY_DB_FILE
+    if database.is_file() and database.resolve() == database:
+        # NO lock wait: this runs inside the config loader's locked write-back,
+        # which ``KiroCrewConfig.load()`` performs synchronously -- on the event
+        # loop when a handler loads config -- so a database held by a live
+        # session must fail the pass at once (the next load retries) rather than
+        # park the gateway on a busy handler. ``timeout=0`` makes a lock an
+        # immediate ``OperationalError``; the UPDATE itself is one indexed row.
+        connection = sqlite3.connect(database, timeout=0)
+        try:
+            with connection:
+                connection.execute(
+                    "UPDATE memory_meta SET value=? WHERE key=? AND value=?",
+                    (new, OWNER_MEMBER_META_KEY, old),
+                )
+        except sqlite3.OperationalError as exc:
+            # ONLY a database without the meta table is tolerated: that is a
+            # legacy V1 file with no ownership row to rename, and the manifest
+            # above is its identity. A lock, a read-only file or any other
+            # operational error propagates so the caller aborts the write and
+            # retries -- swallowing it would leave the manifest renamed and the
+            # database not, a permanent ownership split.
+            if "no such table" not in str(exc):
+                raise
+        finally:
+            connection.close()
