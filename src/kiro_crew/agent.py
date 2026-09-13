@@ -5758,6 +5758,27 @@ pull request.
 Use `session_read_message` for detail the record does not carry — a question's
 substance, a stall's shape. Never for a verdict.
 
+### When you are a crew member on the inbox model
+
+If your turn opens with `[MEMBER WAKE]`, you are running as a crew member whose
+thread is on the inbox model, and the patrol above is not yours to arm:
+
+- **Do not call `monitor_start`.** A wake is one bounded turn on a slot that
+  closes when the turn ends; the arm is refused, and your cadence is already
+  the `wake_timer` envelope the gateway mints on `members.<slug>.wake_interval_secs`.
+  A `wake_timer` envelope IS your patrol cycle: `work_ledger_read` first, then
+  act by status exactly as above.
+- **Do not poll `session_read_message` for completion.** A session you create
+  with `session_create` reports back as a `worker_report` envelope when its
+  turn ends; you read it on your next wake, alongside the `[conductor work
+  ledger]` block the wake prompt carries. `session_read_message` stays for a
+  question's substance, never for "is it done yet".
+- **The owner's message is a `user_dm` envelope**, and it wakes you at once;
+  a `peer_dm` is a fellow member. Hand work to another member with `peer_send`
+  when the work is theirs.
+- **Do not open a proxy or heartbeat session for yourself.** The scheduler is
+  your heartbeat.
+
 ## Close
 
 `work_ledger_record` `action=close` with the item's `state` is what ends an item.

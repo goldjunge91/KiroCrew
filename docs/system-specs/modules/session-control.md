@@ -497,6 +497,46 @@ thread endpoint's binding round-trip, the restore / resume metadata guards, the
 "is this THE thread bound in `dm.json`", which a wake is not. The frontend's
 `isChatPageSurface` admits neither mode.
 
+**M2 — the conductor and autofix members on the inbox model.** Nothing new is
+routed; M2 is the existing seams lined up for a member whose agent is a
+conductor. With `members.kirocrew-conductor.inbox_model: true` and
+`wake_interval_secs: 1200`:
+
+* The patrol is a `wake_timer` envelope, not a loop. A wake turn is started by
+  the wake runner, so it carries neither self-arm provenance mark
+  (`_directive_user_origin`, `_directive_self_wake`), and `monitor_start` on a
+  `member-wake` slot is refused by `_EXTERNAL_ARM_REFUSED_MODES` — since M2 with
+  a wake-specific reason (`autonudge_authz.external_arm_refusal`) that names the
+  scheduler as the member's cadence, so the model ends the turn instead of
+  retrying or standing up a proxy session. The conductor prompt and the member
+  working protocol (`_MEMBER_HOW_YOU_WORK_COMMON`) say the same in advance.
+  The wake prompt also says what to do when a ledger or report tool is refused (an
+  identity or signature error): state it in the reply and finish — never run host
+  diagnostics or retry from a wake, which spends the whole wall-clock budget and acks
+  nothing. A live run on a hand-started gateway showed two wakes burning their 600 s on
+  `kirocrew doctor` before this line existed.
+* The wake prompt carries the conductor's fleet. `work_ledger` is keyed by the
+  same folded member key the MCP tools resolve a wake to
+  (`session_ledger.ledger_key` → `member_owner_key`), so one conductor member
+  has one work ledger across every wake; `member_wake.run_member_wake` renders
+  `work_ledger.render_snapshot(member_key)` — one header line: open and closed
+  counts, the round, and the pointer to `work_ledger_read`, which the conductor is told
+  to call first every cycle anyway (the items themselves would only repeat that call one
+  tool call later, and the derived `orphaned` / `stale` flags need live slot state only
+  the read has) — after the session-ledger block and before the
+  envelopes. Empty for a member that conducts nothing. The briefing still arrives
+  through the member context path (`_build_member_section`, which admits both
+  member modes).
+* Workers report through the inbox. `session_create` from a wake stamps
+  `_created_by = member_owner_key(wake key)`, and `worker_report_target` folds
+  the same way, so a worker a wake dispatched reports to the conductor member
+  when its turn ends (M1 producer) — the `bind` action's creator check
+  (`ledger_key(_created_by) == conductor key`) holds for the same reason.
+  `session_read_message` is no longer the completion signal.
+* The owner's DM is a `user_dm` → immediate wake (M0), and the hand-off to the
+  autofix member is a `peer_send` (M0 admission chain), visible on both
+  projections (M1).
+
 ### Cron callers: unattended admission, bounded by the same fence
 
 A cron job's own slot (`cron-<job_id>`, minted at run start by

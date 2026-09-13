@@ -1844,11 +1844,50 @@ def test_acquiring_a_lock_does_not_truncate_the_lock_file():
 #: itself in review rather than arrive with a passing suite.
 _PERMITTED_STORE_IMPORTERS = frozenset(
     {
-        # The four tools' HTTP routes, and the ONLY module that touches the store
+        # The four tools' HTTP routes, and the ONLY module that WRITES the store
         # directly: identity comes from X-Session-Key, never from the body.
         "dashboard/handlers/work_ledger.py",
+        # Read-only (M2): the member wake runner renders ``render_snapshot`` into
+        # a conductor member's wake prompt. Identity is the member key the
+        # runner itself resolved from the DM binding -- the gateway, not a
+        # caller, names the ledger -- so the server-resolved-identity rule the
+        # allowlist protects still holds.
+        "dashboard/member_wake.py",
     }
 )
+
+
+# ── render_snapshot (member wake preamble, M2) ─────────────────────────────
+
+
+def test_render_snapshot_is_empty_for_a_key_with_no_ledger():
+    assert wl.render_snapshot("member-nobody") == ""
+    assert wl.render_snapshot("bad/key") == ""  # a malformed key reads as no ledger, never raises
+
+
+def test_render_snapshot_is_one_header_line_with_counts_and_the_read_pointer():
+    first = _new_item(title="port the gate")
+    second = _new_item(title="rebase the flaky shard " + "x" * 150)
+    third = _new_item(title="already landed")
+    wl.apply_conductor_action(CONDUCTOR, "bind", item_id=second, worker_session_key="chat-4-2")
+    wl.apply_worker_report(CONDUCTOR, second, status="progress", summary="building", pr=77)
+    wl.apply_conductor_action(CONDUCTOR, "close", item_id=third, state="accepted")
+    block = wl.render_snapshot(CONDUCTOR)
+    assert block == (
+        "[conductor work ledger \u2014 2 open item(s), 1 closed, round 0; "
+        "read the full record with work_ledger_read before acting]"
+    )
+    # the items themselves are the read's, not the header's: nothing is repeated
+    for item_id in (first, second, third):
+        assert item_id not in block
+    assert "drive the fleet" not in block
+
+
+def test_render_snapshot_stays_one_line_for_a_full_ledger():
+    for i in range(wl.MAX_ITEMS_PER_CONDUCTOR):
+        _new_item(title=f"item {i} " + "y" * 70)
+    block = wl.render_snapshot(CONDUCTOR)
+    assert "\n" not in block and f"{wl.MAX_ITEMS_PER_CONDUCTOR} open item(s)" in block
 
 
 #: An import of THE STORE, spelled by its own module path. A bare

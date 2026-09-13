@@ -174,6 +174,14 @@ no tighter budget exists, use 240 cycles and 86,400 seconds. If live work needs 
 larger bound, re-arm it with `monitor_update`; `monitor_start` is create-only.
 Then end your turn.
 
+**Except on the inbox model.** If your turn opened with `[MEMBER WAKE]`, you are
+a crew member whose thread takes envelopes, not turns: do NOT arm
+`monitor_start` (a wake slot closes with the wake, and the arm is refused). Your
+patrol cycle is the `wake_timer` envelope the gateway mints on
+`members.<slug>.wake_interval_secs`; a worker's finished turn arrives as a
+`worker_report` envelope, and the owner's message as a `user_dm` that wakes you
+at once. Each wake, run the cycle below once and end the turn.
+
 Each cycle:
 
 1. **`work_ledger_read` first, every cycle.** It returns the conductor record,
@@ -413,7 +421,9 @@ what the composer renders:
   not anything was reported. When it accepts a `watch: "work-ledger"` field,
   arm that instead and the quiet cycles stop costing a turn. Until then, size
   the interval for the report cadence you expect rather than for the latency you
-  want.
+  want. (A conductor running as an inbox-model crew member has no loop at all —
+  see *Except on the inbox model* under Patrol — and is woken by each
+  `worker_report` as it lands, so for it the quiet cycles already cost nothing.)
 - **A question card can be displaced by your own later turns.** `ask_question` posts a card into the dashboard transcript, and every patrol turn you take while it is outstanding can push it out of the user's view.
 - **The session and ledger tools may not be in your tool list yet.** With MCP
   Tool Search active their specs are deferred, so a first `session_create` fails

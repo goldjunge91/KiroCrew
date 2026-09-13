@@ -1923,6 +1923,10 @@ _MEMBER_HOW_YOU_WORK_COMMON = """[HOW YOU WORK]
    separate work session for it (spawn_run and the session tools), keep the
    heavy context there, and report back in this thread with the outcome and
    evidence ("re: <the thing>"). Several work items can run in parallel.
+   When your thread is on the inbox model (your turn opens with
+   `[MEMBER WAKE]`), a work session's finished turn comes back to you as a
+   `worker_report` envelope on your next wake — do not poll it, and do not
+   arm a loop on yourself; the scheduler wakes you.
 3. When stuck, climb this ladder in order, and genuinely try each rung:
    (a) try a genuinely DIFFERENT approach — another tool, entry point, or
        strategy, not the same command again;

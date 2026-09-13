@@ -14,8 +14,10 @@ A wake is an ephemeral execution context bound to the member identity:
    :func:`member_owner_key` folds the key back to the member for ownership
    and ledger identity;
 4. run ONE turn whose user message is the drained envelopes rendered as a typed
-   list, preceded by the member's ledger snapshot; the member prompt and
-   briefing arrive through the ordinary member context path;
+   list, preceded by the member's ledger snapshot and -- for a conductor-class
+   member, one that holds a work ledger under its key -- its fleet snapshot
+   (M2); the member prompt and briefing arrive through the ordinary member
+   context path;
 5. on a clean end: ack the drained envelopes, write the reply as an outbox row
    (unless the model already called ``outbox_send``), mirror the reply into
    the live DM thread if the person has it open, and close the slot;
@@ -95,8 +97,15 @@ def render_wake_prompt(
     envelopes: list[Envelope],
     ledger_snapshot: str,
     recent: list[Envelope] | None = None,
+    work_snapshot: str = "",
 ) -> str:
-    """The one user message a wake runs on."""
+    """The one user message a wake runs on.
+
+    *work_snapshot* is the conductor work-ledger block
+    (:func:`kiro_crew.work_ledger.render_snapshot`); empty for a member that
+    conducts nothing, whose prompt then omits the block (the wake guidance
+    itself is the same for every member).
+    """
     lines: list[str] = [
         "[MEMBER WAKE]",
         f"You are crew member `{slug}`, woken because your inbox is not empty. "
@@ -109,10 +118,21 @@ def render_wake_prompt(
         "Reply to the owner with `outbox_send`; if you say nothing, your final text becomes the reply. "
         "Escalate to the owner, not to another member, when you hit a wall. Update your ledger "
         "(`session_ledger_record`) before you finish so the next wake knows where you stopped.",
+        "This wake is your whole turn: you have no loop to arm. `monitor_start` is refused "
+        "on a wake, and your schedule is the `wake_timer` envelope the gateway mints on your "
+        "cadence. A session you create with `session_create` reports back here as a "
+        "`worker_report` envelope when its turn ends, so do not poll `session_read_message` "
+        "to learn that a worker finished — end the turn and read the report next wake.",
+        "If a ledger or report tool is refused (an identity or signature error), say so in your "
+        "reply and finish: the refusal is the gateway's to fix, not yours. Do not run host "
+        "diagnostics (`kirocrew doctor`, log greps, process listings) or retry the tool from a "
+        "wake — that spends your whole wall-clock budget and acks nothing.",
         "",
     ]
     if ledger_snapshot.strip():
         lines += [ledger_snapshot.rstrip(), ""]
+    if work_snapshot.strip():
+        lines += [work_snapshot.rstrip(), ""]
     if recent:
         # Bounded continuity: a follow-up ("yes, do that") needs the reply it
         # answers, and the ledger only carries what the previous wake chose to
@@ -455,10 +475,15 @@ async def run_member_wake(state: "DashboardState", slug: str) -> dict[str, Any]:
 
     from kiro_crew.member_inbox import recent_exchange
     from kiro_crew.session_ledger import render_snapshot
+    from kiro_crew.work_ledger import render_snapshot as render_work_snapshot
 
     snapshot = await asyncio.to_thread(render_snapshot, member_key)
+    # The work ledger is keyed by the same folded member key the MCP tools
+    # resolve a wake to (``session_ledger.ledger_key``), so a conductor member's
+    # fleet persists across wakes and this read finds it.
+    work_snapshot = await asyncio.to_thread(render_work_snapshot, member_key)
     recent = await asyncio.to_thread(recent_exchange, slug)
-    prompt = render_wake_prompt(slug, batch, snapshot, recent)
+    prompt = render_wake_prompt(slug, batch, snapshot, recent, work_snapshot)
     inbound_hop = max((e.hop for e in batch if e.kind == "peer_dm"), default=0)
 
     key = wake_slot_key_for(member_key, next(_seq))

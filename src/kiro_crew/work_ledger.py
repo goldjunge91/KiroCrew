@@ -6,11 +6,13 @@ Three ledgers carry that name, and they are not interchangeable.
 module is the third: a record two parties write and neither owns, so that a
 conductor learns what a worker did as DATA instead of reading its transcript.
 
-This module is the STORAGE layer only. Its one importer is
+This module is the STORAGE layer only. Its one WRITING importer is
 ``dashboard/handlers/work_ledger.py``, which serves the ``/api/work-ledger``
 routes; the MCP tools in :mod:`kiro_crew.mcp_work` (``work_brief``,
 ``work_report``, ``work_ledger_read``, ``work_ledger_record``) reach it only
-through those routes. Every write therefore passes the two entry points below,
+through those routes. The one other importer is read-only:
+``dashboard/member_wake.py`` renders :func:`render_snapshot` into a member
+wake's prompt (member inbox model, M2). Every write therefore passes the two entry points below,
 so the writer-ownership rule is enforced in one place.
 
 WRITER OWNERSHIP is the whole design, and it is expressed as two entry points rather
@@ -1799,6 +1801,36 @@ def accept_batch(items: list[WorkItem]) -> dict[str, Any]:
             if not item.is_terminal and is_acceptance_concrete(item.acceptance)
         ]
     }
+
+
+def render_snapshot(slot_key: str) -> str:
+    """One-line ``[conductor work ledger …]`` header for a member wake, or ``""``.
+
+    The inbox model's wake prompt already carries the member's own session
+    ledger. A conductor-class member -- any member that holds a work ledger
+    under its key -- must also know, before it reads its envelopes, that it HAS
+    a fleet: a ``worker_report`` names a session and only the work ledger says
+    which item that session was bound to. The header carries exactly that --
+    open and closed counts, the round, and the pointer to ``work_ledger_read``,
+    which the conductor is told to call first every cycle anyway. The items
+    themselves are not repeated here: they would duplicate that first call one
+    tool call later, and the derived ``orphaned`` / ``stale`` flags need live
+    slot state only the read has. Empty for a member with no ledger, so an
+    ordinary member's wake prompt carries no work-ledger block. Lock-free reads and
+    filesystem I/O: a caller on the event loop dispatches it to a thread.
+    """
+    try:
+        record = read_conductor(slot_key)
+    except WorkLedgerError:
+        return ""
+    if record is None:
+        return ""
+    items = list_work_items(slot_key)
+    open_count = sum(1 for it in items if not it.is_terminal)
+    return (
+        f"[conductor work ledger — {open_count} open item(s), {len(items) - open_count} closed, "
+        f"round {record.round}; read the full record with work_ledger_read before acting]"
+    )
 
 
 def apply_acceptance_update(

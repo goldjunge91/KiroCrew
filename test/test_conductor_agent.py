@@ -101,6 +101,19 @@ class TestConductorInstaller:
         assert "drive that one round with `wait`" in prompt
         assert "autonudge_stop" in prompt
 
+    def test_prompt_tells_an_inbox_model_member_not_to_arm_or_poll(self, tmp_path, monkeypatch):
+        """M2: the same agent runs as an inbox-model crew member. There the patrol
+        is the scheduler's ``wake_timer`` and completion is a ``worker_report``
+        envelope, so the prompt must carry the exception to its own Patrol
+        section, keyed on the wake prompt's opening marker."""
+        data = self._install(tmp_path, monkeypatch)
+        prompt = " ".join(data["prompt"].split())
+        assert "If your turn opens with `[MEMBER WAKE]`" in prompt
+        assert "Do not call `monitor_start`." in prompt
+        assert "Do not poll `session_read_message` for completion." in prompt
+        assert "reports back as a `worker_report` envelope" in prompt
+        assert "Do not open a proxy or heartbeat session" in prompt
+
     def test_prompt_names_the_tools_it_expects_to_be_used(self, tmp_path, monkeypatch):
         """The charter mounts whole servers, so the prompt must name what it wants.
 

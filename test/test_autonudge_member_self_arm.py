@@ -154,6 +154,17 @@ def test_external_arm_refusal_keeps_the_mode_prefix_and_names_the_exception() ->
     assert "own turn" in reason
 
 
+def test_external_arm_refusal_for_a_wake_names_the_scheduler_not_a_self_arm() -> None:
+    """A wake IS the member's own turn, yet it can never arm a loop (the slot
+    closes with the wake). The generic 'only the session's own turn' sentence
+    would send an inbox-model conductor into retries or a proxy session; the
+    wake reason names the scheduler as its cadence instead (M2)."""
+    reason = external_arm_refusal("member-wake")
+    assert reason.startswith("member-wake-mode sessions never host automation loops")
+    assert "wake_interval_secs" in reason and "wake_timer" in reason
+    assert "own turn" not in reason
+
+
 # ── (a) self-arm admitted ────────────────────────────────────────────────────
 
 

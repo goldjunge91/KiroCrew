@@ -36,6 +36,7 @@ from kiro_crew.autonudge import (
 )
 from kiro_crew.autonudge_selfarm import forget_self_arm, record_self_arm
 from kiro_crew.config.loader import workspace_dir_for
+from kiro_crew.members import WAKE_SLOT_MODE
 from kiro_crew.monitoring.models import (
     MAX_MONITOR_WAKE_INSTRUCTIONS_CHARS,
     MONITOR_STATE_VERSION,
@@ -62,8 +63,12 @@ logger = logging.getLogger(__name__)
 # :func:`is_self_arm`.
 # ``member-wake`` (the inbox model's ephemeral wake context) is refused on the
 # same grounds as the thread: the scheduler is the only thing that wakes a
-# member, so nothing external may arm a loop on either of its slots.
-_EXTERNAL_ARM_REFUSED_MODES = frozenset({"crew", "member", "member-wake"})
+# member, so nothing external may arm a loop on either of its slots. A wake
+# turn is not a self-arm either -- it is started by the wake runner, not by a
+# human or by a loop wake, so it carries neither provenance mark -- which makes
+# the refusal total for that mode; :func:`external_arm_refusal` says so in
+# words the model can act on (M2).
+_EXTERNAL_ARM_REFUSED_MODES = frozenset({"crew", "member", WAKE_SLOT_MODE})
 
 
 def is_self_arm(slot_key: str, initiator_slot_key: str) -> bool:
@@ -83,7 +88,20 @@ def is_self_arm(slot_key: str, initiator_slot_key: str) -> bool:
 
 
 def external_arm_refusal(mode: str) -> str:
-    """The user-facing reason a crew/member slot refuses an outside arm."""
+    """The user-facing reason a crew/member slot refuses an outside arm.
+
+    For a member WAKE the generic sentence would be misleading -- the wake IS
+    the session's own turn, yet it can never arm a loop: the slot closes when
+    the wake ends and the scheduler owns the member's cadence. Name that, so an
+    inbox-model member does not retry or fall back to a proxy session.
+    """
+    if mode == WAKE_SLOT_MODE:
+        return (
+            "member-wake-mode sessions never host automation loops: a wake slot closes "
+            "when the wake ends, and the member is woken by the scheduler instead "
+            "(`members.<slug>.wake_interval_secs` mints a `wake_timer` envelope; every "
+            "other envelope wakes it too). End the turn; the next wake is already scheduled."
+        )
     return (
         f"{mode}-mode sessions do not accept direct automation turns armed from "
         "outside the session (only the session's own turn may arm a loop on itself)"

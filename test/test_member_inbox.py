@@ -566,6 +566,35 @@ class TestProjectionEndpoint:
         }
 
 
+# ------------------------------------------------------------ wake prompt (M2)
+
+
+class TestWakePrompt:
+    def _render(self, **kw):
+        from kiro_crew.dashboard.member_wake import render_wake_prompt
+
+        env = _env("radar", body="hi")
+        return render_wake_prompt("radar", [env], "", **kw)
+
+    def test_no_loop_and_no_polling_are_part_of_every_wake(self):
+        prompt = self._render()
+        assert "`monitor_start` is refused on a wake" in prompt
+        # the evidence run's gap: a refused ledger tool must not turn into host diagnostics
+        assert "If a ledger or report tool is refused" in prompt
+        assert "Do not run host diagnostics" in prompt
+        assert "reports back here as a `worker_report` envelope" in prompt
+        assert "do not poll `session_read_message`" in prompt
+
+    def test_work_snapshot_is_optional_and_sits_before_the_inbox(self):
+        assert "[conductor work ledger" not in self._render()
+        assert "[conductor work ledger" not in self._render(work_snapshot="   ")
+        prompt = self._render(
+            work_snapshot="[conductor work ledger \u2014 1 open item(s)]\n- it_1 x"
+        )
+        assert prompt.index("[conductor work ledger") < prompt.index("[INBOX")
+        assert "- it_1 x\n\n[INBOX" in prompt
+
+
 # ------------------------------------------------------------ worker_report (M1)
 
 
@@ -639,6 +668,16 @@ class TestWorkerReport:
 
         monkeypatch.setattr(self.mw, "inbox_model_enabled", blow)
         assert self.mw.snapshot_worker_turn(slot) is not None  # no config read here
+
+    def test_a_worker_stamped_with_the_folded_member_key_reports_too(self):
+        """``session_create`` from a wake writes ``_created_by = member_owner_key(wake)``
+        -- the FOLDED key -- so this is the shape a conductor member's worker
+        actually carries, and it must report exactly like the raw wake key does."""
+        slot = _WorkerSlot("chat-7-3", created_by="member-radar", reply="Item done; PR opened.")
+        env_id = self._report(slot)
+        (env,) = InboxStore("radar").pending()
+        assert env.id == env_id and env.kind == "worker_report"
+        assert env.from_ == "session:chat-7-3"
 
     def test_reply_tail_is_bounded(self):
         slot = _WorkerSlot("chat-9-9", created_by="member-fixer", reply="x" * 10_000)
@@ -1558,6 +1597,10 @@ def wake_env(monkeypatch):
         return True
 
     monkeypatch.setattr(cp, "save_slot_off_loop", fake_save)
+    monkeypatch.setattr(
+        "kiro_crew.work_ledger.render_snapshot",
+        lambda key: seen.setdefault("work_keys", []).append(key) or "",
+    )
     return mw, seen
 
 
@@ -1837,6 +1880,32 @@ class TestWakeRunner:
         assert [r.body for r in rows] == ["old answer", "Done: triaged it."]
         assert rows[1].refs["in_reply_to"] == [new.id]
         assert state.slots[r["wake"]]._wake_batch_ids == [new.id]
+
+    @pytest.mark.asyncio
+    async def test_wake_prompt_carries_the_conductor_fleet_under_the_member_key(
+        self, wake_env, monkeypatch
+    ):
+        """M2: a conductor-class member sees its work ledger before the envelopes.
+        The read is keyed by the FOLDED member key -- the same key the MCP tools
+        resolve a wake to -- so one conductor member has one fleet across wakes."""
+        mw, seen = wake_env
+        monkeypatch.setattr(
+            "kiro_crew.work_ledger.render_snapshot",
+            lambda key: seen.setdefault("work_keys", []).append(key)
+            or "[conductor work ledger \u2014 1 open item(s), 0 closed, round 2]\n- it_0a1b2c3d fix",
+        )
+        InboxStore("radar").append(
+            _env("radar", kind="worker_report", body="[fix]\nPR opened.", from_="session:chat-4-1")
+        )
+        await mw.run_member_wake(_State("ok"), "radar")
+        assert seen["work_keys"] == ["member-radar"]
+        prompt = seen["prompt"]
+        assert (
+            prompt.index("[work ledger]")
+            < prompt.index("[conductor work ledger")
+            < prompt.index("[INBOX")
+        )
+        assert "kind=worker_report (report from a session you dispatched)" in prompt
 
     @pytest.mark.asyncio
     async def test_translated_session_send_is_labelled_not_the_owner(self, wake_env):
