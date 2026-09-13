@@ -7,6 +7,7 @@ import contextlib
 import datetime as _dt
 import errno
 import hashlib
+import io
 import json
 import logging
 import mimetypes
@@ -273,11 +274,37 @@ async def api_reveal_path(request: web.Request) -> web.Response:
     # refuses to start, and either way this degrades to the clipboard rather than
     # failing a click in the file viewer.
     if action == "open":
-        if not os.path.isfile(path):
+
+        def _stat_then_launch() -> tuple[bool, bool]:
+            """The regular-file check AND the launch, in one worker transaction.
+
+            Both belong off the loop: the stat is unbounded on a caller-supplied
+            path, and the launch spawns a process. They must not be SPLIT across
+            an ``await``, though. The launcher takes a path, not the descriptor
+            this stat looked at, so the two calls are a check-then-use pair; an
+            ``await`` between them is a scheduler yield inside that window, which
+            is long enough for the path to be replaced with a symlink the
+            sensitive-path gate above already refused. The launcher follows it and
+            opens the substituted target in the user's default application.
+
+            Keeping them in one transaction holds the window to what it is when
+            the two run back-to-back: no suspension point, and the GIL not
+            released between them. Closing it entirely needs a launcher that
+            takes a descriptor, which no platform's open-by-association verb
+            does, so this is the narrow form rather than the closed form.
+            """
+            if not os.path.isfile(path):
+                return (False, False)
+            return (True, platform_compat.open_with_default_app(path))
+
+        is_regular_file, launched = await asyncio.to_thread(_stat_then_launch)
+        if not is_regular_file:
             return web.json_response({"error": "not a regular file"}, status=400)
-        copied = not platform_compat.open_with_default_app(path)
+        copied = not launched
     else:
-        copied = not platform_compat.reveal_in_file_manager(path)
+        # Off-loop: the reveal spawns a file-manager process. No stat pairs with
+        # it, so there is no check-then-use window to hold here.
+        copied = not await asyncio.to_thread(platform_compat.reveal_in_file_manager, path)
     _sel().log_tool_invocation(
         session_key="api", source="api", tool_name="reveal_path",
         outcome="success", resources=path, metadata={"action": action})
@@ -2195,10 +2222,153 @@ async def api_workspaces_delete(request: web.Request) -> web.Response:
 
 
 def _validate_dashboard_path(raw: str) -> str | None:
-    """Validate a file path through hooks.py enforcement layer."""
+    """Validate a file path through hooks.py enforcement layer.
+
+    Blocking: ``validate_file_path`` canonicalizes with ``realpath`` and, on
+    Windows, walks the path's ancestors with one ``lstat`` each. Callers reach it
+    through :func:`_probe_request_path` on a worker thread rather than calling it
+    from an ``async def`` body.
+    """
     from kiro_crew.hooks import validate_file_path  # noqa: F811
 
     return validate_file_path(raw)
+
+
+class _PathProbe(NamedTuple):
+    """What one off-loop filesystem probe of a request path found.
+
+    ``path`` is the validated canonical path, or ``""`` when validation refused
+    it -- which the endpoint answers as "invalid or forbidden path", exactly as
+    a ``None`` from :func:`_validate_dashboard_path` did. ``is_file`` and
+    ``is_dir`` are the stat answers for that path, both ``False`` on a refusal so
+    a caller that only reads them still takes its not-found branch.
+    """
+
+    path: str
+    is_file: bool
+    is_dir: bool
+
+
+def _probe_request_path(raw: str) -> _PathProbe:
+    """Validate and stat a request path -- ONE blocking hop, off the loop.
+
+    Groups the filesystem syscalls an endpoint needs before it can answer:
+    ``validate_file_path``'s ``realpath`` plus linked-ancestor walk, and the
+    ``isfile`` / ``isdir`` probe. One helper means one ``asyncio.to_thread`` hop
+    per request, and it means these cannot be reintroduced on the event loop a
+    call at a time.
+
+    Blocking by design, and unboundedly so: a path whose mount is unresponsive
+    (a disconnected network share, a wedged FUSE filesystem) makes ``realpath``
+    and ``stat`` block for however long the kernel takes, and those syscalls are
+    uninterruptible. Run on the event loop, ONE such request stalls every
+    endpoint in the process -- dashboard, tunnel, MCP and crons alike -- and a
+    stall outlasting ``dashboard.loop_stall_exit_after_secs`` makes the loop
+    watchdog kill the gateway. Which mount the path lands on is the caller's
+    choice, not this process's.
+
+    A ``ValueError`` from a malformed path (an embedded NUL makes ``realpath``
+    raise) is deliberately NOT caught: it propagates exactly as it did when this
+    ran inline, so no caller's answer for that input changes here.
+
+    This probe is a verdict, not a handle. A caller that goes on to OPEN the path
+    must not re-derive the descriptor from this answer in a second hop -- see
+    :func:`_read_request_path` for why.
+
+    RESIDUAL, unfixed here: the hop lands on the loop's DEFAULT executor, which
+    is shared and unbounded. A thread wedged in an uninterruptible ``stat`` never
+    returns, so a caller repeatedly naming the same dead mount can retire pool
+    threads one per request until the pool starves every other ``to_thread`` user
+    in the process. That is strictly better than the stall this replaces -- the
+    loop keeps serving, and the degradation is gradual rather than immediate --
+    but it is a real ceiling, not an absence of one. Bounding these probes on
+    their own capped executor is tracked separately.
+    """
+    path = _validate_dashboard_path(raw)
+    if not path:
+        return _PathProbe("", False, False)
+    return _PathProbe(path, os.path.isfile(path), os.path.isdir(path))
+
+
+#: How much of a file /api/file-read returns, in CHARACTERS -- the unit matters,
+#: because the decode is a text wrapper over a byte descriptor and a byte count
+#: here would mis-set ``X-Truncated`` on multi-byte content.
+_FILE_READ_CAP = 512_000
+
+
+class _TextRead(NamedTuple):
+    """The outcome of one :func:`_read_request_path` transaction.
+
+    ``kind`` is the verdict the endpoint maps onto its status and audit outcome:
+    ``invalid`` (validation refused), ``dir`` / ``missing`` (nothing to read),
+    ``file`` (``content`` is the capped text) or ``read_failed``. ``path`` is the
+    validated path, or ``""`` for ``invalid`` -- the raw input is the caller's to
+    log, as before.
+    """
+
+    kind: str
+    path: str
+    content: str
+
+
+def _read_request_path(raw: str, read_cap: int) -> _TextRead:
+    """Validate, no-follow open and read a request path in ONE transaction.
+
+    Blocking; callers run it on a worker thread. It exists because validating in
+    one hop and opening in another is a symlink TOCTOU: between the two, the
+    validated name can be replaced with a link into a location the validator
+    would have refused, and a bare ``open`` then follows it. Whether the hops are
+    two ``await``s or two statements, only ONE transaction closes that window.
+
+    The transaction is :func:`_open_checked_file` -- the module's own
+    open-and-check prefix, shared with file-raw, file-download, file-stream and
+    file-sheet -- not a copy of it. That is the point: a later hardening fix to
+    the prefix reaches this endpoint too, which a hand-rolled second copy would
+    silently miss. Its ``is_sensitive_path`` rung is a re-check rather than a new
+    gate here, because ``validate_file_path`` already applies that predicate; its
+    ``except ValueError`` fold (an embedded NUL) is the prefix's decision for
+    every adopter, and this endpoint now inherits it instead of answering that
+    input differently from its four siblings.
+
+    What stays endpoint POLICY, per the prefix's own contract: the ``isdir``
+    probe, because a READ distinguishes a directory from a missing path in its
+    404 (it runs inside the transaction for the same reason the open does), and
+    the text decode -- a ``TextIOWrapper`` over the checked descriptor, so
+    ``read_cap`` still counts CHARACTERS. Counting bytes instead would mis-set
+    ``X-Truncated`` on multi-byte content.
+
+    Pass ``read_cap`` 0 for the verdict only: HEAD answers from the stat and must
+    open nothing.
+    """
+    if read_cap <= 0:
+        probe = _probe_request_path(raw)
+        if not probe.path:
+            return _TextRead("invalid", "", "")
+        if probe.is_file:
+            return _TextRead("file", probe.path, "")
+        return _TextRead("dir" if probe.is_dir else "missing", probe.path, "")
+    # log_open_failure=False: this endpoint's own handler logs the one traceback
+    # for a failed read, so the prefix must not write a second.
+    checked = _open_checked_file(raw, tool_name="file_read", log_open_failure=False)
+    if isinstance(checked, _OpenDenied):
+        if checked.code == "not_found":
+            # The prefix answers "not a regular file"; which kind it is belongs
+            # to this endpoint, and the probe stays inside the transaction.
+            return _TextRead(
+                "dir" if os.path.isdir(checked.path) else "missing", checked.path, ""
+            )
+        if checked.code in ("invalid_path", "sensitive_path"):
+            return _TextRead("invalid", "", "")
+        # symlink_refused (the final component became a link inside this
+        # transaction), read_failed, file_too_large: the read did not happen.
+        return _TextRead("read_failed", checked.path, "")
+    try:
+        with io.TextIOWrapper(checked.file, encoding="utf-8", errors="replace") as text:
+            return _TextRead("file", checked.path, text.read(read_cap))
+    except OSError:
+        with contextlib.suppress(Exception):
+            checked.file.close()
+        return _TextRead("read_failed", checked.path, "")
 
 
 async def api_file_watch(request: web.Request) -> web.StreamResponse:
@@ -2213,14 +2383,17 @@ async def api_file_watch(request: web.Request) -> web.StreamResponse:
         )
         return web.json_response({"error": "invalid input"}, status=400)
 
-    path = _validate_dashboard_path(raw_path)
+    # Off-loop: validation and the stat are filesystem syscalls that must not
+    # run on the event loop (see _probe_request_path).
+    probe = await asyncio.to_thread(_probe_request_path, raw_path)
+    path = probe.path
     if not path:
         _sel().log_tool_invocation(
             session_key="dashboard", tool_name="file_watch", outcome="denied", resources=raw_path
         )
         return web.json_response({"error": "invalid or forbidden path"}, status=400)
 
-    if not os.path.isfile(path):
+    if not probe.is_file:
         _sel().log_tool_invocation(
             session_key="dashboard", tool_name="file_watch", outcome="not_found", resources=path
         )
@@ -2304,9 +2477,11 @@ async def api_file_read(request: web.Request) -> web.Response:
     )
 
     raw_path = request.query.get("path", "")
-    # Resolve relative paths against project dir when resolve=1
+    # Resolve relative paths against project dir when resolve=1. Off-loop: the
+    # resolution is a pair of realpath calls, and the schema check below needs
+    # the resolved string, so it cannot be folded into the probe.
     if request.query.get("resolve") == "1":
-        raw_path, _resolve_err = _resolve_project_relative(raw_path)
+        raw_path, _resolve_err = await asyncio.to_thread(_resolve_project_relative, raw_path)
         if _resolve_err == "cannot_resolve":
             return web.json_response(
                 {"error": "cannot resolve: no project dir configured"},
@@ -2329,8 +2504,17 @@ async def api_file_read(request: web.Request) -> web.Response:
         )
         return web.json_response({"error": "invalid input"}, status=400)
 
-    path = _validate_dashboard_path(raw_path)
-    if not path:
+    read_cap = _FILE_READ_CAP
+    # ONE off-loop transaction: validation, the stats, the no-follow open and the
+    # capped read. Off-loop because each of those blocks for as long as the mount
+    # takes; ONE because splitting the open from the validation is a symlink
+    # TOCTOU (see _read_request_path). HEAD passes cap 0 -- it answers from the
+    # stat and opens nothing.
+    outcome = await asyncio.to_thread(
+        _read_request_path, raw_path, 0 if request.method == "HEAD" else read_cap + 1
+    )
+    path = outcome.path
+    if outcome.kind == "invalid":
         _sel().log_tool_invocation(
             session_key="dashboard",
             tool_name="file_read",
@@ -2338,7 +2522,7 @@ async def api_file_read(request: web.Request) -> web.Response:
             resources=raw_path,
         )
         return web.json_response({"error": "invalid or forbidden path"}, status=400)
-    if not os.path.isfile(path):
+    if outcome.kind in ("dir", "missing"):
         # Both a directory and a missing path are 404 for a READ — there is no
         # file content to return either way — but the caller needs to tell them
         # apart. The dashboard renders a markdown path chip as a folder
@@ -2346,10 +2530,11 @@ async def api_file_read(request: web.Request) -> web.Response:
         # entirely when the path is not on disk; without this header both look
         # like "file not found", which is actively wrong for a directory.
         #
-        # Sitting ahead of the HEAD branch below, one probe covers GET and HEAD.
-        # `path` is already realpath-canonical and denylist-checked here, so
-        # isdir() discloses nothing that the status code did not already.
-        is_dir = os.path.isdir(path)
+        # Reached for GET and HEAD alike: the transaction above stats before it
+        # opens, so both methods answer from the same verdict. `path` is already
+        # realpath-canonical and denylist-checked, so naming the kind discloses
+        # nothing the status code did not already.
+        is_dir = outcome.kind == "dir"
         _sel().log_tool_invocation(
             session_key="dashboard", tool_name="file_read", outcome="not_found", resources=path
         )
@@ -2364,9 +2549,9 @@ async def api_file_read(request: web.Request) -> web.Response:
         )
         return web.Response(status=200, headers={"X-Path-Kind": "file"})
     try:
-        read_cap = 512_000
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read(read_cap + 1)
+        if outcome.kind == "read_failed":
+            raise OSError(f"file_read could not read {path}")
+        content = outcome.content
         truncated = len(content) > read_cap
         content = content[:read_cap]
         content = redact(content)
@@ -2660,9 +2845,10 @@ async def api_file_download(request: web.Request) -> web.Response:
     # ``_validate_dashboard_path`` (legitimate circular-import workaround,
     # listed as an exception in the top-level-imports rule).
     raw_path = request.query.get("path", "")
-    # Resolve relative paths against project dir when resolve=1 (mirrors api_file_read)
+    # Resolve relative paths against project dir when resolve=1 (mirrors
+    # api_file_read). Off-loop: the resolution is a pair of realpath calls.
     if request.query.get("resolve") == "1":
-        raw_path, _resolve_err = _resolve_project_relative(raw_path)
+        raw_path, _resolve_err = await asyncio.to_thread(_resolve_project_relative, raw_path)
         if _resolve_err == "cannot_resolve":
             return web.json_response(
                 {"error": "cannot resolve: no project dir configured"}, status=400,
@@ -2803,8 +2989,9 @@ async def api_file_office_preview(request: web.Request) -> web.Response:
     # shared helper (same as api_file_read / api_file_download / file-raw):
     # it passes Windows-absolute/UNC shapes through to the validator, whose
     # network-path gate runs BEFORE realpath — never re-implement this inline.
+    # Off-loop: the resolution is a pair of realpath calls.
     if request.query.get("resolve") == "1":
-        raw_path, _resolve_err = _resolve_project_relative(raw_path)
+        raw_path, _resolve_err = await asyncio.to_thread(_resolve_project_relative, raw_path)
         if _resolve_err == "cannot_resolve":
             _log("denied", request.query.get("path", ""), "cannot_resolve")
             return web.json_response(
@@ -3067,6 +3254,26 @@ def _resolve_project_relative(raw: str) -> tuple[str, str | None]:
     if not (candidate == resolved_proj or candidate.startswith(resolved_proj + os.sep)):
         return "", "outside_project"
     return candidate, None
+
+
+def _resolve_search_root(raw: str) -> tuple[str, bool]:
+    """Canonicalize a caller-supplied search root; say whether it is a directory.
+
+    Blocking (``realpath`` then ``isdir``) -- callers run it on a worker thread.
+    An empty *raw* means "the caller named no root", which the browse endpoints
+    answer with ``$HOME``; the search endpoint never passes one.
+    """
+    root = os.path.realpath(os.path.expanduser(raw or "~"))
+    return root, os.path.isdir(root)
+
+
+def _resolve_diff_path(raw: str) -> tuple[str, bool]:
+    """Canonicalize a diff target; say whether it is a regular file.
+
+    Blocking (``realpath`` then ``isfile``) -- callers run it on a worker thread.
+    """
+    path = os.path.realpath(os.path.expanduser(raw))
+    return path, os.path.isfile(path)
 
 
 # Container signature -> Content-Type. Sniffed from the file's first bytes so
@@ -3442,7 +3649,10 @@ async def api_file_write(request: web.Request) -> web.Response:
         )
         return web.json_response({"error": "invalid input"}, status=400)
 
-    path = _validate_dashboard_path(body.get("path", ""))
+    # Off-loop: validation and the stat are filesystem syscalls that must not
+    # run on the event loop (see _probe_request_path).
+    probe = await asyncio.to_thread(_probe_request_path, body.get("path", ""))
+    path = probe.path
     if not path:
         _sel().log_tool_invocation(
             session_key="dashboard",
@@ -3451,7 +3661,7 @@ async def api_file_write(request: web.Request) -> web.Response:
             resources=body.get("path", ""),
         )
         return web.json_response({"error": "invalid or forbidden path"}, status=400)
-    if not os.path.isfile(path):
+    if not probe.is_file:
         _sel().log_tool_invocation(
             session_key="dashboard", tool_name="file_write", outcome="not_found", resources=path
         )
@@ -3577,11 +3787,15 @@ async def api_file_search(request: web.Request) -> web.Response:
     ws_name = request.query.get("workspace", "")
     search_roots: list[str] = []
     if project:
-        project = os.path.realpath(os.path.expanduser(project))
+        # Off-loop: realpath on a caller-supplied root, then its isdir probe.
+        # ``?project=`` names any path on the host, so an unresponsive mount
+        # would stall the loop here, before the already-offloaded walk is
+        # reached.
+        project, project_is_dir = await asyncio.to_thread(_resolve_search_root, project)
         if is_sensitive_path(project):
             _sel().log_api_access(caller=caller, operation="file_search", outcome="denied", resources=project, error="sensitive path")
             return web.json_response({"error": "Access denied"}, status=403)
-        if os.path.isdir(project):
+        if project_is_dir:
             search_roots.append(project)
         else:
             return web.json_response(
@@ -3590,7 +3804,7 @@ async def api_file_search(request: web.Request) -> web.Response:
     elif ws_name:
         from kiro_crew.config.loader import workspace_dir_for  # noqa: F811
         ws_path = str(workspace_dir_for(ws_name))
-        if os.path.isdir(ws_path):
+        if await asyncio.to_thread(os.path.isdir, ws_path):
             search_roots.append(ws_path)
 
     scoped = bool(search_roots)
@@ -3608,10 +3822,17 @@ async def api_file_search(request: web.Request) -> web.Response:
         # ask for it explicitly with ?project=$HOME, which is scoped and
         # searched in full.
         proj = os.environ.get("KIROCREW_PROJECT_DIR", "")
-        if proj and os.path.isdir(proj):
-            search_roots.append(proj)
         mc_workspace = str(data_home() / "workspace")
-        if os.path.isdir(mc_workspace):
+
+        def _probe_fallback_roots() -> tuple[bool, bool]:
+            return bool(proj) and os.path.isdir(proj), os.path.isdir(mc_workspace)
+
+        # Off-loop: two isdir probes on operator-configured paths, either of
+        # which may sit on a network mount.
+        proj_is_dir, workspace_is_dir = await asyncio.to_thread(_probe_fallback_roots)
+        if proj_is_dir:
+            search_roots.append(proj)
+        if workspace_is_dir:
             search_roots.append(mc_workspace)
 
     # Filter out sensitive roots
@@ -3766,8 +3987,9 @@ async def api_file_diff(request: web.Request) -> web.Response:
     if not raw_path:
         _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="allowed", resources="empty_path")
         return web.json_response({"diff": "", "original": ""})
-    raw_path = os.path.realpath(os.path.expanduser(raw_path))
-    if not os.path.isfile(raw_path):
+    # Off-loop: realpath then the isfile probe, on a caller-supplied path.
+    raw_path, path_is_file = await asyncio.to_thread(_resolve_diff_path, raw_path)
+    if not path_is_file:
         _sel().log_api_access(caller=request.get("user", "dashboard"), operation="file_diff", outcome="allowed", resources=f"path={raw_path}", error="not_found")
         return web.json_response({"diff": "", "original": ""})
     if is_sensitive_path(raw_path):
@@ -3912,8 +4134,11 @@ async def api_browse_dirs(request: web.Request) -> web.Response:
     """GET /api/browse-dirs?path=... — list subdirectories for directory browser."""
     caller = request.get("user", "dashboard")
     raw = request.query.get("path", "").strip()
-    base = os.path.realpath(os.path.expanduser(raw)) if raw else os.path.realpath(os.path.expanduser("~"))
-    if not os.path.isdir(base):
+    # Off-loop: realpath then the isdir probe, on a caller-supplied root (the
+    # shared resolver answers $HOME for an unnamed one). is_sensitive_path below
+    # resolves on its own bounded pool, so it cannot wedge the loop.
+    base, base_is_dir = await asyncio.to_thread(_resolve_search_root, raw)
+    if not base_is_dir:
         return web.json_response({"error": "Not a directory", "path": base}, status=400)
     if is_sensitive_path(base):
         _sel().log_api_access(caller=caller, operation="browse_dirs", outcome="denied", resources=base, error="sensitive path")
@@ -4172,8 +4397,11 @@ async def api_browse_files(request: web.Request) -> web.Response:
     """
     caller = request.get("user", "dashboard")
     raw = request.query.get("path", "").strip()
-    base = os.path.realpath(os.path.expanduser(raw)) if raw else os.path.realpath(os.path.expanduser("~"))
-    if not os.path.isdir(base):
+    # Off-loop: realpath then the isdir probe, on a caller-supplied root (the
+    # shared resolver answers $HOME for an unnamed one). is_sensitive_path below
+    # resolves on its own bounded pool, so it cannot wedge the loop.
+    base, base_is_dir = await asyncio.to_thread(_resolve_search_root, raw)
+    if not base_is_dir:
         return web.json_response({"error": "Not a directory", "path": base}, status=400)
     if is_sensitive_path(base):
         _sel().log_api_access(caller=caller, operation="browse_files", outcome="denied", resources=base, error="sensitive path")
