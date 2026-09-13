@@ -1266,8 +1266,10 @@ export const FILTER_DESCRIPTION_KEY: Record<SessionFilterKey, string> = {
 const SESSION_FILTERS: SessionFilterDef[] = [
   {
     key: 'unread', storageKey: 'mc-session-unread-only',
-    color: 'var(--accent)',
-    icon: (active) => <Circle size={12} className={active ? 'text-accent' : 'text-muted'} {...(active ? { strokeWidth: 0, fill: 'var(--accent)' } : {})} />,
+    // Status token, not brand accent: this chip is the legend/toggle for the
+    // same unread state whose row dot reads `var(--ok)` below (#10479).
+    color: 'var(--ok)',
+    icon: (active) => <Circle size={12} className={active ? 'text-[var(--ok)]' : 'text-muted'} {...(active ? { strokeWidth: 0, fill: 'var(--ok)' } : {})} />,
   },
   {
     key: 'running', storageKey: 'mc-session-running-only',
@@ -1942,7 +1944,13 @@ const SessionRow = memo(function SessionRow({
       // A DOT, so it keeps its own size: `ROW_ICON_PX` sizes the lucide glyphs,
       // whose ink covers a fraction of their box, while a filled disc covers all
       // of it. At 10px it reads as heavier than every state that outranks it.
-      ? <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--accent)' }}
+      // `--ok`, not `--accent`: this dot signals STATE (the agent finished and
+      // the result is unread), so it reads the semantic status token that the
+      // `recent` filter above and the connection-status dot (InstancesPanel's
+      // `bg-ok`) already use, not the brand/interactive color. A theme where
+      // the two hues differ can then keep the status cue distinct from
+      // ordinary accent chrome (#10479).
+      ? <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--ok)' }}
         role="img" aria-label={i18nT('pages.chatSidebar.agent_finished_your_turn')}
         title={i18nT('pages.chatSidebar.agent_finished_your_turn')} />
       : null
@@ -5869,7 +5877,11 @@ function ChatSidebar({
                 // one sits beside a count where that reads as styling. The session
                 // row's gutter marker has had `role="img"` + a label since #3766;
                 // this one had neither.
-                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--accent)' }}
+                // `--ok` for the same reason as the session row's dot: it is the
+                // SAME unread state rolled up, so it reads the same semantic
+                // status token rather than the brand accent, matching the
+                // `recent` filter and the connection-status dot (#10479).
+                <span className="w-2 h-2 rounded-full shrink-0" style={{ background: 'var(--ok)' }}
                   role="img"
                   aria-label={i18nT('pages.chatSidebar.agent_finished_your_turn')}
                   title={i18nT('pages.chatSidebar.agent_finished_your_turn')} />
