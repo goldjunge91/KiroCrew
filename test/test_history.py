@@ -5619,3 +5619,191 @@ class TestConsolidationDoesNotImpersonateUser:
             assert lesson["source"] == "user_explicit"
         finally:
             store.close()
+
+
+class TestConsolidationLessonScope:
+    """Consolidation forwards a model-supplied ``repo_scope`` into the lesson write.
+
+    ``write_lesson`` has accepted ``repo_scope`` all along, but ``_save_lessons``
+    never passed it, so consolidation-written lessons could not be
+    project-scoped -- and since the context gate drops out-of-scope lessons
+    before ranking, the scope lever was unreachable for every consolidation
+    write. These tests pin the forwarding on both write paths.
+    """
+
+    @staticmethod
+    def _consolidator(store):
+        memory = MagicMock()
+        memory.read_preferences.return_value = ""
+        memory.read_projects.return_value = ""
+        return HistoryConsolidator(
+            log=MagicMock(),
+            memory=memory,
+            sessions=None,
+            vector_store=store,
+            migrated=True,
+        )
+
+    def _store(self, tmp_path):
+        from kiro_crew.vector_memory import VectorMemoryStore
+
+        store = VectorMemoryStore(db_path=tmp_path / "mem.db")
+        store.init()
+        store.embed_fn = lambda _text: [1.0, 0.0]
+        return store
+
+    @staticmethod
+    def _jsonl_consolidator(lesson_store):
+        memory = MagicMock()
+        memory.read_preferences.return_value = ""
+        memory.read_projects.return_value = ""
+        return HistoryConsolidator(
+            log=MagicMock(),
+            memory=memory,
+            sessions=None,
+            lesson_store=lesson_store,
+            vector_store=None,
+            migrated=True,
+        )
+
+    def test_model_supplied_scope_is_written_with_repo_scope(self, tmp_path) -> None:
+        store = self._store(tmp_path)
+        try:
+            self._consolidator(store)._save_lessons(
+                [
+                    {
+                        "rule": "Run the scoped gate before pushing here",
+                        "category": "tool",
+                        "repo_scope": "src/kiro_crew",
+                    }
+                ]
+            )
+
+            [lesson] = store.get_lessons()
+            value = json.loads(lesson["value_json"])
+            assert value["repo_scope"] == "src/kiro_crew"
+            assert lesson["source"] == "consolidation"
+        finally:
+            store.close()
+
+    def test_absent_scope_still_writes_a_global_lesson(self, tmp_path) -> None:
+        store = self._store(tmp_path)
+        try:
+            self._consolidator(store)._save_lessons(
+                [{"rule": "Prefer explicit timezones in timestamps"}]
+            )
+
+            [lesson] = store.get_lessons()
+            value = json.loads(lesson["value_json"])
+            # A global lesson stores NO scope key at all -- that absence is what
+            # keeps it applying everywhere (see write_lesson's lesson_value).
+            assert "repo_scope" not in value
+            assert lesson["source"] == "consolidation"
+        finally:
+            store.close()
+
+    def test_jsonl_fallback_forwards_scope_canonicalised(self, tmp_path) -> None:
+        """The no-vector-store path stores the scope too, canonicalised by save()."""
+        from kiro_crew.learn import LessonStore
+
+        lesson_store = LessonStore(base_dir=tmp_path)
+        c = self._jsonl_consolidator(lesson_store)
+
+        c._save_lessons(
+            [
+                # Trailing slash: save() canonicalises before storing.
+                {"rule": "Pin the vitest worker count here", "repo_scope": "src/kiro_crew/"},
+                {"rule": "A rule with no scope stays global"},
+            ]
+        )
+
+        by_rule = {le.rule: le for le in lesson_store.load_all()}
+        assert by_rule["Pin the vitest worker count here"].repo_scope == "src/kiro_crew"
+        assert by_rule["A rule with no scope stays global"].repo_scope is None
+
+    def test_whitespace_only_scope_is_global_not_refused(self, tmp_path) -> None:
+        """A whitespace-only scope is NO scope -- the lesson still lands, globally."""
+        store = self._store(tmp_path)
+        try:
+            self._consolidator(store)._save_lessons(
+                [{"rule": "Trailing spaces mean nothing here", "repo_scope": "   "}]
+            )
+
+            [lesson] = store.get_lessons()
+            assert "repo_scope" not in json.loads(lesson["value_json"])
+        finally:
+            store.close()
+
+    def test_non_string_scope_refuses_the_lesson_not_widens_it(self, tmp_path) -> None:
+        """A present non-string scope must NOT slip past write_lesson's string-only
+        guard and store the lesson globally -- that is the fail-open a scoped
+        lesson must never take. The whole lesson is refused instead."""
+        store = self._store(tmp_path)
+        try:
+            self._consolidator(store)._save_lessons(
+                [{"rule": "Scoped to a list, somehow", "repo_scope": ["src/kiro_crew"]}]
+            )
+
+            assert store.get_lessons() == []
+        finally:
+            store.close()
+
+    def test_inadmissible_scope_refused_on_jsonl_fallback_too(self, tmp_path) -> None:
+        """LessonStore.save never checks admissibility, so the consolidation seam
+        must -- an absolute path stored as a scope would render nowhere while
+        suppressing the store (see project_scope.scope_is_admissible)."""
+        from kiro_crew.learn import LessonStore
+
+        lesson_store = LessonStore(base_dir=tmp_path)
+        c = self._jsonl_consolidator(lesson_store)
+
+        c._save_lessons(
+            [{"rule": "Scoped to an absolute path", "repo_scope": "/etc/passwd"}]
+        )
+
+        assert lesson_store.load_all() == []
+
+    def test_non_string_scope_refused_on_jsonl_fallback_too(self, tmp_path) -> None:
+        """The silent-widening cell on the fallback path: a non-string scope must
+        refuse the lesson there too, not canonicalise to a global write."""
+        from kiro_crew.learn import LessonStore
+
+        lesson_store = LessonStore(base_dir=tmp_path)
+        c = self._jsonl_consolidator(lesson_store)
+
+        c._save_lessons(
+            [{"rule": "Scoped to a list, somehow", "repo_scope": ["src/kiro_crew"]}]
+        )
+
+        assert lesson_store.load_all() == []
+
+    def test_inadmissible_scope_refuses_the_lesson_on_vector_path(self, tmp_path) -> None:
+        store = self._store(tmp_path)
+        try:
+            self._consolidator(store)._save_lessons(
+                [{"rule": "Scoped to an absolute path", "repo_scope": "/etc/passwd"}]
+            )
+
+            assert store.get_lessons() == []
+        finally:
+            store.close()
+
+    def test_refused_lesson_keeps_its_well_formed_siblings(self, tmp_path) -> None:
+        """The per-item drop is a ``continue``, not an abort: one malformed scope
+        must not take the rest of the batch with it."""
+        store = self._store(tmp_path)
+        try:
+            self._consolidator(store)._save_lessons(
+                [
+                    {"rule": "Scoped to a list, somehow", "repo_scope": ["src/kiro_crew"]},
+                    {"rule": "A clean global lesson survives the batch"},
+                ]
+            )
+
+            [lesson] = store.get_lessons()
+            assert (
+                json.loads(lesson["value_json"])["rule"]
+                == "A clean global lesson survives the batch"
+            )
+        finally:
+            store.close()
