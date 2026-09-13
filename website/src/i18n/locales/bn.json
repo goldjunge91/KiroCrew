@@ -10796,6 +10796,7 @@
       "test_failed_for": "{{name}}-এর পরীক্ষা ব্যর্থ"
     },
     "kiroCrewAgentsPage": {
+      "copy_on_hire_note": "এই সদস্য টেমপ্লেটের নিজস্ব কপি পায় — সদস্যের পরিবর্তন কখনও টেমপ্লেট বদলায় না।",
       "name_is_display_name_hint": "আপনি এই সদস্যকে যে নামে ডাকেন। {{productName}} এটি থেকে একটি স্থায়ী আইডি তৈরি করে।",
       "display_name": "প্রদর্শিত নাম",
       "display_name_hint": "নাম বদলালে কেবল লেবেল বদলায়; আইডি {{id}} একই থাকে, তাই আইডি ব্যবহার করা লিংক, সময়সূচি ও ওয়েবহুক কাজ করতে থাকে।",
@@ -14694,7 +14695,8 @@
       "filter_source_builtin_description": "{{productName}}-এর সাথে আসা ক্রু",
       "filter_source_package_description": "ক্ষমতা প্যাকেজ দ্বারা ইনস্টল করা ক্রু",
       "member_count_filtered": "{{count}} জনের মধ্যে {{shown}} জন সদস্য",
-      "setup_in_crew_manager": "ব্যক্তিগত মেমোরি সেট আপ করুন"
+      "setup_in_crew_manager": "ব্যক্তিগত মেমোরি সেট আপ করুন",
+      "own_copy_of": "{{template}} — কাস্টমাইজ করা কপি"
     }
   },
   "privacyDisclosure": {

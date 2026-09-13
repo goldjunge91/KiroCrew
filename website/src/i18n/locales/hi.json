@@ -10796,6 +10796,7 @@
       "test_failed_for": "{{name}} के लिए परीक्षण विफल"
     },
     "kiroCrewAgentsPage": {
+      "copy_on_hire_note": "इस सदस्य को टेम्पलेट की अपनी कॉपी मिलती है — सदस्य में किए गए बदलाव कभी टेम्पलेट को नहीं बदलते।",
       "name_is_display_name_hint": "तुम इस सदस्य को क्या कहते हो। {{productName}} इससे एक स्थायी आईडी बनाता है।",
       "display_name": "प्रदर्शित नाम",
       "display_name_hint": "नाम बदलने से केवल लेबल बदलता है; आईडी {{id}} वही रहती है, इसलिए इस आईडी का उपयोग करने वाले लिंक, शेड्यूल और वेबहुक काम करते रहते हैं।",
@@ -14694,7 +14695,8 @@
       "filter_source_builtin_description": "{{productName}} के साथ आने वाले क्रू",
       "filter_source_package_description": "क्षमता पैकेजों द्वारा इंस्टॉल किए गए क्रू",
       "member_count_filtered": "{{count}} में से {{shown}} सदस्य",
-      "setup_in_crew_manager": "निजी मेमोरी सेट अप करें"
+      "setup_in_crew_manager": "निजी मेमोरी सेट अप करें",
+      "own_copy_of": "{{template}} — अनुकूलित कॉपी"
     }
   },
   "privacyDisclosure": {

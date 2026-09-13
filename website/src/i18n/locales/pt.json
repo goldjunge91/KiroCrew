@@ -10952,6 +10952,7 @@
       "test_failed_for": "Falha no teste de {{name}}"
     },
     "kiroCrewAgentsPage": {
+      "copy_on_hire_note": "Este membro recebe sua própria cópia do modelo — edições no membro nunca alteram o modelo.",
       "name_is_display_name_hint": "Como você chama este membro. O {{productName}} cria um ID permanente a partir dele.",
       "display_name": "Nome de exibição",
       "display_name_hint": "Renomear altera apenas o rótulo; o ID {{id}} permanece, então links, agendamentos e webhooks que usam o ID continuam funcionando.",
@@ -14885,7 +14886,8 @@
       "filter_source_builtin_description": "Crews incluídos no {{productName}}",
       "filter_source_package_description": "Crews instalados por pacotes de capacidades",
       "member_count_filtered": "{{shown}} de {{count}} membros",
-      "setup_in_crew_manager": "Configurar memória privada"
+      "setup_in_crew_manager": "Configurar memória privada",
+      "own_copy_of": "{{template}} — cópia personalizada"
     }
   },
   "privacyDisclosure": {

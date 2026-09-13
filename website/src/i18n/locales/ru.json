@@ -11108,6 +11108,7 @@
       "test_failed_for": "Тест для {{name}} не пройден"
     },
     "kiroCrewAgentsPage": {
+      "copy_on_hire_note": "Этот участник получает собственную копию шаблона — правки участника никогда не меняют шаблон.",
       "name_is_display_name_hint": "Как вы называете этого участника. {{productName}} создаёт из него постоянный ID.",
       "display_name": "Отображаемое имя",
       "display_name_hint": "Переименование меняет только подпись; ID {{id}} сохраняется, поэтому ссылки, расписания и вебхуки, использующие ID, продолжают работать.",
@@ -15078,7 +15079,8 @@
       "filter_source_builtin_description": "Команды, входящие в {{productName}}",
       "filter_source_package_description": "Команды, установленные пакетами возможностей",
       "member_count_filtered": "{{shown}} из {{count}} участников",
-      "setup_in_crew_manager": "Настроить личную память"
+      "setup_in_crew_manager": "Настроить личную память",
+      "own_copy_of": "{{template}} — настроенная копия"
     }
   },
   "privacyDisclosure": {

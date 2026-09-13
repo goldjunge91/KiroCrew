@@ -34,7 +34,7 @@ Missing history must never silently turn a private topic into Global memory.
 | `src/kiro_crew/subagent.py` | `_validate_agent` — what an `agent=` name is checked against, and `UNADVERTISED_AGENTS` |
 | `src/kiro_crew/config/prompt-orchestrator.md` | The orchestrator prompt that names `select_crew` and the delegation rule |
 | `src/kiro_crew/dashboard/handlers/agents.py` | Crew CRUD on `/api/agents`, and the roster row serializer |
-| `src/kiro_crew/dashboard/handlers/members.py` | `/api/members` roster, thread get-or-create, rules, activity |
+| `src/kiro_crew/dashboard/handlers/members.py` | `/api/members` roster, `POST /api/members/hire`, thread get-or-create, rules, activity |
 | `website/src/pages/KiroCrewAgentsPage.tsx` | The Crews UI, mounted as the **Crews** tab of `CapabilitiesPage` (Agent Capabilities) |
 | `website/src/components/crew/crewEditorSections.ts` | The crew editor's pane registry, including the Routing pane that edits `triggers` |
 | `website/src/components/CrewWakeSection.tsx` | "What wakes this agent" — schedules, deliberately distinct from `triggers` |
@@ -135,6 +135,73 @@ outranks all four and is not considered there.
 The loader is defensive about hand-edited config: a non-string `model` or
 `triggers` collapses to `""`, an unknown `reasoning_effort` collapses to inherit,
 and a junk watchdog override collapses to `0`.
+
+## Hire: `POST /api/members/hire` (copy-on-hire)
+
+A crew member is a Kiro custom agent plus the wrapper row; **hire** is the one
+verb that makes a member from a definition. Source kind `local` adopts an
+installed agent file (`~/.kiro/agents/<agent>.json`):
+
+```json
+{"display_name": "Checkout triage", "role": "Oncall Triage Engineer",
+ "source": {"kind": "local", "agent": "reviewer"},
+ "workspace": "default", "triggers": "", "session_color": ""}
+```
+
+`source.kind` must be a string in `_HIRE_SOURCE_KINDS` (an unhashable value is a
+400 `unsupported_source_kind`, never a `TypeError`); `source.agent` must be in the
+shared agent-name grammar (`invalid_source_agent`). The route composes three
+existing cores, owner-gated once at the top, and is **atomic** -- the member
+either exists with its own copy of the source or does not exist. Steps 2 onward run
+as ONE transaction under `chat_utils.drained` (the coroutine twin of
+`drained_to_thread`): a cancellation of the request between steps -- a gateway
+shutdown, a client that closed the connection -- is absorbed until the transaction
+reaches its own end (success or roll-back) and re-raised afterwards, so a row can
+never be left committed with the copy and the roll-back skipped:
+
+| Step | Core | On failure |
+|---|---|---|
+| 1. resolve the source | `_load_template_specs` | 404 `template_not_found` / 409 `ambiguous_template_name`; nothing written. The create path tolerates a missing template (a crew may be bound ahead of an install); a hire may not, because its promise is a copy of that file |
+| 2. create the wrapper row | `_create_crew` (the body of `POST /api/agents`: id minted from `display_name`, private memory provisioned, bound to the source) | its own 4xx/409, verbatim |
+| 3. copy-on-hire | `_fork_template_for_crew` (the body of `POST /api/agents/detail/{name}/fork`): copy the source into a member-owned file whose stem derives from the member id, record lineage in the `agent_state` sidecar, rebind the row -- all under the config lock | **roll back step 2** through `_delete_crew_record` (the delete route's own mutation: row removed, a private V2 store archived under the retirement marker, cached handles released) -- but ONLY while the row is still the one this hire made -- bound to the source and carrying the private store name the create minted (unique per creation, so it is the row's generation): the lock is released between steps 2 and 3, and a writer that rebinds the member in that gap, or deletes it and recreates a same-id member from the same source (the fork is handed the generation too and answers `stale_binding` for either), has started shaping it, so their row is not this hire's to delete. Then answer the copy's own status and code plus `rolled_back: true`. If the roll-back is refused or fails, 500 `hire_incomplete` naming the member `id` so the operator can decide |
+
+The create and fork bodies are this package's own contract (pinned by their
+tests); the hire reads them strictly -- a missing `name`/`display_name` or
+`template` is a 500 `hire_incomplete`, never a guessed default.
+Why a server verb rather than the two client-reachable calls: a client that dies
+between create and fork leaves a member bound to the SHARED source it was told
+it owns -- the exact hazard copy-on-hire removes -- and only the server can roll
+the first half back. Two members hired from one file therefore coexist, each with
+its own copy and row; a second hire whose display name mints a taken id is a 409
+`agent_exists` (the message names the typed name and the id).
+
+Success: `{"ok": true, "id"}` -- the minted id (what `/members?member=` resolves);
+the copy the member is bound to and what the caller sent (label, role, source) are
+read back from the roster row, not echoed. The `GET /api/members` row carries
+`template_origin` -- the template a member's own
+copy was made from (`forked_from` where the sidecar's `private_to` is this
+member), `""` when bound to a shared template directly -- so the drawer reads
+`reviewer — customized copy` (the editor's own word for a forked copy is
+"Customized") rather than presenting the copy's stem as a template. It passes the
+same redactor as the other identity fields: a declared template name is text a
+package or a hand-edited spec wrote.
+
+Frontend: the Crew Members roster's **Add member** opens the crew manager's
+member form (`?new=1&from=members`); its Create IS a hire. Picking a template
+pre-fills an EMPTY name with the first of `reviewer`, `reviewer-2`, … that no
+member id holds (`freeMemberName`). Those candidates are inside the id grammar,
+so each IS its own minted id and the client needs no copy of the sanitizer; a
+suffix that would push a candidate past the 64-char id cap shortens the stem first,
+the way the server's own collision suffixing does; the server's 409 stays the
+authority. A typed name is never overwritten, and re-picking
+the template re-seeds the field only while it still holds the previous seed. The copy note renders under the
+template dropdown. The crew manager's own **New crew** stays a plain create
+(bind to a shared template). Pinned in `test/test_member_hire.py` (the gate: two
+members from one file coexist; a failed copy rolls back and a retry is clean; a
+source that vanishes mid-hire rolls back with the fork's 404; a failed roll-back
+names the member; unhashable kinds are 400; lineage on the roster) and
+`website/src/test/CrewRoster.test.tsx` (hire vs plain create, pre-fill, note
+placement).
 
 ## Selection: the `select_crew` contract
 

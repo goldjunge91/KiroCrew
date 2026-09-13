@@ -6,7 +6,7 @@ import Clickable from '../components/Clickable'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppDispatch } from '../store'
 import { createSlot } from '../store/chatSlice'
-import { api, type WebhookTokenEntry } from '../api/client'
+import { api, type HireMemberResult, type WebhookTokenEntry } from '../api/client'
 import { memberLabel } from './members/rosterFilter'
 import { useProvider } from '../providers'
 import { useAvailableModels } from '../hooks/useAvailableModels'
@@ -49,6 +49,29 @@ const HEX_COLOR_EXAMPLE = '#4f8ef7'
 // Mirrored on the inputs so the browser stops the user at the bound instead of the
 // server refusing the submit (the server never truncates: an over-long value is a 400).
 const MEMBER_LABEL_MAX_LEN = 80
+// Longest id the member-id grammar admits (member_identity.MEMBER_ID_MAX_LEN).
+const MEMBER_ID_MAX_LEN = 64
+
+/** `base`, else `base-2`, `base-3`, … — the first no member id holds. Every
+ *  candidate is inside the member-id grammar (a template name is), so each IS
+ *  its own minted id: the client needs no copy of the server's sanitizer, and
+ *  the pre-fill cannot seed the 409 it exists to avoid. A suffix that would push
+ *  the candidate past the id length cap shortens the stem first, the way the
+ *  server's own collision suffixing does — otherwise a 63-char taken template
+ *  name would propose a 65-char string the server truncates back onto the
+ *  taken id. */
+export function freeMemberName(base: string, takenIds: readonly string[]): string {
+  const taken = new Set(takenIds)
+  if (!taken.has(base)) return base
+  for (let n = 2; n < 1000; n++) {
+    const suffix = `-${n}`
+    const stem = base.slice(0, MEMBER_ID_MAX_LEN - suffix.length).replace(/[-_]+$/, '') || 'member'
+    const candidate = `${stem}${suffix}`
+    if (!taken.has(candidate)) return candidate
+  }
+  return base
+}
+
 import ErrorNotice from '../components/ErrorNotice'
 /** Common shape returned by the agent/workspace mutation endpoints. */
 interface AgentMutationResult {
@@ -68,6 +91,16 @@ interface CreatePayload {
   kiro_agent: string
   workspace: string
   memory_store: string
+  triggers: string
+  session_color: string
+}
+
+/** Body of POST /api/members/hire (the Members roster's create). */
+interface HirePayload {
+  display_name: string
+  role: string
+  source: { kind: 'local'; agent: string }
+  workspace: string
   triggers: string
   session_color: string
 }
@@ -344,11 +377,15 @@ function withCurrent(opts: string[], cur: string): string[] {
  * SAME control rather than two copies that drift. Create composes them through
  * `BindingFields`; the editor mounts them individually, one per rail pane.
  */
-export function TemplateField({ label, options, value, onChange, subject, editLaterNote, provenance }: {
+export function TemplateField({ label, options, value, onChange, subject, editLaterNote, copyNote, provenance }: {
   label: string; options: string[]; value: string; onChange: (v: string) => void; subject: FormSubject
   /** Create-only reassurance that the pick is not a commitment. The editor never
    *  sets it: there the fields being edited are themselves the answer. */
   editLaterNote?: boolean
+  /** The hire form's one explanatory device -- what picking a template MEANS
+   *  for a member (its own copy). Rendered right under the dropdown, where the
+   *  reader is when the question arises, in place of the switch-anytime note. */
+  copyNote?: string
   /** Provenance per template name, for the source label on each row. Absent while
    *  the installed list is still loading, which just means no labels yet. */
   provenance?: Record<string, TemplateProvenance>
@@ -377,7 +414,13 @@ export function TemplateField({ label, options, value, onChange, subject, editLa
        *  would promise a blast radius onto other agents bound to it that does
        *  not exist. The noun follows `subject`, like every other string in the
        *  form: the member flow never says "agent". */}
-      {editLaterNote && (
+      {copyNote ? (
+        // Helper-text token, not the accent: read cold, accent-coloured prose
+        // under a control was taken for a link.
+        <span className="block text-[11.5px] leading-relaxed text-muted" data-testid="copy-on-hire-note">
+          {copyNote}
+        </span>
+      ) : editLaterNote && (
         <span className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-accent">
           <Sparkles className="lucide-inline h-3 w-3 mt-0.5 shrink-0" aria-hidden="true" />
           {subject === 'member'
@@ -652,19 +695,20 @@ export function SessionColorField({ value, onChange, subject }: { value: string;
 
 /** The create form's binding block. */
 function BindingFields({
-  templateLabel, kiroAgentOptions, kiroAgent, setKiroAgent, templateProvenance,
+  templateLabel, kiroAgentOptions, kiroAgent, setKiroAgent, templateProvenance, templateCopyNote,
   workspaceOptions, workspace, setWorkspace, onNewWorkspace,
   modelOptions, model, setModel, subject,
 }: {
   templateLabel: string; subject: FormSubject
   kiroAgentOptions: string[]; kiroAgent: string; setKiroAgent: (v: string) => void
   templateProvenance?: Record<string, TemplateProvenance>
+  templateCopyNote?: string
   workspaceOptions: string[]; workspace: string; setWorkspace: (v: string) => void; onNewWorkspace: () => void
   modelOptions?: string[]; model?: string; setModel?: (v: string) => void
 }) {
   return (
     <>
-      <TemplateField label={templateLabel} options={kiroAgentOptions} value={kiroAgent} onChange={setKiroAgent} subject={subject} editLaterNote provenance={templateProvenance} />
+      <TemplateField label={templateLabel} options={kiroAgentOptions} value={kiroAgent} onChange={setKiroAgent} subject={subject} editLaterNote copyNote={templateCopyNote} provenance={templateProvenance} />
       <WorkspaceField options={workspaceOptions} value={workspace} onChange={setWorkspace} onNewWorkspace={onNewWorkspace} subject={subject} />
       <MemoryStoreField />
       {modelOptions && setModel && model !== undefined && (
@@ -1246,6 +1290,32 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
       settleFor(vars.epoch, e.message || (fromMembers ? i18nT('pages.kiroCrewAgentsPage.failed_to_create_member') : i18nT('pages.kiroCrewAgentsPage.failed_to_create_agent')))
     },
   })
+  /** The Members roster's create IS a hire (design: "hire is the one verb"):
+   *  the server mints the id, creates the row and copies the chosen template
+   *  into the member's own agent file, so two members hired from one file
+   *  coexist and a later edit never touches the shared template. The crew
+   *  manager's own "New crew" keeps the plain create (bind to a shared
+   *  template) — that is the agent-centric power path. */
+  const hireMut = useMutation({
+    mutationFn: ({ epoch: _epoch, ...data }: HirePayload & { epoch: number }) => api.hireMember(data),
+    onSuccess: (r: HireMemberResult, vars) => {
+      refetchAgents()
+      if (r.error) { settleFor(vars.epoch, r.error); return }
+      if (vars.epoch !== sheetEpoch.current) return
+      dismissSheet()
+      // By the MINTED id (the roster resolves `?member=` by id). A 200 means
+      // the member exists WITH its own copy: a failed copy is rolled back on
+      // the server and arrives here as an error, never as a member.
+      navigate(`/members?member=${encodeURIComponent(r.id || vars.display_name)}`)
+    },
+    onError: (e: Error, vars) => {
+      if (e instanceof ApiError && e.status === 409) {
+        settleFor(vars.epoch, i18nT('pages.kiroCrewAgentsPage.member_already_exists', { name: vars.display_name }))
+        return
+      }
+      settleFor(vars.epoch, e.message || i18nT('pages.kiroCrewAgentsPage.failed_to_create_member'))
+    },
+  })
   const updateMut = useMutation({
     mutationFn: ({ name, data }: { name: string; data: AgentUpdatePayload; epoch: number }) => api.updateKirocrewAgent(name, data),
     onSuccess: (r: AgentMutationResult, vars) => { settleFor(vars.epoch, r.error); refetchAgents() },
@@ -1284,6 +1354,26 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
     onError: (e: Error, vars) => settleFor(vars.epoch, e.message || i18nT('pages.kiroCrewAgentsPage.failed_to_delete_agent')),
   })
 
+  /** "Name your colleague" — pre-filled, skippable. Picking a template in the
+   *  member form seeds an EMPTY name with the template's name, so a user who
+   *  wants exactly that can press Create; one who typed a name first keeps it.
+   *  The seed is the first of `reviewer`, `reviewer-2`, … no member id holds:
+   *  hiring a second member from one template is the headline case, and
+   *  seeding the taken name would only hand the user a 409. Re-picking the
+   *  template re-seeds ONLY while the field still holds the previous seed —
+   *  a stale seed would mint a permanent id from the wrong template's name,
+   *  while a name the user typed over it is theirs. */
+  const lastSeedRef = useRef('')
+  const pickTemplateAndPrefillName = useCallback((template: string) => {
+    setKiroAgent(template)
+    setName(prev => {
+      if (prev.trim() && prev !== lastSeedRef.current) return prev
+      const seed = freeMemberName(template, agents.map(a => a.name))
+      lastSeedRef.current = seed
+      return seed
+    })
+  }, [agents])
+
   const create = () => {
     setError(''); setSheetHint('')
     const n = name.trim()
@@ -1292,6 +1382,10 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
     // 'kirocrew' default: that default is what silently turns a new crew into an
     // alias for the DEFAULT agent (#1684).
     if (!kiroAgent) { setSheetHint(i18nT('pages.kiroCrewAgentsPage.agent_template_is_required')); return }
+    if (fromMembers) {
+      hireMut.mutate({ display_name: n, role: role.trim(), source: { kind: 'local', agent: kiroAgent }, workspace, triggers, session_color: sessionColor, epoch: sheetEpoch.current })
+      return
+    }
     createMut.mutate({ name: n, role: role.trim(), kiro_agent: kiroAgent, workspace, memory_store: 'default', triggers, session_color: sessionColor, epoch: sheetEpoch.current })
   }
 
@@ -1579,7 +1673,7 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
   const creating = sheet?.mode === 'create'
   const [avatarUploading, setAvatarUploading] = useState(false)
   const sheetBusy =
-    createMut.isPending || updateMut.isPending || deleteMut.isPending || provisionMut.isPending || avatarUploading
+    (createMut.isPending || hireMut.isPending) || updateMut.isPending || deleteMut.isPending || provisionMut.isPending || avatarUploading
 
   /**
    * The subset of `sheetBusy` that has already COMMITTED something — a write
@@ -2220,8 +2314,9 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
                   <BindingFields
                     subject={formSubject}
                     templateLabel={provider.labels.agentTemplateField}
-                    kiroAgentOptions={kiroAgentOptions} kiroAgent={kiroAgent} setKiroAgent={setKiroAgent}
+                    kiroAgentOptions={kiroAgentOptions} kiroAgent={kiroAgent} setKiroAgent={fromMembers ? pickTemplateAndPrefillName : setKiroAgent}
                     templateProvenance={templateProvenance}
+                    templateCopyNote={fromMembers ? i18nT('pages.kiroCrewAgentsPage.copy_on_hire_note') : undefined}
                     workspaceOptions={workspaceOptions} workspace={workspace} setWorkspace={setWorkspace}
                     onNewWorkspace={() => setWsModalOpen(true)}
                   />
@@ -2556,7 +2651,7 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
                 {/* The primary action names its object in the roster's words when
                     the roster asked for it — the form's helper copy still says
                     "agent", and the button is where the two names would jar. */}
-                {createMut.isPending
+                {(createMut.isPending || hireMut.isPending)
                   ? i18nT('pages.kiroCrewAgentsPage.creating')
                   : fromMembers ? i18nT('pages.kiroCrewAgentsPage.create_member') : i18nT('pages.kiroCrewAgentsPage.create')}
               </SendBtn>

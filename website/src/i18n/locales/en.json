@@ -6707,6 +6707,7 @@
       "user": "user"
     },
     "kiroCrewAgentsPage": {
+      "copy_on_hire_note": "This member gets its own copy of the template — edits to the member never change the template.",
       "name_is_display_name_hint": "What you call this member. {{productName}} creates a permanent id from it.",
       "display_name": "Display name",
       "display_name_hint": "Renaming changes only the label; the id {{id}} stays, so links, schedules and webhooks that use the id keep working.",
@@ -7082,7 +7083,8 @@
       "filter_source_mine_description": "Crews you created in the crew manager",
       "filter_source_builtin_description": "Crews that ship with {{productName}}",
       "filter_source_package_description": "Crews installed by capability packages",
-      "member_count_filtered": "{{shown}} of {{count}} members"
+      "member_count_filtered": "{{shown}} of {{count}} members",
+      "own_copy_of": "{{template}} — customized copy"
     },
     "migrationPage": {
       "app_migration": "App Migration",

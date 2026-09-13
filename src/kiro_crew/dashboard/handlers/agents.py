@@ -2707,8 +2707,26 @@ async def api_agent_fork(request: web.Request) -> web.Response:
     crew = body.get("crew")
     if not isinstance(crew, str) or not crew.strip():
         return web.json_response({"error": "crew is required", "code": "crew_required"}, status=400)
-    crew = crew.strip()
+    return await _fork_template_for_crew(request, name, crew.strip())
 
+
+async def _fork_template_for_crew(
+    request: web.Request, name: str, crew: str, *, expected_memory_store: str | None = None
+) -> web.Response:
+    """The fork proper: give *crew* a private copy of template *name*.
+
+    Shared by ``POST /api/agents/detail/{name}/fork`` and the hire route
+    (``POST /api/members/hire``), which copies the source definition into the
+    new member's own agent file as the last step of a hire. Owner-gated and
+    body-validated by the CALLER; everything below runs under the config lock.
+
+    *expected_memory_store* pins the GENERATION of the crew the caller means:
+    the hire created a row whose private store name is minted fresh, so a row
+    of the same id bound to the same source but carrying a different store is
+    a different member -- one deleted and recreated while no lock was held --
+    and forking it would rebind someone else's row. Checked before and inside
+    the locked mutation like the binding itself; a mismatch is ``stale_binding``.
+    """
     state: DashboardState = request.app["state"]
     async with _get_config_lock():
         agents_dir = kiro_agents_dir_path()
@@ -2738,7 +2756,9 @@ async def api_agent_fork(request: web.Request) -> web.Response:
         agent = cfg.agents[crew]
         # A stale or racing request must not clobber a newer binding: the fork
         # was issued against the crew's current template, so require it still is.
-        if agent.kiro_agent not in (name, source_name):
+        if agent.kiro_agent not in (name, source_name) or (
+            expected_memory_store is not None and agent.memory_store != expected_memory_store
+        ):
             return web.json_response(
                 {
                     "error": f"'{crew}' is no longer bound to '{source_name}'",
@@ -2821,6 +2841,11 @@ async def api_agent_fork(request: web.Request) -> web.Response:
                 if not isinstance(entry, dict) or entry.get("kiro_agent") not in (
                     name,
                     source_name,
+                ):
+                    raise _StaleBinding()
+                if (
+                    expected_memory_store is not None
+                    and entry.get("memory_store") != expected_memory_store
                 ):
                     raise _StaleBinding()
                 bound = _reserved_binding_names(cfg_data)
@@ -4456,6 +4481,17 @@ async def api_kirocrew_agents_create(request: web.Request) -> web.Response:
         return web.json_response(
             {"error": "body must be an object", "code": "body_not_object"}, status=400
         )
+    return await _create_crew(request, body)
+
+
+async def _create_crew(request: web.Request, body: dict) -> web.Response:
+    """Validate *body* and create the crew row it describes.
+
+    The whole create contract lives here, so ``POST /api/agents`` and the hire
+    route (``POST /api/members/hire``, which follows this with a copy of the
+    source definition) cannot drift apart on validation, minting or
+    persistence. Owner-gated and body-shape-checked by the CALLER.
+    """
     # What the user typed is only ever the DISPLAY name (member_identity.py):
     # the row's key -- its id -- is minted from it below, inside the config
     # lock. ``display_name`` is the new spelling; ``name`` is kept for every
@@ -5307,66 +5343,7 @@ async def api_kirocrew_agent_delete(request: web.Request) -> web.Response:
                 {"error": f"Cannot delete default agent '{name}'. Change default_agent first."},
                 status=409,
             )
-        created_archive = False
-        retired_store = ""
-
-        @memory_store_namespace_lock()
-        def _delete_member() -> tuple[str, bool]:
-            nonlocal created_archive, retired_store
-
-            def mutate(doc: dict) -> dict:
-                nonlocal created_archive, retired_store
-                agents = coerce_dict_section(doc, "agents")
-                if name not in agents:
-                    raise UnknownMemoryStore(f"Crew Member {name!r} was removed concurrently")
-                agent_section = doc.get("agent")
-                if doc.get("default_agent") == name or (
-                    isinstance(agent_section, dict) and agent_section.get("default_agent") == name
-                ):
-                    raise UnknownMemoryStore(f"Crew Member {name!r} became the default")
-                entry = agents[name]
-                stores = coerce_dict_section(doc, "memory_stores")
-                store_name = entry.get("memory_store", "") if isinstance(entry, dict) else ""
-                record = stores.get(store_name)
-                if isinstance(record, dict) and record.get("memory_version") == 2:
-                    if record.get("owner_member") != name:
-                        raise UnknownMemoryStore(
-                            f"memory store {store_name!r} ownership changed concurrently"
-                        )
-                    created_archive = archive_member_memory_store(store_name, name)
-                    retired_store = store_name
-                del agents[name]
-                return doc
-
-            try:
-                update_config_locked(mutate=mutate)
-            except BaseException:
-                if created_archive:
-                    try:
-                        rollback_member_memory_archive_if_active(retired_store, name)
-                    except Exception:
-                        logger.error(
-                            "failed to roll back member memory retirement for %s",
-                            retired_store,
-                            exc_info=True,
-                        )
-                raise
-            return retired_store, created_archive
-
-        retired_store, _created_archive = await _drained_to_thread(_delete_member)
-        if retired_store:
-            from kiro_crew.context import release_cached_memory_store
-
-            await _drained_to_thread(release_cached_memory_store, retired_store)
-            if (state := request.app.get("state")) is not None:
-                from kiro_crew.dashboard.handlers._shared import release_markdown_memory_store
-
-                await release_markdown_memory_store(state, retired_store)
-        # The crew is gone; its uploaded picture must not outlive it. Inside
-        # the same lock so the cleanup cannot run AFTER a concurrent
-        # same-name recreation has already uploaded and committed a new
-        # picture under the same digest stem.
-        await _drained_to_thread(_remove_avatar_files, name)
+        await _delete_crew_record(request, name)
     # A crew DISAPPEARING is the other half of the same invariant: the captured
     # config still holds the record, so a cron or messaging job still naming the
     # crew would keep resolving its old pin and binding.
@@ -5379,6 +5356,81 @@ async def api_kirocrew_agent_delete(request: web.Request) -> web.Response:
         resources=name,
     )
     return web.json_response({"ok": True})
+
+
+async def _delete_crew_record(request: web.Request, name: str) -> None:
+    """Remove crew *name*: its ``agents`` row, its private memory (archived, not
+    erased), its cached store handles and its uploaded picture.
+
+    The mutation the delete route and the hire route's roll-back share. The
+    CALLER holds the config lock and has already decided the crew may go (it
+    exists, it is not the default). The row is removed inside a locked
+    read-modify-write that re-checks both, so a concurrent promotion or removal
+    raises ``UnknownMemoryStore`` instead of deleting the wrong thing. A V2
+    private store owned by the crew is archived under the ordinary retirement
+    marker -- never unlinked -- in the same hold, and the archive is rolled back
+    if the config write then fails, so config and store never disagree.
+    """
+    created_archive = False
+    retired_store = ""
+
+    @memory_store_namespace_lock()
+    def _delete_member() -> tuple[str, bool]:
+        nonlocal created_archive, retired_store
+
+        def mutate(doc: dict) -> dict:
+            nonlocal created_archive, retired_store
+            agents = coerce_dict_section(doc, "agents")
+            if name not in agents:
+                raise UnknownMemoryStore(f"Crew Member {name!r} was removed concurrently")
+            agent_section = doc.get("agent")
+            if doc.get("default_agent") == name or (
+                isinstance(agent_section, dict) and agent_section.get("default_agent") == name
+            ):
+                raise UnknownMemoryStore(f"Crew Member {name!r} became the default")
+            entry = agents[name]
+            stores = coerce_dict_section(doc, "memory_stores")
+            store_name = entry.get("memory_store", "") if isinstance(entry, dict) else ""
+            record = stores.get(store_name)
+            if isinstance(record, dict) and record.get("memory_version") == 2:
+                if record.get("owner_member") != name:
+                    raise UnknownMemoryStore(
+                        f"memory store {store_name!r} ownership changed concurrently"
+                    )
+                created_archive = archive_member_memory_store(store_name, name)
+                retired_store = store_name
+            del agents[name]
+            return doc
+
+        try:
+            update_config_locked(mutate=mutate)
+        except BaseException:
+            if created_archive:
+                try:
+                    rollback_member_memory_archive_if_active(retired_store, name)
+                except Exception:
+                    logger.error(
+                        "failed to roll back member memory retirement for %s",
+                        retired_store,
+                        exc_info=True,
+                    )
+            raise
+        return retired_store, created_archive
+
+    retired_store, _created_archive = await _drained_to_thread(_delete_member)
+    if retired_store:
+        from kiro_crew.context import release_cached_memory_store
+
+        await _drained_to_thread(release_cached_memory_store, retired_store)
+        if (state := request.app.get("state")) is not None:
+            from kiro_crew.dashboard.handlers._shared import release_markdown_memory_store
+
+            await release_markdown_memory_store(state, retired_store)
+    # The crew is gone; its uploaded picture must not outlive it. Inside
+    # the same lock so the cleanup cannot run AFTER a concurrent
+    # same-name recreation has already uploaded and committed a new
+    # picture under the same digest stem.
+    await _drained_to_thread(_remove_avatar_files, name)
 
 
 # ── Per-crew uploaded avatars ────────────────────────────────────────

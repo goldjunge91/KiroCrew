@@ -71,6 +71,7 @@ const mockApi = vi.hoisted(() => ({
   kirocrewConfig: vi.fn(),
   createWorkspace: vi.fn(),
   createKirocrewAgent: vi.fn(),
+  hireMember: vi.fn(),
   updateKirocrewAgent: vi.fn(),
   deleteKirocrewAgent: vi.fn(),
   uploadCrewAvatar: vi.fn(),
@@ -90,7 +91,7 @@ const mockApi = vi.hoisted(() => ({
 
 vi.mock('../api/client', () => ({ api: mockApi }))
 
-import KiroCrewAgentsPage from '../pages/KiroCrewAgentsPage'
+import KiroCrewAgentsPage, { freeMemberName } from '../pages/KiroCrewAgentsPage'
 import CrewAvatar, { hasAvatarOverride, seededTraits } from '../components/CrewAvatar'
 import { BRAND_PURPLE } from '../lib/kiroGhostAvatar'
 
@@ -170,6 +171,7 @@ beforeEach(() => {
   // The mutation hooks read `.error` off the resolved body, so an undefined
   // resolution (a bare vi.fn()) would throw inside onSuccess.
   mockApi.createKirocrewAgent.mockResolvedValue({})
+  mockApi.hireMember.mockResolvedValue({ ok: true, id: 'staging', name: 'staging', display_name: 'staging', copied: true })
   mockApi.updateKirocrewAgent.mockResolvedValue({})
   mockApi.deleteKirocrewAgent.mockResolvedValue({})
   mockApi.setDefaultAgent.mockResolvedValue({})
@@ -1343,14 +1345,21 @@ describe('avatar editor entry — discoverability (issue #9103)', () => {
     // The primary action names its object in the roster's words.
     expect(within(sheet).queryByRole('button', { name: 'Create' })).toBeNull()
     fireEvent.click(within(sheet).getByRole('button', { name: 'Create member' }))
-    await waitFor(() => expect(mockApi.createKirocrewAgent).toHaveBeenCalled())
-    // Exact name in `?member=` — MembersPage resolves by name, not slug.
+    // The roster's create is a HIRE: the row plus a member-owned copy of the
+    // chosen template, in one server call — never the plain crew create.
+    await waitFor(() => expect(mockApi.hireMember).toHaveBeenCalled())
+    expect(mockApi.createKirocrewAgent).not.toHaveBeenCalled()
+    expect(mockApi.hireMember.mock.calls[0][0]).toMatchObject({
+      display_name: 'staging',
+      source: { kind: 'local', agent: 'oncall-agent' },
+    })
+    // The minted id in `?member=` — MembersPage resolves by id, not slug.
     await waitFor(() => expect(screen.getByTestId('location-pathname')).toHaveTextContent('/members'))
     expect(screen.getByTestId('location-search')).toHaveTextContent(/^\?member=staging$/)
   })
 
   it('a duplicate name from the Members roster is refused in the form\'s own word', async () => {
-    mockApi.createKirocrewAgent.mockRejectedValueOnce(new ApiError(409, "Agent 'staging' already exists", '{"error":"Agent \'staging\' already exists"}'))
+    mockApi.hireMember.mockRejectedValueOnce(new ApiError(409, "Agent 'staging' already exists", '{"error":"Agent \'staging\' already exists"}'))
     renderPage('/capabilities?tab=crews&new=1&from=members')
     const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
     const user = userEvent.setup()
@@ -1470,7 +1479,7 @@ describe('crew identity — id vs display name (wrapper step 1)', () => {
   it('a create from the Members roster lands on the MINTED id, not the typed text', async () => {
     // "case competition" — the incident. The server mints `case-competition`
     // and keeps the typed string as the display name.
-    mockApi.createKirocrewAgent.mockResolvedValue({ ok: true, name: 'case-competition', id: 'case-competition', display_name: 'case competition' })
+    mockApi.hireMember.mockResolvedValue({ ok: true, id: 'case-competition', kiro_agent: 'case-competition' })
     renderPage('/capabilities?tab=crews&new=1&from=members')
     const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
     const user = userEvent.setup()
@@ -1480,9 +1489,121 @@ describe('crew identity — id vs display name (wrapper step 1)', () => {
     fireEvent.keyDown(template, { key: 'ArrowDown' })
     fireEvent.click(await screen.findByRole('option', { name: 'oncall-agent' }))
     fireEvent.click(within(sheet).getByRole('button', { name: 'Create member' }))
-    await waitFor(() => expect(mockApi.createKirocrewAgent).toHaveBeenCalled())
-    expect(mockApi.createKirocrewAgent.mock.calls[0][0]).toMatchObject({ name: 'case competition', role: 'Judge' })
+    await waitFor(() => expect(mockApi.hireMember).toHaveBeenCalled())
+    expect(mockApi.hireMember.mock.calls[0][0]).toMatchObject({ display_name: 'case competition', role: 'Judge', source: { kind: 'local', agent: 'oncall-agent' } })
     await waitFor(() => expect(screen.getByTestId('location-pathname')).toHaveTextContent('/members'))
     expect(screen.getByTestId('location-search')).toHaveTextContent(/^\?member=case-competition$/)
+  })
+})
+
+describe('freeMemberName — the pre-fill that will not collide', () => {
+  it('steps past taken ids with candidates that are their own minted id', () => {
+    expect(freeMemberName('reviewer', ['default'])).toBe('reviewer')
+    expect(freeMemberName('reviewer', ['reviewer'])).toBe('reviewer-2')
+    expect(freeMemberName('reviewer', ['reviewer', 'reviewer-2'])).toBe('reviewer-3')
+  })
+
+  it('shortens the stem so a suffixed candidate stays inside the id length cap', () => {
+    // A 63-char taken name: `<name>-2` would be 65 chars, which the server cuts
+    // back to 64 — onto the taken id — and answers 409. The stem gives way instead.
+    const long = 'x'.repeat(63)
+    const next = freeMemberName(long, [long])
+    expect(next.length).toBeLessThanOrEqual(64)
+    expect(next).toBe('x'.repeat(62) + '-2')
+    // A stem that would end in a separator after the cut loses it.
+    const dashy = 'y'.repeat(61) + '-z'
+    expect(freeMemberName(dashy, [dashy])).toBe('y'.repeat(61) + '-2')
+  })
+})
+
+describe('hire from the Members roster — name your colleague', () => {
+  it('pre-fills an empty name from the chosen template and lets the user keep or replace it', async () => {
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    expect(within(sheet).getByTestId('copy-on-hire-note')).toBeInTheDocument()
+    const nameInput = within(sheet).getByPlaceholderText('e.g. oncall') as HTMLInputElement
+    expect(nameInput.value).toBe('')
+    const template = within(sheet).getByRole('combobox', { name: 'Agent Template' })
+    fireEvent.keyDown(template, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'oncall-agent' }))
+    // Skippable: the template's name is the proposal.
+    expect(nameInput.value).toBe('oncall-agent')
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Create member' }))
+    await waitFor(() => expect(mockApi.hireMember).toHaveBeenCalled())
+    expect(mockApi.hireMember.mock.calls[0][0]).toMatchObject({ display_name: 'oncall-agent', source: { kind: 'local', agent: 'oncall-agent' } })
+  })
+
+  it('pre-fills a FREE name when a member already holds the template name', async () => {
+    // Hiring a second member from one template is the headline case; seeding
+    // the taken name would only hand the user the 409 after submit.
+    mockApi.kirocrewAgents.mockResolvedValue({
+      agents: [DEFAULT_CREW, OTHER_CREW, { ...OTHER_CREW, name: 'oncall-agent', display_name: 'oncall-agent' }],
+      default_agent: 'kirocrew',
+    })
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    const nameInput = within(sheet).getByPlaceholderText('e.g. oncall') as HTMLInputElement
+    const template = within(sheet).getByRole('combobox', { name: 'Agent Template' })
+    fireEvent.keyDown(template, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'oncall-agent' }))
+    expect(nameInput.value).toBe('oncall-agent-2')
+  })
+
+  it('the copy note sits under the template dropdown and says what a copy means', async () => {
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    const note = within(sheet).getByTestId('copy-on-hire-note')
+    expect(note).toHaveTextContent('This member gets its own copy of the template — edits to the member never change the template.')
+    // Inside the template field's own block (right under the dropdown), not
+    // after the Workspace field where the reader has moved on.
+    const template = within(sheet).getByRole('combobox', { name: 'Agent Template' })
+    const workspace = within(sheet).getByRole('combobox', { name: 'Workspace' })
+    expect(template.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(note.compareDocumentPosition(workspace) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('re-seeds on a template re-pick while the field still holds the seed, never a typed name', async () => {
+    mockApi.agentsInstalled.mockResolvedValue([{ name: 'oncall-agent' }, { name: 'kirocrew' }, { name: 'reviewer' }])
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    const nameInput = within(sheet).getByPlaceholderText('e.g. oncall') as HTMLInputElement
+    const template = within(sheet).getByRole('combobox', { name: 'Agent Template' })
+    fireEvent.keyDown(template, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'oncall-agent' }))
+    expect(nameInput.value).toBe('oncall-agent')
+    // Switching templates with the seed untouched: the seed follows the pick —
+    // a stale seed would mint a permanent id from the wrong template's name.
+    fireEvent.keyDown(template, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'reviewer' }))
+    expect(nameInput.value).toBe('reviewer')
+    // A name typed over the seed is the user's; a further re-pick keeps it.
+    fireEvent.change(nameInput, { target: { value: 'Checkout triage' } })
+    fireEvent.keyDown(template, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'oncall-agent' }))
+    expect(nameInput.value).toBe('Checkout triage')
+  })
+
+  it('never overwrites a name the user typed first', async () => {
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    const user = userEvent.setup()
+    await user.type(within(sheet).getByPlaceholderText('e.g. oncall'), 'Checkout triage')
+    const template = within(sheet).getByRole('combobox', { name: 'Agent Template' })
+    fireEvent.keyDown(template, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'oncall-agent' }))
+    expect((within(sheet).getByPlaceholderText('e.g. oncall') as HTMLInputElement).value).toBe('Checkout triage')
+  })
+
+  it("the crew manager's own New crew stays a plain create with no copy note", async () => {
+    await renderRoster()
+    const sheet = await openCreate()
+    expect(within(sheet).queryByTestId('copy-on-hire-note')).toBeNull()
+    fireEvent.change(within(sheet).getByPlaceholderText('e.g. oncall'), { target: { value: 'plain' } })
+    const template = within(sheet).getByRole('combobox', { name: 'Agent Template' })
+    fireEvent.keyDown(template, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'oncall-agent' }))
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Create' }))
+    await waitFor(() => expect(mockApi.createKirocrewAgent).toHaveBeenCalled())
+    expect(mockApi.hireMember).not.toHaveBeenCalled()
   })
 })

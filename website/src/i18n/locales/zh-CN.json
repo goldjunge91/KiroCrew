@@ -10640,6 +10640,7 @@
       "test_failed_for": "{{name}} 测试失败"
     },
     "kiroCrewAgentsPage": {
+      "copy_on_hire_note": "该成员会获得模板的独立副本——对成员的修改不会改动模板。",
       "name_is_display_name_hint": "你对这位成员的称呼。{{productName}} 会据此生成一个永久 ID。",
       "display_name": "显示名称",
       "display_name_hint": "重命名只改变显示标签；ID {{id}} 保持不变，因此使用该 ID 的链接、计划任务和 webhook 继续有效。",
@@ -14501,7 +14502,8 @@
       "filter_source_builtin_description": "{{productName}} 自带的成员",
       "filter_source_package_description": "由能力安装包安装的成员",
       "member_count_filtered": "显示 {{shown}} / {{count}} 位成员",
-      "setup_in_crew_manager": "设置私有记忆"
+      "setup_in_crew_manager": "设置私有记忆",
+      "own_copy_of": "{{template}}——自定义副本"
     }
   },
   "privacyDisclosure": {
