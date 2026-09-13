@@ -39,6 +39,114 @@ Missing history must never silently turn a private topic into Global memory.
 | `website/src/components/crew/crewEditorSections.ts` | The crew editor's pane registry, including the Routing pane that edits `triggers` |
 | `website/src/components/CrewWakeSection.tsx` | "What wakes this agent" — schedules, deliberately distinct from `triggers` |
 
+## Owner-reviewed capability inheritance
+
+`agent_capabilities.py` resolves one verified Parent and explicit per-item
+`set`, `remove` and `inherit` intent. The owner-only GET, POST preview and PUT
+routes at `/api/agents/{name}/capabilities` use schema version 1. Preview ends
+in `/preview`; PUT requires its opaque preview token and the GET revision.
+Unknown fields, null sets, stale sources and ambiguous names are refused.
+
+Enrollment is explicit. Shared members follow their selected Parent; a legacy
+private snapshot starts with every existing row local and every absent Parent
+row removed. Restoring one row leaves all other overrides intact. MCP transport
+replacement is whole-value; autoApprove is separate. Skills preserve manual
+resources and cannot change tool or approval lists. An exclusion still covered
+by a wildcard or another approval list is refused instead of claimed effective.
+Ordinary upstream changes reconcile through the same resolver. New capabilities,
+transport changes and broader approvals stay pending owner acceptance. Local
+conflicts retain their usable values: accepting a Parent row moves only the
+accepted Parent baseline, an explicit local override on that row keeps applying
+on top of it, and an `inherit` or restore on that row is what adopts the
+accepted Parent value. Selected Parent rows can be accepted for
+several already-enrolled members of the same exact Parent in one request.
+
+Each owner save writes new private spec identities and switches all selected
+bindings through one config-delta publication. Failed config publication keeps
+the prior valid bindings and specs; staged definitions remain private. Preview
+values redact credential containers. The existing governance sanitizer still
+runs at publication. Withheld shortcuts become tombstones, so a later policy
+relaxation does not resurrect them automatically.
+
+`prepare_member_capabilities(member, project_dir)` verifies the saved spec and
+Parent identity without claiming that a provider loaded it. API runtime state
+remains pending or unverified until runtime integration supplies observations.
+The existing fork refresh delegates enrolled definitions to this resolver.
+Legacy PATCH and direct rebind refuse an enrolled definition rather than
+bypassing its intent. The existing whole-reset button explicitly restores the
+verified current Parent through the capability transaction. Publish flattens
+only the saved valid snapshot, without accepting pending Parent expansions or
+exporting inheritance metadata. Publish records its member, source and target
+snapshot identities in the existing sidecar before creating the destination or
+committing the binding. The destination stays private until a second
+config-first transaction verifies its binding, ownership, bytes and current
+governance and clears only the temporary lineage. A failed final write returns
+the committed template with `warning: publish_incomplete`, matching legacy
+publish behavior. Retrying the same name completes that transition, including
+after restart or a lost response; changed source/target bytes, a newer binding
+or foreign ownership refuse without overwriting anything. Completed receipts
+remain for idempotent retries and never enter the shared agent JSON.
+
+Native permission policies that exactly match
+the existing allowedTools derivation follow owner approval edits. Custom
+permission policies and alternate toolsSettings shortcuts require a separate
+review and are refused rather than silently bypassed. Cleanup of superseded
+private generations is not implemented by this backend checkpoint, and no
+generation is deleted today. A future cleanup must retain every generation that
+a member binding names, that a live session's `LoadedCapabilities` stamp names,
+that a `CapabilityPreparation` returned by `prepare_runtime` still references
+between preparation and the loaded stamp, that a persisted resume record could
+lead back to, or that a retained publish receipt names as source or target.
+Because a preparation exists before any stamp and holds no registry entry, the
+three visible references (binding, stamp, receipt) do not prove a generation
+unreferenced. Deletion therefore requires a shared lock or explicit allocation
+lease taken by the reconciliation seam that mints generations, plus an audit of
+persisted resume references, and it fails closed: a generation whose absence of
+references cannot be proven is kept. Binding
+updates preserve config.local member overrides and write a narrow delta in the
+active layer under base-then-overlay locks. A batch spanning both layers uses
+one atomic overlay delta. Enrollment preserves absent fields, null prompt/model
+values, custom hooks/settings and the original includeMcpJson choice. Removing
+capabilities while provider-global MCP inclusion remains enabled is refused as
+unrepresentable; enrollment alone never silently disables that existing source.
+
+Parent selection reuses `agent_spec_path` with an explicit scope directory.
+Unrelated malformed files are skipped; duplicate names, a broken exact-name
+project claim and a changed pinned source still refuse resolution. Safe response
+projection retains arrays and maps and masks credential values. The
+`agent_capabilities.py` response boundary is registered in the security posture
+redaction inventory, so the omission gate checks it with the other outputs. MCP `set`
+accepts `retain_paths`, RFC6901 pointers into the complete replacement value.
+Each pointer must address exactly `[REDACTED]` and the same redacted scalar leaf
+in the current member transport. Empty/root, malformed, overlapping, duplicate
+and out-of-range pointers refuse the whole request; any unretained placeholder
+also refuses. Omitted fields are removed, not deep-merged. Retained bytes stay
+server-side and are covered by preview/revision checks. MCP rows carry an
+explicit `managed` flag; absent prompt/model rows remain editable.
+
+Owned Parents retain the existing dynamic command, hooks and data-home refresh.
+That pass cannot add omitted servers or tools and preserves local prompt/model
+and resource choices. App namespace transports require a current enabled app's
+exact declaration and use its authoritative transport. Safe ordinary Parent
+fields (description, welcomeMessage and keyboardShortcut) follow updates; legacy
+snapshots retain their explicit local baseline for these fields.
+
+Reconciliation publishes changed bytes under a new private name and atomically
+switches the member binding, leaving the old runtime's file unchanged. A no-op
+keeps its generation. Failed writes retain pending intent; retry completes it
+without modifying an earlier generation. Already-published pending receipts can
+finish without another generation. Public revisions are random version ids;
+source-content digests remain internal. The prepare seam refuses pending work
+and never reports provider application from a successful save. Enrollment
+intent lives in the shared `agent_model_state.json`, so an unreadable sidecar
+cannot prove any declared member unenrolled: `prepare_runtime` refuses every
+crew-member cold start with the closed code `capability_state_unreadable` (the
+capabilities API answers `503 capabilities_unavailable`) rather than inferring
+legacy mode, and a session that resolves to no crew never reads the sidecar.
+An explicit `crew_agent` claim naming no `config.agents` entry refuses with
+`capability_member_missing`; an implicit name outside the crew namespace
+resolves to no crew and is unaffected.
+
 ## Crew records and binding
 
 A crew lives only in `config.json` under `agents.<name>`. It is not a kiro-cli

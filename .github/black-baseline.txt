@@ -361,7 +361,6 @@ test/test_api_server.py
 test/test_api_shutdown.py
 test/test_app_backend.py
 test/test_app_backend_stale_reap.py
-test/test_app_bridges.py
 test/test_app_cli.py
 test/test_app_config_self_heal.py
 test/test_app_context.py
@@ -910,7 +909,6 @@ test/test_session_memory.py
 test/test_session_more_coverage.py
 test/test_session_mtime_ordering.py
 test/test_session_pid_sig.py
-test/test_session_pool.py
 test/test_session_rss.py
 test/test_session_sharing.py
 test/test_session_spend_identity.py

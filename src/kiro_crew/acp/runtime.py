@@ -3388,6 +3388,7 @@ class AcpRuntime:
                     set_mode_params(session_id, mode_agent),
                     timeout=budget,
                 )
+                handle.active_agent = mode_agent
             except Exception:
                 await self.terminate_session(session_id)
                 raise
@@ -3679,6 +3680,7 @@ class AcpRuntime:
                     set_mode_params(resume_sid, agent),
                     timeout=budget,
                 )
+                handle.active_agent = agent
             except Exception:
                 await self.terminate_session(resume_sid)
                 raise

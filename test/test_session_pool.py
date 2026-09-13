@@ -78,7 +78,9 @@ def _make_manager(pool_size: int = 2, pool_agent: str = "kirocrew", pool_ttl_sec
 
 class TestPrivateMemoryAllocation:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("key", ["cron:review", "subagent:review", "memory-consolidation:review:unique"])
+    @pytest.mark.parametrize(
+        "key", ["cron:review", "subagent:review", "memory-consolidation:review:unique"]
+    )
     async def test_private_session_bypasses_global_pool_and_reuses_own_client(self, key):
         mgr, factory = _make_manager()
         private = _make_provider()
@@ -87,7 +89,10 @@ class TestPrivateMemoryAllocation:
         factory.return_value = private
         mgr._drain_and_claim = AsyncMock()
         mgr._ensure_cleanup_task = MagicMock()
-        with patch("kiro_crew.session_allocation.private_memory_store_for_session", return_value="member-review"):
+        with patch(
+            "kiro_crew.session_allocation.private_memory_store_for_session",
+            return_value="member-review",
+        ):
             provider, is_new, _ = await mgr.get_or_create(key, agent="kirocrew")
             assert provider is private and is_new
             mgr.release(key)
@@ -101,10 +106,15 @@ class TestPrivateMemoryAllocation:
     async def test_private_binding_refuses_a_preexisting_global_client(self):
         mgr, _ = _make_manager(pool_size=0)
         mgr._ensure_cleanup_task = MagicMock()
-        with patch("kiro_crew.session_allocation.private_memory_store_for_session", return_value=""):
+        with patch(
+            "kiro_crew.session_allocation.private_memory_store_for_session", return_value=""
+        ):
             old, _, _ = await mgr.get_or_create("cron:review")
             mgr.release("cron:review")
-        with patch("kiro_crew.session_allocation.private_memory_store_for_session", return_value="member-review"):
+        with patch(
+            "kiro_crew.session_allocation.private_memory_store_for_session",
+            return_value="member-review",
+        ):
             with pytest.raises(RuntimeError, match="isolation does not match"):
                 await mgr.get_or_create("cron:review")
         assert mgr._sessions["cron:review"].provider is old
@@ -116,7 +126,10 @@ class TestPrivateMemoryAllocation:
         old = _make_provider()
         factory.side_effect = None
         factory.return_value = old
-        with patch("kiro_crew.session_allocation.private_memory_store_for_session", return_value="member-review"):
+        with patch(
+            "kiro_crew.session_allocation.private_memory_store_for_session",
+            return_value="member-review",
+        ):
             with pytest.raises(RuntimeError, match="Provider does not match"):
                 await mgr.get_or_create("cron:review")
         old.start.assert_not_awaited()
@@ -128,17 +141,27 @@ class TestPrivateMemoryAllocation:
         expected = (_make_provider(), True, False)
         mgr.get_or_create = AsyncMock(return_value=expected)
         mgr._get_or_bootstrap_run_runtime = AsyncMock()
-        with patch("kiro_crew.session_allocation.private_memory_store_for_session", side_effect=lambda key: "member-review" if key == "task:child" else parent_store):
-            result = await mgr.open_task_session("task:parent", "task:child", agent="review", cwd="/work")
+        with patch(
+            "kiro_crew.session_allocation.private_memory_store_for_session",
+            side_effect=lambda key: "member-review" if key == "task:child" else parent_store,
+        ):
+            result = await mgr.open_task_session(
+                "task:parent", "task:child", agent="review", cwd="/work"
+            )
         assert result is expected
-        mgr.get_or_create.assert_awaited_once_with("task:child", agent="review", approval_policy="", cwd="/work")
+        mgr.get_or_create.assert_awaited_once_with(
+            "task:child", agent="review", approval_policy="", cwd="/work"
+        )
         mgr._get_or_bootstrap_run_runtime.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_private_parent_cannot_downgrade_to_an_unbound_task_child(self):
         mgr, factory = _make_manager()
         mgr._get_or_bootstrap_run_runtime = AsyncMock()
-        with patch("kiro_crew.session_allocation.private_memory_store_for_session", side_effect=lambda key: "member-review" if key == "task:parent" else ""):
+        with patch(
+            "kiro_crew.session_allocation.private_memory_store_for_session",
+            side_effect=lambda key: "member-review" if key == "task:parent" else "",
+        ):
             with pytest.raises(RuntimeError, match="trusted child memory binding"):
                 await mgr.open_task_session("task:parent", "task:child")
         factory.assert_not_called()
@@ -147,7 +170,10 @@ class TestPrivateMemoryAllocation:
     @pytest.mark.asyncio
     async def test_private_parent_cannot_supply_a_companion_runtime(self):
         mgr, _ = _make_manager()
-        with patch("kiro_crew.session_allocation.private_memory_store_for_session", return_value="member-review"):
+        with patch(
+            "kiro_crew.session_allocation.private_memory_store_for_session",
+            return_value="member-review",
+        ):
             with pytest.raises(RuntimeError, match="dedicated runtime"):
                 await mgr.get_subagent_runtime("parent")
             with pytest.raises(RuntimeError, match="dedicated runtime"):
@@ -451,9 +477,21 @@ class TestGetOrCreatePoolIntegration:
         """The claiming session's crew_agent kwarg reaches rekey so the pooled
         handle's watchdog windows rebind to the claiming crew — the identity
         travels with the session, not the pool key."""
+        from kiro_crew.config.loader import KiroCrewAgentConfig, KiroCrewConfig
         from kiro_crew.providers.acp import AcpProvider
 
+        def declared_legacy_member():
+            cfg = KiroCrewConfig.load()
+            # This tests a legacy pooled runtime, not private V2 allocation.
+            cfg.agents["pr-reviewer"] = KiroCrewAgentConfig(
+                kiro_agent="kirocrew", memory_store="default"
+            )
+            cfg.save()
+            return cfg.agents
+
+        members = await asyncio.to_thread(declared_legacy_member)
         mgr, factory = _make_manager(pool_agent="kirocrew")
+        mgr._cfg.agents = members
         pooled = _make_provider()
         pooled.__class__ = AcpProvider
         pooled.client = MagicMock()
@@ -471,6 +509,36 @@ class TestGetOrCreatePoolIntegration:
         assert args == ("test-key", "ch-1")
         assert kwargs["crew_agent"] == "pr-reviewer"
         assert isinstance(kwargs["watchdog"], WatchdogSettings)
+
+    def test_capability_preparation_refuses_an_undeclared_canonical_member(self):
+        from kiro_crew.session_capabilities import CapabilityStartupError, prepare_runtime
+
+        with pytest.raises(CapabilityStartupError, match="capability_member_missing"):
+            prepare_runtime("kirocrew", "undeclared-crew", None)
+
+    def test_corrupt_sidecar_refuses_declared_members_with_a_closed_code_only(self):
+        """Enrollment lives in the one shared sidecar, so an unreadable file
+        cannot prove a declared member is unenrolled: every declared member
+        refuses with the closed ``capability_state_unreadable`` code, never a
+        raw parser error, while a session that resolves to no crew never reads
+        the sidecar and still starts."""
+        from kiro_crew import agent_state
+        from kiro_crew.config.loader import KiroCrewAgentConfig, KiroCrewConfig
+        from kiro_crew.session_capabilities import CapabilityStartupError, prepare_runtime
+
+        cfg = KiroCrewConfig.load()
+        cfg.agents["legacy-member"] = KiroCrewAgentConfig(
+            kiro_agent="kirocrew", memory_store="default"
+        )
+        cfg.save()
+        path = agent_state._state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{", encoding="utf-8")
+
+        with pytest.raises(CapabilityStartupError, match="capability_state_unreadable"):
+            prepare_runtime("kirocrew", "legacy-member", None)
+        assert prepare_runtime("kirocrew", "", None).member == ""
+        assert path.read_text(encoding="utf-8") == "{"
 
     @pytest.mark.asyncio
     async def test_skips_pool_when_resume_sid_set(self):
@@ -1338,8 +1406,9 @@ class TestDefaultProjectDir:
     def test_returns_empty_when_sensitive(self, tmp_path):
         ws = tmp_path / "workspace"
         ws.mkdir()
-        with patch("kiro_crew.config.loader.workspace_dir_for", return_value=ws), patch(
-            "kiro_crew.security.is_sensitive_path", return_value=True
+        with (
+            patch("kiro_crew.config.loader.workspace_dir_for", return_value=ws),
+            patch("kiro_crew.security.is_sensitive_path", return_value=True),
         ):
             from kiro_crew.config.loader import default_project_dir
 
@@ -1454,6 +1523,7 @@ class TestPoolCwd:
 # Discard reaping — a discarded provider's OS process must actually die
 # ---------------------------------------------------------------------------
 
+
 class TestDiscardReaping:
     """A discard removes the provider from all pool bookkeeping, so the
     discard path is the last chance to signal the process. These tests pin
@@ -1540,10 +1610,10 @@ class TestDiscardReaping:
         # test had already bounded, to 0.05s. A dedicated executor keeps the
         # assertion about escalation ordering instead of about the shared pool's
         # spare capacity.
-        with ThreadPoolExecutor(max_workers=1) as private_executor, patch(
-            "kiro_crew.session._sync_kill_provider"
-        ) as mock_kill, patch(
-            "kiro_crew.session.subprocess_executor", return_value=private_executor
+        with (
+            ThreadPoolExecutor(max_workers=1) as private_executor,
+            patch("kiro_crew.session._sync_kill_provider") as mock_kill,
+            patch("kiro_crew.session.subprocess_executor", return_value=private_executor),
         ):
             pooled = await asyncio.wait_for(mgr._drain_and_claim("kirocrew"), timeout=5)
 
@@ -1698,14 +1768,16 @@ class TestDiscardReaping:
             done.set()
 
         provider = _make_provider()
-        with patch("kiro_crew.session.subprocess_executor", return_value=dead_executor), \
-                patch("kiro_crew.session._sync_kill_provider", side_effect=_record_thread):
+        with (
+            patch("kiro_crew.session.subprocess_executor", return_value=dead_executor),
+            patch("kiro_crew.session._sync_kill_provider", side_effect=_record_thread),
+        ):
             SessionManager._dispatch_hard_kill(provider)
 
         assert done.wait(timeout=5), "fallback kill was never dispatched"
-        assert called_on[0] is not threading.main_thread(), (
-            "fallback kill ran inline on the event-loop thread"
-        )
+        assert (
+            called_on[0] is not threading.main_thread()
+        ), "fallback kill ran inline on the event-loop thread"
 
     @pytest.mark.asyncio
     async def test_one_failing_hard_kill_does_not_abort_batch_discard(self):
@@ -1730,7 +1802,7 @@ class TestDiscardReaping:
         with patch("kiro_crew.session._sync_kill_provider", side_effect=_kill):
             await mgr._sweep_warm_pool_once()
 
-        assert first in attempted and second in attempted, (
-            "a failing hard kill aborted the batch and leaked later providers"
-        )
+        assert (
+            first in attempted and second in attempted
+        ), "a failing hard kill aborted the batch and leaked later providers"
         assert mgr._warm_pool.qsize() == 0

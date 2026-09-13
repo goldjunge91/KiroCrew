@@ -1182,6 +1182,58 @@ Returns `~/.kiro/crew/config.json` (or `$KIROCREW_HOME/config.json` if overridde
 
 ### Agent Bookkeeping Sidecar (`agent_model_state.json`)
 
+A `publish` receipt on a destination entry records the owning member, original
+private template and internal source/target digests plus the pinned Parent
+identity. It is saved before binding publication and retained after completion
+so a same-name retry can distinguish its own publish from an occupied name.
+Finalization removes only `private_to` and `forked_from`; model bookkeeping and
+the receipt survive. Receipts contain no transport bodies and never appear in
+agent specs or API responses. See [crew-mode](crew-mode.md#owner-reviewed-capability-inheritance).
+
+Explicit capability enrollment adds a `capabilities` object to the private
+agent's existing sidecar entry, never to its harness JSON. It records schema
+version 1, one pinned Parent descriptor, accepted Parent rows, explicit local
+operations, the catalog URI snapshot and the saved materialization digest.
+`pending` means publication has not been verified; `saved` verifies disk state
+only. Neither means a provider loaded that version. Schema-v1 reads require
+all capability section maps and validate accepted row values and persisted
+`set`/`remove` overrides. Present null intent, missing sections and malformed
+rows fail closed; they are never dropped or interpreted as legacy mode. The
+owner API returns its bounded unavailable response without exposing source
+bytes. Known MCP transport fields are checked before accepted or local rows
+can be materialized, including string-list contents, string-valued environment
+and header maps, boolean `disabled`, and positive finite `timeout`. The same
+field validator runs on source transports and editor sets. Source metadata and
+policy-only entries remain intact; native `oauth.oauthScopes` arrays are valid
+in persisted source rows. The editor's narrower request allowlist and managed
+or app transport ownership checks still apply separately. A corrupt persisted
+transport refuses cold allocation before reconciliation can publish a new
+spec or change a member binding. The owner API and resolver contract is
+documented in [crew-mode](crew-mode.md#owner-reviewed-capability-inheritance).
+
+Capability GET, preview and PUT projections mask non-empty native
+`oauth.clientSecret` values regardless of length or recognizable token prefix.
+Known credential copies in the same transport's strings, argument arrays and
+nested metadata are masked too, without changing map/list shapes or rewriting
+unrelated rows. Empty client secrets remain empty. The original secret stays
+on disk; a whole-transport edit retains it only through the existing signed
+preview and revision-bound `retain_paths` pointer `/oauth/clientSecret` paired
+with `[REDACTED]`. A stale revision or a path to a non-masked/non-scalar leaf
+still refuses without writing.
+
+Sidecar reads are capped at 8 MiB and require a single-link regular file.
+Mutators refuse unreadable state instead of replacing it with an empty map.
+The stable sidecar lock refuses non-regular/multiply-linked handles and uses
+no-follow opening where supported. Writes use owner-restricted atomic replace.
+Capability publication takes the config lock, spec lock and sidecar lock in
+that order. Config loading and catalog preparation happen before that hold;
+locked publication rechecks the relevant bindings, sources and intent.
+Base and config.local locks are acquired in that order before the spec and
+sidecar locks. A local member keeps its binding delta in config.local; a
+multi-member batch spanning layers commits one overlay delta atomically.
+Public capability versions are random identifiers tied to the saved internal
+materialization digest, never the digest of secret-bearing source bytes.
+
 KiroCrew tracks two pieces of per-agent state that are **not** part of the
 kiro-cli agent schema: `model_managed` (whether an agent's `model` tracks the
 shipped default or is a frozen user pick) and `cc_model` (a per-agent Claude

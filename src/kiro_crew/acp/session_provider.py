@@ -34,6 +34,7 @@ from kiro_crew.acp.mcp_session_report import McpSessionReport
 from kiro_crew.acp.runtime import AcpRuntime, AcpRuntimeDead, AcpRuntimeError, AcpSessionHandle
 from kiro_crew.acp.session_handle import WatchdogSettings
 from kiro_crew.acp.types import (
+    ACP_BACKEND_KIRO,
     ACP_BACKENDS_COMPACT,
     STOP_REASON_END_TURN,
 )
@@ -420,6 +421,21 @@ class AcpSessionProvider(LLMProvider):
         correct expiry.
         """
         return self._runtime.process_instance
+
+    @property
+    def member_capabilities_supported(self) -> bool:
+        return self._runtime.acp_backend == ACP_BACKEND_KIRO
+
+    @property
+    def loaded_capability_template(self) -> str:
+        if (
+            self.member_capabilities_supported
+            and self._owns_runtime
+            and self._runtime.is_alive()
+            and self._handle.active_agent == self._runtime._agent
+        ):
+            return self._handle.active_agent
+        return ""
 
     @property
     def exit_code(self) -> int | None:

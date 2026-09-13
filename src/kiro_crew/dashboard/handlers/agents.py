@@ -41,6 +41,7 @@ from kiro_crew.agent import (
     install_agent,
     kiro_agents_dir_path,
 )
+from kiro_crew.agent_capabilities import CapabilityError, require_unmanaged_template
 from kiro_crew.agent_discovery import (
     _read_agent_spec,
     clear_list_agents_cache,
@@ -2557,6 +2558,10 @@ def _rebind_crew_locked(
                     raise FileNotFoundError(new_target)
         if entry.get("kiro_agent") == new_target:
             return None
+        try:
+            require_unmanaged_template(entry.get("kiro_agent", ""))
+        except CapabilityError:
+            raise _StaleBinding() from None
         # Checked INSIDE the critical section, like the staleness check: a
         # fork recording lineage after a handler's pre-validation must not
         # slip another crew's private copy into this binding.
@@ -2965,6 +2970,12 @@ async def api_agent_publish(request: web.Request) -> web.Response:
             {"error": f"'{new_name}' is reserved", "code": "template_name_reserved"}, status=400
         )
 
+    from kiro_crew.dashboard.handlers.agent_capabilities import inherited_template_action
+
+    inherited = await inherited_template_action(request, crew, "publish", new_name)
+    if inherited is not None:
+        return inherited
+
     state: DashboardState = request.app["state"]
     async with _get_config_lock():
         agents_dir = kiro_agents_dir_path()
@@ -3293,6 +3304,14 @@ async def api_agent_detail(request: web.Request) -> web.Response:
         try:
             if data.get("name") == name or f.stem == name:
                 if request.method == "PATCH" and patch_body is not None:
+                    try:
+                        await asyncio.to_thread(
+                            require_unmanaged_template, spec_str(data, "name") or name
+                        )
+                    except CapabilityError as exc:
+                        return web.json_response(
+                            {"error": exc.code, "code": exc.code}, status=exc.status
+                        )
                     if "skills" in patch_body:
                         raw_skills = patch_body["skills"]
                         if not isinstance(raw_skills, list) or not all(
@@ -3428,6 +3447,7 @@ async def api_agent_detail(request: web.Request) -> web.Response:
                             # before persisting (same contract as
                             # _write_spec_file and the PUT handler).
                             with agents_spec_lock(f.parent):
+                                require_unmanaged_template(agent_name)
                                 fresh = _read_agent_spec(
                                     f, operation="api_agent_detail", source="dashboard"
                                 )
@@ -3448,6 +3468,10 @@ async def api_agent_detail(request: web.Request) -> web.Response:
 
                         try:
                             await asyncio.to_thread(_locked_overwrite)
+                        except CapabilityError as exc:
+                            return web.json_response(
+                                {"error": exc.code, "code": exc.code}, status=exc.status
+                            )
                         except FileNotFoundError:
                             return web.json_response(
                                 {
@@ -4860,6 +4884,11 @@ async def api_kirocrew_agent_update(request: web.Request) -> web.Response:
                     {"error": model_reason, "code": "invalid_model"}, status=400
                 )
         agent = cfg.agents[name]
+        if "kiro_agent" in body and body["kiro_agent"] != agent.kiro_agent:
+            try:
+                await asyncio.to_thread(require_unmanaged_template, agent.kiro_agent)
+            except CapabilityError as exc:
+                return web.json_response({"error": exc.code, "code": exc.code}, status=exc.status)
         prior_memory_store = agent.memory_store
         if "memory_store" in body and body["memory_store"] != prior_memory_store:
             return web.json_response(
@@ -5794,6 +5823,12 @@ async def api_agent_reset(request: web.Request) -> web.Response:
     crew = body.get("crew") if isinstance(body, dict) else None
     if not isinstance(crew, str) or not crew:
         return web.json_response({"error": "crew is required", "code": "crew_required"}, status=400)
+
+    from kiro_crew.dashboard.handlers.agent_capabilities import inherited_template_action
+
+    inherited = await inherited_template_action(request, crew, "reset")
+    if inherited is not None:
+        return inherited
 
     state: DashboardState = request.app["state"]
     async with _get_config_lock():

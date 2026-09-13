@@ -592,6 +592,16 @@ class AcpProvider(LLMProvider):
         return self._client.backend in host_auth.backends_retired_by_host_logout()
 
     @property
+    def member_capabilities_supported(self) -> bool:
+        return self.is_kiro_backend
+
+    @property
+    def loaded_capability_template(self) -> str:
+        if isinstance(self._client, AcpSessionProvider):
+            return self._client.loaded_capability_template
+        return ""
+
+    @property
     def mcp_config_hot_reload(self) -> bool:
         """True when this provider's process reconciles MCP config edits itself.
 
