@@ -5622,7 +5622,8 @@
         "oncall_ops": "Guardias y operaciones",
         "other": "Otros",
         "productivity": "Productividad",
-        "research_writing": "Investigación y escritura"
+        "research_writing": "Investigación y escritura",
+        "templates": "Plantillas"
       },
       "categoryRail": {
         "add_source": "Añadir origen",
@@ -11077,7 +11078,11 @@
       "uses_global_memory_v1": "Usa la memoria global V1",
       "memory_binding_mismatch": "El almacén de memoria configurado de este miembro pertenece a otro miembro. No se puede usar aquí.",
       "memory_binding_diagnostic": "Revisa la causa en el gateway: {{command}}",
-      "open_crew_manager": "Abrir el gestor de equipos"
+      "open_crew_manager": "Abrir el gestor de equipos",
+      "store_template": "Contratar desde la tienda",
+      "store_template_hint": "Un rol listo para usar de una app instalada. Al elegirlo se rellenan el rol, los disparadores y la plantilla de agente de abajo.",
+      "store_template_none": "Ninguna: contratar desde un archivo de agente",
+      "store_templates_unavailable": "No se pudieron leer las apps instaladas, así que ahora mismo no se ofrecen plantillas de la tienda."
     },
     "knowledge": {
       "detailView": {
@@ -14888,7 +14893,8 @@
       "filter_source_package_description": "Crews instalados por paquetes de capacidades",
       "member_count_filtered": "{{shown}} de {{count}} miembros",
       "setup_in_crew_manager": "Configurar la memoria privada",
-      "own_copy_of": "{{template}} — copia personalizada"
+      "own_copy_of": "{{template}} — copia personalizada",
+      "provenance_store": "Plantilla {{template}} (v{{version}})"
     }
   },
   "privacyDisclosure": {

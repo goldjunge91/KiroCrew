@@ -72,6 +72,7 @@ const mockApi = vi.hoisted(() => ({
   createWorkspace: vi.fn(),
   createKirocrewAgent: vi.fn(),
   hireMember: vi.fn(),
+  listApps: vi.fn(),
   updateKirocrewAgent: vi.fn(),
   deleteKirocrewAgent: vi.fn(),
   uploadCrewAvatar: vi.fn(),
@@ -171,6 +172,7 @@ beforeEach(() => {
   // The mutation hooks read `.error` off the resolved body, so an undefined
   // resolution (a bare vi.fn()) would throw inside onSuccess.
   mockApi.createKirocrewAgent.mockResolvedValue({})
+  mockApi.listApps.mockResolvedValue([])
   mockApi.hireMember.mockResolvedValue({ ok: true, id: 'staging', name: 'staging', display_name: 'staging', copied: true })
   mockApi.updateKirocrewAgent.mockResolvedValue({})
   mockApi.deleteKirocrewAgent.mockResolvedValue({})
@@ -1513,6 +1515,105 @@ describe('freeMemberName — the pre-fill that will not collide', () => {
     // A stem that would end in a separator after the cut loses it.
     const dashy = 'y'.repeat(61) + '-z'
     expect(freeMemberName(dashy, [dashy])).toBe('y'.repeat(61) + '-2')
+  })
+})
+
+const STORE_APP = {
+  name: 'oncall-pack',
+  version: '1.2.0',
+  enabled: true,
+  manifest: {
+    name: 'oncall-pack',
+    version: '1.2.0',
+    displayName: 'Oncall pack',
+    description: 'Oncall roles',
+    author: 'tester',
+    agents: ['agents/triage.json'],
+    crew: { templates: [{ agent: 'agents/triage.json', role: 'Oncall Triage Engineer', triggers: 'incident, prod outage' }] },
+  },
+}
+
+describe('hire from a store template', () => {
+  it('lists templates enabled apps offer; picking one binds, seeds and hires with source kind store', async () => {
+    mockApi.listApps.mockResolvedValue([STORE_APP, { ...STORE_APP, name: 'off', enabled: false }])
+    mockApi.agentsInstalled.mockResolvedValue([...INSTALLED_RESPONSE, { name: 'oncall-pack--triage', source: 'package', filename: 'oncall-pack--triage.json', kirocrew_owned: false }])
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    const picker = await within(sheet).findByRole('combobox', { name: 'Hire from the store' })
+    fireEvent.keyDown(picker, { key: 'ArrowDown' })
+    // Only the ENABLED app's card is offered.
+    expect(await screen.findAllByRole('option', { name: 'Oncall pack · Oncall Triage Engineer' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('option', { name: 'Oncall pack · Oncall Triage Engineer' }))
+    const nameInput = within(sheet).getByPlaceholderText('e.g. oncall') as HTMLInputElement
+    expect(nameInput.value).toBe('triage')
+    expect((within(sheet).getByTestId('crew-role-input') as HTMLInputElement).value).toBe('Oncall Triage Engineer')
+    fireEvent.change(nameInput, { target: { value: 'Checkout triage' } })
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Create member' }))
+    await waitFor(() => expect(mockApi.hireMember).toHaveBeenCalled())
+    expect(mockApi.hireMember.mock.calls[0][0]).toMatchObject({
+      display_name: 'Checkout triage',
+      role: 'Oncall Triage Engineer',
+      triggers: 'incident, prod outage',
+      source: { kind: 'store', app: 'oncall-pack', agent: 'agents/triage.json' },
+    })
+  })
+
+  it('choosing an agent file by hand leaves the store template behind', async () => {
+    mockApi.listApps.mockResolvedValue([STORE_APP])
+    mockApi.agentsInstalled.mockResolvedValue([...INSTALLED_RESPONSE, { name: 'oncall-pack--triage', source: 'package', filename: 'oncall-pack--triage.json', kirocrew_owned: false }])
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    const picker = await within(sheet).findByRole('combobox', { name: 'Hire from the store' })
+    fireEvent.keyDown(picker, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'Oncall pack · Oncall Triage Engineer' }))
+    const template = within(sheet).getByRole('combobox', { name: 'Agent Template' })
+    fireEvent.keyDown(template, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'oncall-agent' }))
+    fireEvent.change(within(sheet).getByPlaceholderText('e.g. oncall'), { target: { value: 'Plain' } })
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Create member' }))
+    await waitFor(() => expect(mockApi.hireMember).toHaveBeenCalled())
+    expect(mockApi.hireMember.mock.calls[0][0]).toMatchObject({ source: { kind: 'local', agent: 'oncall-agent' } })
+  })
+
+  it('switching cards re-seeds a role the user did not touch, and keeps one they typed', async () => {
+    const second = {
+      ...STORE_APP,
+      name: 'scribe-pack',
+      manifest: { ...STORE_APP.manifest, name: 'scribe-pack', displayName: 'Scribe pack', agents: ['agents/scribe.json'], crew: { templates: [{ agent: 'agents/scribe.json', role: 'Incident Scribe', triggers: 'postmortem' }] } },
+    }
+    mockApi.listApps.mockResolvedValue([STORE_APP, second])
+    mockApi.agentsInstalled.mockResolvedValue([...INSTALLED_RESPONSE, { name: 'oncall-pack--triage', source: 'package', filename: 'oncall-pack--triage.json', kirocrew_owned: false }, { name: 'scribe-pack--scribe', source: 'package', filename: 'scribe-pack--scribe.json', kirocrew_owned: false }])
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    const picker = await within(sheet).findByRole('combobox', { name: 'Hire from the store' })
+    const roleInput = within(sheet).getByTestId('crew-role-input') as HTMLInputElement
+    fireEvent.keyDown(picker, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'Oncall pack · Oncall Triage Engineer' }))
+    expect(roleInput.value).toBe('Oncall Triage Engineer')
+    fireEvent.keyDown(picker, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'Scribe pack · Incident Scribe' }))
+    // The seed followed the card.
+    expect(roleInput.value).toBe('Incident Scribe')
+    fireEvent.change(roleInput, { target: { value: 'Night scribe' } })
+    fireEvent.keyDown(picker, { key: 'ArrowDown' })
+    fireEvent.click(await screen.findByRole('option', { name: 'Oncall pack · Oncall Triage Engineer' }))
+    // A role the user typed is theirs.
+    expect(roleInput.value).toBe('Night scribe')
+  })
+
+  it('says so when the installed apps could not be read, instead of hiding the picker', async () => {
+    mockApi.listApps.mockRejectedValue(new Error('boom'))
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    expect(await within(sheet).findByTestId('store-templates-error')).toBeInTheDocument()
+    expect(within(sheet).queryByRole('combobox', { name: 'Hire from the store' })).toBeNull()
+  })
+
+  it('the member form shows no store picker when no installed app offers a template', async () => {
+    renderPage('/capabilities?tab=crews&new=1&from=members')
+    const sheet = await screen.findByRole('dialog', { name: 'Add crew member' })
+    await within(sheet).findByRole('combobox', { name: 'Agent Template' })
+    expect(within(sheet).queryByRole('combobox', { name: 'Hire from the store' })).toBeNull()
   })
 })
 

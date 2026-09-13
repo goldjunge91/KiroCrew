@@ -391,9 +391,7 @@ class CronEntry:
             agent_sequence=[
                 str(a) for a in _list_or_empty("agent_sequence", data.get("agent_sequence"))
             ],
-            env={
-                str(k): str(v) for k, v in _dict_or_empty("env", data.get("env")).items()
-            },
+            env={str(k): str(v) for k, v in _dict_or_empty("env", data.get("env")).items()},
             timezone=_str_or_flagged("timezone", data.get("timezone")),
             skip_dates=[str(d) for d in _list_or_empty("skip_dates", data.get("skip_dates"))],
             folder=_str_or_empty(data.get("folder")),
@@ -983,9 +981,7 @@ class Dependencies:
             # it must degrade to "empty", never crash. Both lines, since the
             # pre-existing `commands` had the identical shape.
             commands=[str(c) for c in (data.get("commands") or [])],
-            optionalCommands=[  # noqa: N815
-                str(c) for c in (data.get("optionalCommands") or [])
-            ],
+            optionalCommands=[str(c) for c in (data.get("optionalCommands") or [])],  # noqa: N815
         )
 
 
@@ -1569,9 +1565,11 @@ class CommandArgument:
             placeholder=str(data.get("placeholder", "")),
             hint=str(data.get("hint", "")),
             kind=str(data.get("kind", "text")),
-            hosts=[str(h).strip().lower() for h in hosts_raw if str(h).strip()]
-            if isinstance(hosts_raw, list)
-            else [],
+            hosts=(
+                [str(h).strip().lower() for h in hosts_raw if str(h).strip()]
+                if isinstance(hosts_raw, list)
+                else []
+            ),
             patternError=str(data.get("patternError", "")),
             saw_pattern="pattern" in data,
             # A `hosts` that is present but not a list would otherwise coerce to the
@@ -1687,9 +1685,7 @@ class CommandContribution:
             # argument declared", which is a DIFFERENT command rather than an invalid
             # one. An explicit ``null`` is treated as absent, matching the host.
             bad_argument=(
-                "argument" in data
-                and arg_raw is not None
-                and not isinstance(arg_raw, dict)
+                "argument" in data and arg_raw is not None and not isinstance(arg_raw, dict)
             ),
         )
 
@@ -1708,14 +1704,12 @@ class CommandContribution:
             # Mirrors `MAX_KEYWORDS` in `contributedCommands.ts`, which drops the overflow
             # -- refused here so the author is told rather than silently trimmed.
             errors.append(
-                f"{where}: {len(self.keywords)} keywords exceeds the limit of "
-                f"{_MAX_KEYWORDS}"
+                f"{where}: {len(self.keywords)} keywords exceeds the limit of " f"{_MAX_KEYWORDS}"
             )
         for kw in self.keywords:
             if _mirrored_len(kw) > _MAX_KEYWORD:
                 errors.append(
-                    f"{where}: keyword exceeds {_MAX_KEYWORD} characters "
-                    f"({_mirrored_len(kw)})"
+                    f"{where}: keyword exceeds {_MAX_KEYWORD} characters " f"({_mirrored_len(kw)})"
                 )
                 break
         if not self.title:
@@ -1726,8 +1720,7 @@ class CommandContribution:
             # the frontend -- the command vanished from the launcher with the app author
             # having seen no error on install, the worst of both validators.
             errors.append(
-                f"{where}: title exceeds {_MAX_TITLE} characters "
-                f"({_mirrored_len(self.title)})"
+                f"{where}: title exceeds {_MAX_TITLE} characters " f"({_mirrored_len(self.title)})"
             )
         if self.subtitle and _mirrored_len(self.subtitle) > _MAX_TITLE:
             # Mirrors the frontend's cap. The subtitle is SEARCHED -- `rankRootRows` runs
@@ -1779,8 +1772,7 @@ class CommandContribution:
                 # The reader is asked for a value the command then ignores -- always a
                 # mistake, and a confusing one, because the command still runs.
                 errors.append(
-                    f"{where}: declares an argument but the prompt never uses "
-                    f"{ARGUMENT_TOKEN}"
+                    f"{where}: declares an argument but the prompt never uses " f"{ARGUMENT_TOKEN}"
                 )
             errors.extend(self._validate_matcher(where))
         return errors
@@ -2117,9 +2109,7 @@ class Contributes:
     #: Counted rather than flagged so the error can say how many vanished. Not
     #: serialized.
     dropped_commands: int = 0
-    sessionControls: list[SessionControlContribution] = field(  # noqa: N815
-        default_factory=list
-    )
+    sessionControls: list[SessionControlContribution] = field(default_factory=list)  # noqa: N815
     #: Whether the manifest's ``sessionControls`` was present but not a list. Same reason
     #: as ``bad_commands``: coercing to ``[]`` reads as a deliberate empty list, so the
     #: declaration would install clean and then never render a chip. Not serialized.
@@ -2173,9 +2163,11 @@ class Contributes:
                 # discarded here is reported as nothing at all — the app installs
                 # clean and the control simply never appears. The placeholder fails
                 # the required-field checks, which is that promised refusal.
-                SessionControlContribution.from_dict(c)
-                if isinstance(c, dict)
-                else SessionControlContribution()
+                (
+                    SessionControlContribution.from_dict(c)
+                    if isinstance(c, dict)
+                    else SessionControlContribution()
+                )
                 for c in raw_controls
             ]
             if isinstance(raw_controls, list)
@@ -2194,8 +2186,7 @@ class Contributes:
             bad_commands="commands" in data and not isinstance(raw, list),
             dropped_commands=sum(1 for c in entries if not isinstance(c, dict)),
             sessionControls=controls,
-            bad_session_controls="sessionControls" in data
-            and not isinstance(raw_controls, list),
+            bad_session_controls="sessionControls" in data and not isinstance(raw_controls, list),
             bad_panel_tabs="panelTabs" in data and not isinstance(tabs_raw, list),
             dropped_panel_tabs=sum(1 for t in tab_entries if not isinstance(t, dict)),
             bad_file_menu_items="fileMenuItems" in data and not isinstance(items_raw, list),
@@ -2311,6 +2302,153 @@ class Contributes:
         return errors
 
 
+#: Bounds on a crew template's job card. `role` and `triggers` are wrapper
+#: fields (member_identity.DISPLAY_NAME_MAX_LEN caps a role on the create route;
+#: the same figure here keeps a template from shipping a role the hire would
+#: refuse). `description` is store prose.
+_MAX_CREW_TEMPLATES_PER_APP = 8
+_MAX_CREW_ROLE = 80
+_MAX_CREW_TRIGGERS = 2000
+_MAX_CREW_DESCRIPTION = 500
+
+
+@dataclass
+class CrewTemplate:
+    """One job posting an app offers: a Custom Agent plus its job card.
+
+    ``agent`` names one of the manifest's ``agents`` paths -- the definition the
+    hire copies into the member's own agent file. The card is what the wrapper
+    row takes at hire: ``role`` (the member's job title, the one required
+    field), ``triggers`` (routing hints the member starts with; an instance
+    setting, so the user edits it afterwards), and ``initial_briefing`` (a
+    Markdown file inside the app, copied ONCE into ``members/<id>/briefing.md``
+    and then the member's own). ``description`` is store prose for the card.
+    """
+
+    agent: str = ""
+    role: str = ""
+    description: str = ""
+    triggers: str = ""
+    initial_briefing: str = ""  # noqa: N815 - manifest spelling
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"agent": self.agent, "role": self.role}
+        if self.description:
+            d["description"] = self.description
+        if self.triggers:
+            d["triggers"] = self.triggers
+        if self.initial_briefing:
+            d["initial_briefing"] = self.initial_briefing
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CrewTemplate:
+        def _text(key: str) -> str:
+            value = data.get(key, "")
+            return value if isinstance(value, str) else ""
+
+        return cls(
+            agent=_text("agent"),
+            role=" ".join(_text("role").split()),
+            description=_text("description"),
+            triggers=_text("triggers"),
+            initial_briefing=_text("initial_briefing"),
+        )
+
+    def validate(self, index: int, agents: list[str], app_root: Path | None) -> list[str]:
+        errors: list[str] = []
+        where = f"crew.templates[{index}]"
+        if not self.agent:
+            errors.append(f"{where}: agent is required (one of the manifest's agents paths)")
+        elif self.agent not in agents:
+            errors.append(
+                f"{where}: agent {self.agent!r} is not one of the manifest's agents paths"
+            )
+        if not self.role:
+            errors.append(f"{where}: role is required")
+        elif len(self.role) > _MAX_CREW_ROLE:
+            errors.append(f"{where}: role exceeds {_MAX_CREW_ROLE} characters")
+        if len(self.triggers) > _MAX_CREW_TRIGGERS:
+            errors.append(f"{where}: triggers exceeds {_MAX_CREW_TRIGGERS} characters")
+        if len(self.description) > _MAX_CREW_DESCRIPTION:
+            errors.append(f"{where}: description exceeds {_MAX_CREW_DESCRIPTION} characters")
+        if self.initial_briefing:
+            if not self.initial_briefing.lower().endswith(".md"):
+                errors.append(f"{where}: initial_briefing must name a Markdown (.md) file")
+            if _path_escapes_app_root(self.initial_briefing, app_root):
+                errors.append(
+                    f"{where}: initial_briefing contains path traversal: "
+                    f"{self.initial_briefing!r}"
+                )
+        return errors
+
+
+@dataclass
+class CrewConfig:
+    """The manifest's ``crew`` section: the templates this app offers for hire.
+
+    A template is a store listing, not a runtime concept: a Custom Agent the app
+    already ships under ``agents`` plus a job card. Typed rather than left to
+    ``extra`` for the same reason ``contributes`` is: a template's ``role``,
+    ``triggers`` and ``initial_briefing`` become a member's wrapper fields and
+    the member's own briefing (prompt-adjacent text), so they have to be
+    CHECKED on every parse, and a template whose ``agent`` names no shipped
+    file must fail install rather than fail the first hire.
+    """
+
+    templates: list[CrewTemplate] = field(default_factory=list)
+    #: ``crew`` present but not an object / ``templates`` present but not a list /
+    #: how many entries of a well-formed list were not objects. Same fail-open
+    #: reasoning as ``Contributes``: coercing quietly would install an app whose
+    #: Templates card never appears, with neither an error nor a listing. Not
+    #: serialized.
+    bad_block: bool = False
+    bad_templates: bool = False
+    dropped_templates: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        if not self.templates:
+            return {}
+        return {"templates": [t.to_dict() for t in self.templates]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CrewConfig:
+        raw = data.get("templates", [])
+        entries = raw if isinstance(raw, list) else []
+        return cls(
+            templates=[CrewTemplate.from_dict(t) for t in entries if isinstance(t, dict)],
+            bad_templates="templates" in data and not isinstance(raw, list),
+            dropped_templates=sum(1 for t in entries if not isinstance(t, dict)),
+        )
+
+    def validate(self, agents: list[str], app_root: Path | None = None) -> list[str]:
+        errors: list[str] = []
+        if self.bad_block:
+            errors.append(
+                "crew must be an object -- a non-object value validates as offering no "
+                "templates and then disappears from the serialized manifest"
+            )
+        if self.bad_templates:
+            errors.append("crew.templates must be an array")
+        if self.dropped_templates:
+            errors.append(
+                f"crew.templates: {self.dropped_templates} entr"
+                f"{'y is' if self.dropped_templates == 1 else 'ies are'} not an object"
+            )
+        if len(self.templates) > _MAX_CREW_TEMPLATES_PER_APP:
+            errors.append(
+                f"crew.templates: at most {_MAX_CREW_TEMPLATES_PER_APP} per app "
+                f"(declared {len(self.templates)})"
+            )
+        seen: set[str] = set()
+        for i, t in enumerate(self.templates):
+            errors.extend(t.validate(i, agents, app_root))
+            if t.agent in seen:
+                errors.append(f"crew.templates: duplicate agent {t.agent!r}")
+            seen.add(t.agent)
+        return errors
+
+
 _KNOWN_FIELDS = frozenset(
     {
         "name",
@@ -2338,6 +2476,7 @@ _KNOWN_FIELDS = frozenset(
         "publishProvider",
         "notifications",
         "contributes",
+        "crew",
     }
 )
 
@@ -2407,6 +2546,9 @@ class AppManifest:
     # ``extra`` is by definition the un-checked bucket. Being a known field is what
     # makes ``validate()`` see it on every parse.
     contributes: Contributes = field(default_factory=Contributes)
+
+    # --- Crew templates (the store listing a crew member is hired from) ---
+    crew: CrewConfig = field(default_factory=CrewConfig)
 
     # --- Discovery ---
     tags: list[str] = field(default_factory=list)
@@ -2531,9 +2673,7 @@ class AppManifest:
                 errors.append(
                     f"session control contribution entryPoint contains path traversal: {ctl.entryPoint!r}"
                 )
-            if ctl.statusPath and not _SESSION_CONTROL_STATUS_PATH_RE.fullmatch(
-                ctl.statusPath
-            ):
+            if ctl.statusPath and not _SESSION_CONTROL_STATUS_PATH_RE.fullmatch(ctl.statusPath):
                 # Refused rather than ignored: a status route the dashboard
                 # declines to call would leave the chip permanently stateless
                 # with nothing saying why.
@@ -2601,6 +2741,7 @@ class AppManifest:
         # prompt/argument agreement, matcher kind, entry paths, and the file-menu
         # surfaces / when-filter grammar.
         errors.extend(self.contributes.validate())
+        errors.extend(self.crew.validate(self.agents, app_root))
 
         # A contributed row's endpoint is checked against the app's OWN namespace here,
         # where the name is known -- refusing it at install is what keeps a declaration
@@ -2688,6 +2829,14 @@ class AppManifest:
             # so rewriting it on a signed app redirects that dispatch while every visible
             # character of the row, and the signature, stay exactly as published.
             body["contributes"] = self.contributes.to_dict()
+        if self.crew.templates:
+            # A template's role, triggers and initial briefing become a hired
+            # member's wrapper fields and its own briefing -- text that reaches
+            # the member's prompt -- so the job card is signed like a cron's
+            # command: the signature is what authenticates the publisher's
+            # posting, not just its agent file. Included only when non-empty so
+            # manifests signed before templates existed keep their payload.
+            body["crew"] = self.crew.to_dict()
         return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     # -----------------------------------------------------------------
@@ -2749,6 +2898,9 @@ class AppManifest:
         contrib_d = self.contributes.to_dict()
         if contrib_d:
             d["contributes"] = contrib_d
+        crew_d = self.crew.to_dict()
+        if crew_d:
+            d["crew"] = crew_d
         if self.tags:
             d["tags"] = self.tags
         if self.jobFamilies:
@@ -2826,6 +2978,13 @@ class AppManifest:
             else Contributes(bad_block=True)
         )
 
+        crew_raw = data.get("crew", {})
+        crew = (
+            CrewConfig.from_dict(crew_raw)
+            if isinstance(crew_raw, dict)
+            else CrewConfig(bad_block=True)
+        )
+
         return cls(
             name=str(data.get("name", "")),
             version=str(data.get("version", "")),
@@ -2854,6 +3013,7 @@ class AppManifest:
             publishProvider=publish_provider,
             notifications=notifications,
             contributes=contributes,
+            crew=crew,
             tags=[str(t) for t in data.get("tags", []) if t],
             jobFamilies=[str(j) for j in data.get("jobFamilies", []) if j],  # noqa: N815
             extra=extra,

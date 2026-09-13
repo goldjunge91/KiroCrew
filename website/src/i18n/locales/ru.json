@@ -5711,7 +5711,8 @@
         "oncall_ops": "Дежурства и эксплуатация",
         "other": "Другое",
         "productivity": "Продуктивность",
-        "research_writing": "Исследования и тексты"
+        "research_writing": "Исследования и тексты",
+        "templates": "Шаблоны"
       },
       "categoryRail": {
         "add_source": "Добавить источник",
@@ -11233,7 +11234,11 @@
       "uses_global_memory_v1": "Использует глобальную память V1",
       "memory_binding_mismatch": "Настроенное хранилище памяти этого участника принадлежит другому участнику. Здесь его использовать нельзя.",
       "memory_binding_diagnostic": "Проверьте причину на шлюзе: {{command}}",
-      "open_crew_manager": "Открыть менеджер команд"
+      "open_crew_manager": "Открыть менеджер команд",
+      "store_template": "Нанять из магазина",
+      "store_template_hint": "Готовая роль от установленного приложения. Выбор заполняет роль, триггеры и шаблон агента ниже.",
+      "store_template_none": "Нет — нанять из файла агента",
+      "store_templates_unavailable": "Не удалось прочитать установленные приложения; шаблоны из магазина сейчас недоступны."
     },
     "knowledge": {
       "detailView": {
@@ -15080,7 +15085,8 @@
       "filter_source_package_description": "Команды, установленные пакетами возможностей",
       "member_count_filtered": "{{shown}} из {{count}} участников",
       "setup_in_crew_manager": "Настроить личную память",
-      "own_copy_of": "{{template}} — настроенная копия"
+      "own_copy_of": "{{template}} — настроенная копия",
+      "provenance_store": "Шаблон {{template}} (v{{version}})"
     }
   },
   "privacyDisclosure": {

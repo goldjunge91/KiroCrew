@@ -5426,7 +5426,8 @@
         "oncall_ops": "オンコール & Ops",
         "other": "その他",
         "productivity": "生産性",
-        "research_writing": "リサーチ & 執筆"
+        "research_writing": "リサーチ & 執筆",
+        "templates": "テンプレート"
       },
       "categoryRail": {
         "add_source": "ソースを追加",
@@ -10765,7 +10766,11 @@
       "uses_global_memory_v1": "グローバル記憶 V1 を使用",
       "memory_binding_mismatch": "このメンバーに設定されたメモリストアは別のメンバーに属しています。ここでは利用できません。",
       "memory_binding_diagnostic": "ゲートウェイで原因を確認してください：{{command}}",
-      "open_crew_manager": "クルー管理ページを開く"
+      "open_crew_manager": "クルー管理ページを開く",
+      "store_template": "ストアから採用",
+      "store_template_hint": "インストール済みアプリが提供する既製の役職です。選ぶと下の役職、トリガー、エージェントテンプレートが埋まります。",
+      "store_template_none": "なし — エージェントファイルから採用",
+      "store_templates_unavailable": "インストール済みアプリを読み取れなかったため、現在ストアのテンプレートは提供できません。"
     },
     "knowledge": {
       "detailView": {
@@ -14503,7 +14508,8 @@
       "filter_source_package_description": "ケイパビリティパッケージによってインストールされたクルー",
       "member_count_filtered": "{{count}} 人中 {{shown}} 人のメンバー",
       "setup_in_crew_manager": "プライベートメモリを設定",
-      "own_copy_of": "{{template}} — カスタマイズ済みコピー"
+      "own_copy_of": "{{template}} — カスタマイズ済みコピー",
+      "provenance_store": "テンプレート {{template}}（v{{version}}）"
     }
   },
   "privacyDisclosure": {

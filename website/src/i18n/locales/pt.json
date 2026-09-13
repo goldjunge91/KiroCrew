@@ -5622,7 +5622,8 @@
         "oncall_ops": "Plantão e operações",
         "other": "Outros",
         "productivity": "Produtividade",
-        "research_writing": "Pesquisa e escrita"
+        "research_writing": "Pesquisa e escrita",
+        "templates": "Modelos"
       },
       "categoryRail": {
         "add_source": "Adicionar fonte",
@@ -11077,7 +11078,11 @@
       "uses_global_memory_v1": "Usa a memória global V1",
       "memory_binding_mismatch": "O armazenamento de memória configurado deste membro pertence a outro membro. Ele não pode ser usado aqui.",
       "memory_binding_diagnostic": "Verifique a causa no gateway: {{command}}",
-      "open_crew_manager": "Abrir o gerenciador de equipes"
+      "open_crew_manager": "Abrir o gerenciador de equipes",
+      "store_template": "Contratar da loja",
+      "store_template_hint": "Um cargo pronto de um app instalado. Escolher um preenche o cargo, os gatilhos e o modelo de agente abaixo.",
+      "store_template_none": "Nenhum — contratar a partir de um arquivo de agente",
+      "store_templates_unavailable": "Não foi possível ler os apps instalados; os modelos da loja não estão disponíveis agora."
     },
     "knowledge": {
       "detailView": {
@@ -14887,7 +14892,8 @@
       "filter_source_package_description": "Crews instalados por pacotes de capacidades",
       "member_count_filtered": "{{shown}} de {{count}} membros",
       "setup_in_crew_manager": "Configurar memória privada",
-      "own_copy_of": "{{template}} — cópia personalizada"
+      "own_copy_of": "{{template}} — cópia personalizada",
+      "provenance_store": "Modelo {{template}} (v{{version}})"
     }
   },
   "privacyDisclosure": {

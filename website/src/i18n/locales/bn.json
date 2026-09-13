@@ -5533,7 +5533,8 @@
         "oncall_ops": "অন-কল ও অপস",
         "other": "অন্যান্য",
         "productivity": "উৎপাদনশীলতা",
-        "research_writing": "রিসার্চ ও লেখালেখি"
+        "research_writing": "রিসার্চ ও লেখালেখি",
+        "templates": "টেমপ্লেট"
       },
       "categoryRail": {
         "add_source": "সোর্স যোগ করুন",
@@ -10921,7 +10922,11 @@
       "uses_global_memory_v1": "গ্লোবাল স্মৃতি V1 ব্যবহার করে",
       "memory_binding_mismatch": "এই সদস্যের কনফিগার করা মেমোরি স্টোরটি অন্য সদস্যের মালিকানাধীন। এটি এখানে ব্যবহার করা যাবে না।",
       "memory_binding_diagnostic": "গেটওয়েতে কারণটি পরীক্ষা করুন: {{command}}",
-      "open_crew_manager": "ক্রু ম্যানেজার খুলুন"
+      "open_crew_manager": "ক্রু ম্যানেজার খুলুন",
+      "store_template": "স্টোর থেকে নিয়োগ",
+      "store_template_hint": "ইনস্টল করা অ্যাপের একটি তৈরি ভূমিকা। বেছে নিলে নিচের ভূমিকা, ট্রিগার ও এজেন্ট টেমপ্লেট ভরে যায়।",
+      "store_template_none": "কিছু না — এজেন্ট ফাইল থেকে নিয়োগ",
+      "store_templates_unavailable": "ইনস্টল করা অ্যাপ পড়া যায়নি, তাই এখন স্টোর টেমপ্লেট দেওয়া যাচ্ছে না।"
     },
     "knowledge": {
       "detailView": {
@@ -14696,7 +14701,8 @@
       "filter_source_package_description": "ক্ষমতা প্যাকেজ দ্বারা ইনস্টল করা ক্রু",
       "member_count_filtered": "{{count}} জনের মধ্যে {{shown}} জন সদস্য",
       "setup_in_crew_manager": "ব্যক্তিগত মেমোরি সেট আপ করুন",
-      "own_copy_of": "{{template}} — কাস্টমাইজ করা কপি"
+      "own_copy_of": "{{template}} — কাস্টমাইজ করা কপি",
+      "provenance_store": "টেমপ্লেট {{template}} (v{{version}})"
     }
   },
   "privacyDisclosure": {

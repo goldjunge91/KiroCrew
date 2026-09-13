@@ -422,7 +422,7 @@ export default function FeaturedSpotlight({
             secondary={
               isCollection
                 ? appDescription(a)
-                : `${a.author} · ${categoryFor(a.tags)} · ${i18nT('components.appstore.featuredSpotlight.v')}${a.installedVersion || a.version} · ${sourceLabel(a)}`
+                : `${a.author} · ${categoryFor(a.tags, a.manifest)} · ${i18nT('components.appstore.featuredSpotlight.v')}${a.installedVersion || a.version} · ${sourceLabel(a)}`
             }
             busy={busyName === a.name}
             /* Only a collection's rows are interactive; on a single-app card the

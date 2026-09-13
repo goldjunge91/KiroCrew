@@ -2494,11 +2494,13 @@ export default function MembersPage() {
                 {/* The row's normalized `source` (kirocrew | builtin | package),
                     in the filter menu's own words so the drawer and the filter
                     never name one origin two ways. */}
-                {active.source === 'builtin'
-                  ? t('pages.membersPage.filter_source_builtin')
-                  : active.source === 'kirocrew'
-                    ? t('pages.membersPage.provenance_local')
-                    : t('pages.membersPage.filter_source_package')}
+                {active.template
+                  ? t('pages.membersPage.provenance_store', { template: active.template, version: active.template_version || '?' })
+                  : active.source === 'builtin'
+                    ? t('pages.membersPage.filter_source_builtin')
+                    : active.source === 'kirocrew'
+                      ? t('pages.membersPage.provenance_local')
+                      : t('pages.membersPage.filter_source_package')}
               </dd>
             </div>
             <div className="flex gap-2">

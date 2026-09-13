@@ -3676,6 +3676,7 @@ class TestBuiltinDeclaredResourcesActuallyRegister:
                         }
                     ]
                 },
+                "crew": {"templates": [{"agent": "agents/a.json", "role": "Probe role"}]},
             }
         )
         # Every declared field must be populated above, otherwise a conditional

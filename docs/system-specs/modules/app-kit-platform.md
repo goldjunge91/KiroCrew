@@ -399,6 +399,52 @@ means "nothing to preserve", never "abort the refresh".
 Writer: `apps/bridges.py::_register_agents`, `_preserve_user_agent_edits`,
 `_read_agent_config`.
 
+### 3.1 An app can offer its agents as crew templates (`crew.templates`)
+
+A **crew template** is a store listing, not a runtime concept: one of the app's
+shipped agents plus a job card. The manifest's `crew` section declares them:
+
+```json
+"crew": {"templates": [{"agent": "agents/triage.json", "role": "Oncall Triage Engineer",
+                        "triggers": "incident, prod outage",
+                        "initial_briefing": "briefings/triage.md",
+                        "description": "Triages pages."}]}
+```
+
+Typed (`apps/manifest.py::CrewConfig`, `CrewTemplate`) rather than left to `extra`,
+for the same reason `contributes` is: `role` and `triggers` become a hired member's
+wrapper fields and `initial_briefing` becomes the member's own briefing -- text that
+reaches the member's prompt -- so they are CHECKED on every parse. `validate()`
+requires `agent` to be one of the manifest's `agents` paths (a template whose agent
+names no shipped file fails install, not the first hire), `role` non-empty and at
+most 80 characters, `triggers` at most 2000, `initial_briefing` a `.md` path inside
+the app root, at most 8 templates and no duplicate agent; a non-object `crew`, a
+non-array `templates` or non-object entries fail validation instead of coercing to
+"offers nothing" and vanishing from `to_dict`. The section is part of
+`signing_payload()` when non-empty (a manifest signed before templates existed keeps
+its bytes), so the job card is authenticated by the publisher's signature like a
+cron's command. The registry forwards it under `manifest.crew` (`registry.py`
+`_merge_manifest`) and installed apps carry it in `manifest`, so the store files an
+app whose ONLY offering is templates -- cards, and none of the surfaces a user
+browses a tool category for (a UI, crons, skills, MCP servers) -- under
+**Templates** (`categories.ts::categoryFor(tags, manifest)` via `isTemplateOnlyApp`,
+before any tag matcher; there is no tag spelling, the manifest is the mechanism),
+while a tool app that also ships a card keeps the category its tags earn, because
+categories are exclusive and a browser of On-call & Ops must still find the ops tool
+that happens to offer a role. The Crew Members hire form lists each card of every
+ENABLED installed app (`storeTemplateOptions`). The shipped spec and the initial
+briefing are read through `pinned_fs.read_file_pinned` at hire: the app's tree is
+the app's to change after install, and a by-name read there would follow a planted
+link into a prompt-visible briefing.
+
+Hiring from a template is `POST /api/members/hire` with
+`source: {kind: "store", app, agent}` -- see `crew-mode.md`, "Hire". The member is
+created against the app's materialized copy (`<app>--<agent>`, section 3) and then
+receives its OWN copy of it, exactly as a local hire does; the card's `role` and
+`triggers` are defaults the caller's own values override; `initial_briefing` is
+copied once into `members/<slug>/briefing.md` and never touched again. Only an
+enabled app can be hired from (its agents are materialized only while enabled).
+
 ## 4. A generated prompt is pinned through the app's policy
 
 An agent template packaged inside an app can only name paths that exist at

@@ -5533,7 +5533,8 @@
         "oncall_ops": "Rufbereitschaft & Betrieb",
         "other": "Sonstiges",
         "productivity": "Produktivität",
-        "research_writing": "Recherche & Schreiben"
+        "research_writing": "Recherche & Schreiben",
+        "templates": "Vorlagen"
       },
       "categoryRail": {
         "add_source": "Quelle hinzufügen",
@@ -10921,7 +10922,11 @@
       "uses_global_memory_v1": "Verwendet das globale Gedächtnis V1",
       "memory_binding_mismatch": "Der konfigurierte Speicher dieses Mitglieds gehört einem anderen Mitglied. Er kann hier nicht verwendet werden.",
       "memory_binding_diagnostic": "Prüfe die Ursache auf dem Gateway: {{command}}",
-      "open_crew_manager": "Crew-Verwaltung öffnen"
+      "open_crew_manager": "Crew-Verwaltung öffnen",
+      "store_template": "Aus dem Store einstellen",
+      "store_template_hint": "Eine fertige Rolle aus einer installierten App. Die Auswahl füllt Rolle, Trigger und Agent-Vorlage unten aus.",
+      "store_template_none": "Keine – aus einer Agent-Datei einstellen",
+      "store_templates_unavailable": "Installierte Apps konnten nicht gelesen werden; Store-Vorlagen sind gerade nicht verfügbar."
     },
     "knowledge": {
       "detailView": {
@@ -14695,7 +14700,8 @@
       "filter_source_package_description": "Crews, die von Capability-Paketen installiert wurden",
       "member_count_filtered": "{{shown}} von {{count}} Mitgliedern",
       "setup_in_crew_manager": "Privaten Speicher einrichten",
-      "own_copy_of": "{{template}} – angepasste Kopie"
+      "own_copy_of": "{{template}} – angepasste Kopie",
+      "provenance_store": "Vorlage {{template}} (v{{version}})"
     }
   },
   "privacyDisclosure": {

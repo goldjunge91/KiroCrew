@@ -277,14 +277,14 @@ function DiscoverPageBody() {
   const filteredBrowse = useMemo(() => {
     const q = query.trim().toLowerCase()
     const list = browseApps.filter(a => {
-      if (category !== 'all' && categoryFor(a.tags) !== category) return false
+      if (category !== 'all' && categoryFor(a.tags, a.manifest) !== category) return false
       if (!q) return true
       return a.displayName.toLowerCase().includes(q)
         || a.description.toLowerCase().includes(q)
         || (a.tags || []).some(t => t.toLowerCase().includes(q))
     })
     return list.sort((a, b) => sort === 'category'
-      ? compareText(categoryFor(a.tags), categoryFor(b.tags)) || compareText(a.displayName, b.displayName)
+      ? compareText(categoryFor(a.tags, a.manifest), categoryFor(b.tags, b.manifest)) || compareText(a.displayName, b.displayName)
       : compareText(a.displayName, b.displayName))
   }, [browseApps, category, query, sort])
 

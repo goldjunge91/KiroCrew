@@ -26,7 +26,7 @@ from aiohttp import web
 
 import kiro_crew.dashboard.handlers as _h
 import kiro_crew.dashboard.handlers.agents as _agents_handlers
-from kiro_crew import agent_state
+from kiro_crew import agent_state, member_templates
 from kiro_crew import members as members_mod
 from kiro_crew.config.loader import KiroCrewConfig, default_project_dir
 from kiro_crew.dashboard.chat_persistence import (
@@ -257,6 +257,11 @@ async def api_members(request: web.Request) -> web.Response:
                 # name -- text a package or a hand-edited spec wrote -- so it
                 # takes the same redactor as the other identity fields.
                 "template_origin": _identity_text(template_origin),
+                # Store provenance: the template ('<app>/<agent>') and app version
+                # the member was hired at; "" for a hand-made or locally adopted
+                # member. Both are manifest text, so they take the same redactor.
+                "template": _identity_text(agent_cfg.template),
+                "template_version": _identity_text(agent_cfg.template_version),
             }
         )
 
@@ -945,10 +950,10 @@ async def api_member_rules_put(request: web.Request) -> web.Response:
 
 
 #: Sources a hire may name. ``local`` copies an installed Kiro custom-agent
-#: file (``~/.kiro/agents/<agent>.json``); a store template is a later rollout
-#: step and is refused here by name so a client written against it fails
-#: loudly rather than silently hiring from the wrong place.
-_HIRE_SOURCE_KINDS = frozenset({"local"})
+#: The sources a member can be hired from. ``local`` adopts an installed agent
+#: file (``~/.kiro/agents/<agent>.json``); ``store`` hires from a template an
+#: installed app offers in its manifest's ``crew`` section (``{app, agent}``).
+_HIRE_SOURCE_KINDS = frozenset({"local", "store"})
 
 
 async def api_member_hire(request: web.Request) -> web.Response:
@@ -1017,6 +1022,38 @@ async def api_member_hire(request: web.Request) -> web.Response:
             status=400,
         )
     agent = source.get("agent")
+    if kind == "store":
+        app = source.get("app")
+        if not isinstance(app, str) or not isinstance(agent, str):
+            return web.json_response(
+                {"error": "source.app and source.agent must be strings", "code": "invalid_source"},
+                status=400,
+            )
+        # The whole store hire runs under the app's lifecycle lock: an update
+        # of the app between resolving the listing and copying its materialized
+        # agent would copy the NEW bytes while recording the old version and the
+        # old spec as the member's pristine BASE -- a merge base that never
+        # existed. The lock is the one install/update/uninstall take.
+        from kiro_crew.apps.manager import app_lifecycle_lock
+
+        async with app_lifecycle_lock(app):
+            # Step 1 (store): resolve the listing -- installed and enabled app,
+            # a card for that agent, a readable shipped spec, a materialized file.
+            try:
+                store = await asyncio.to_thread(member_templates.resolve_store_template, app, agent)
+            except member_templates.TemplateUnavailable as exc:
+                return web.json_response({"error": str(exc), "code": exc.code}, status=exc.status)
+            return await _hire_from_source(request, body, store.materialized, store)
+    return await _hire_from_source(request, body, agent, None)
+
+
+async def _hire_from_source(
+    request: web.Request,
+    body: dict,
+    agent: object,
+    store: member_templates.StoreTemplate | None,
+) -> web.Response:
+    """Step 1 (local resolve) onward of a hire, for either source kind."""
     # The shared agent-name grammar, checked before the name reaches any
     # lookup: the create path re-checks it, but refusing here keeps the
     # error about the SOURCE rather than about a "kiro_agent" the caller never
@@ -1050,14 +1087,18 @@ async def api_member_hire(request: web.Request) -> web.Response:
         )
     # Allowlist, never a spread of the hire body into the create body: the
     # create route accepts fields a hire must not set (memory_store, source
-    # tag, avatar image commits).
+    # tag, avatar image commits). A store hire takes the card's role and
+    # triggers where the caller sent none: the card is the default, the
+    # user's word wins.
+    card_role = store.card.role if store else ""
+    card_triggers = store.card.triggers if store else ""
     create_body: dict[str, object] = {
         "display_name": body.get("display_name"),
-        "role": body.get("role", ""),
+        "role": body.get("role") or card_role,
         "kiro_agent": agent,
         "workspace": body.get("workspace", "default"),
         "memory_store": "default",
-        "triggers": body.get("triggers", ""),
+        "triggers": body.get("triggers") or card_triggers,
         "session_color": body.get("session_color", ""),
         "description": body.get("description", ""),
     }
@@ -1067,11 +1108,14 @@ async def api_member_hire(request: web.Request) -> web.Response:
     # half-hired member this verb exists to make impossible. The transaction
     # is drained to its own end (success or roll-back) before a cancellation
     # is re-raised.
-    return await drained(_hire_transaction(request, agent, create_body))
+    return await drained(_hire_transaction(request, agent, create_body, store))
 
 
 async def _hire_transaction(
-    request: web.Request, agent: str, create_body: dict[str, object]
+    request: web.Request,
+    agent: str,
+    create_body: dict[str, object],
+    store: member_templates.StoreTemplate | None,
 ) -> web.Response:
     """Steps 2..4 of a hire; see :func:`api_member_hire`. Run under ``drained``."""
     # Step 2.
@@ -1147,13 +1191,59 @@ async def _hire_transaction(
             {"error": "copy answered without a name", "code": "hire_incomplete"}, status=500
         )
 
+    # Step 4 (store): link the member to its template -- provenance on the row,
+    # the pristine copy for a later merge, the initial briefing once. Part of
+    # the same atom: a member that owns a copy but does not know where it came
+    # from can never be offered an update, so a failure here rolls back too.
+    if store is not None:
+        try:
+            await asyncio.to_thread(
+                _link_member_to_template,
+                member_id,
+                store,
+                generation=memory_store,
+                copy_name=copy_name,
+            )
+        except Exception:
+            logger.exception(
+                "hire %r: linking to template %s failed; rolling back", member_id, store.ref
+            )
+            rolled_back = await _roll_back_hire(
+                request,
+                member_id,
+                still_bound_to=copy_name,
+                generation=memory_store,
+                copy_name=copy_name,
+            )
+            if not rolled_back:
+                return web.json_response(
+                    {
+                        "error": (
+                            f"'{display_name}' was created but could not be linked to its "
+                            f"template and the member could not be removed; delete member "
+                            f"'{member_id}' by hand."
+                        ),
+                        "code": "hire_incomplete",
+                        "id": member_id,
+                    },
+                    status=500,
+                )
+            return web.json_response(
+                {
+                    "error": "Could not record the member's template",
+                    "code": "template_link_failed",
+                    "rolled_back": True,
+                },
+                status=500,
+            )
+
     try:
         _sel().log_api_access(
             caller=request.get("user", "dashboard"),
             operation="member.hire",
             outcome="success",
             source="dashboard",
-            resources=f"{member_id} <- {agent} ({copy_name})",
+            resources=f"{member_id} <- {store.ref if store else agent} ({copy_name})",
         )
     except Exception:  # pragma: no cover - audit must never change the outcome
         logger.debug("SEL audit for member.hire failed", exc_info=True)
@@ -1177,26 +1267,67 @@ def _own_payload(response: web.Response) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _link_member_to_template(
+    member_id: str, store: member_templates.StoreTemplate, *, generation: str, copy_name: str
+) -> None:
+    """Step 4 of a store hire, on a worker thread.
+
+    Records ``template`` / ``template_version`` on the row inside a locked
+    read-modify-write (the row must still be there and still bound to its
+    copy -- a concurrent delete or rebind aborts), writes the pristine copy the
+    role-update merge reads as BASE, and seeds the initial briefing ONCE.
+    Raises on any failure; the caller rolls the hire back.
+    """
+    from kiro_crew.config.loader import update_config_locked
+    from kiro_crew.memory_stores import UnknownMemoryStore
+
+    def mutate(doc: dict) -> dict:
+        agents = doc.get("agents")
+        row = agents.get(member_id) if isinstance(agents, dict) else None
+        if not isinstance(row, dict):
+            raise UnknownMemoryStore(f"Crew Member {member_id!r} was removed concurrently")
+        if row.get("memory_store") != generation or row.get("kiro_agent") != copy_name:
+            raise UnknownMemoryStore(f"Crew Member {member_id!r} was replaced concurrently")
+        row["template"] = store.ref
+        row["template_version"] = store.version
+        return doc
+
+    update_config_locked(mutate=mutate)
+    slug = members_mod.slug_for_name(member_id)
+    member_templates.write_pristine_copy(slug, store)
+    member_templates.seed_briefing(slug, store.initial_briefing)
+
+
 async def _roll_back_hire(
-    request: web.Request, member_id: str, *, still_bound_to: str, generation: str
+    request: web.Request,
+    member_id: str,
+    *,
+    still_bound_to: str,
+    generation: str,
+    copy_name: str | None = None,
 ) -> bool:
-    """Undo step 2 of a hire whose copy failed. True when the member is gone.
+    """Undo a hire that failed after its row landed. True when the member is gone.
 
     The delete route's own mutation, under the config lock it expects: the row
     is removed, a private V2 store is archived under the retirement marker
     (never erased -- the ordinary fire posture), cached handles are released.
 
     Only the row THIS hire made is rolled back: it must still be bound to
-    *still_bound_to* (the source the create step bound it to) AND still carry
+    *still_bound_to* -- the source the create step bound it to, or the copy the
+    fork rebound it to when the failure came after the copy -- AND still carry
     *generation* (the private store name the create minted -- unique per
-    creation). The config lock is released between the create and the copy,
-    so a concurrent writer may have rebound the member in that gap -- which is
-    exactly what makes the fork answer ``stale_binding`` -- or deleted it and
-    recreated a same-id member from the same source, whose only tell is the
-    store name. A member someone has already started shaping is theirs, not
-    this hire's to delete. A row already absent, one that became the default,
-    or one whose binding or generation moved is left alone and reported as NOT
-    rolled back, so the caller names the member instead.
+    creation). The config lock is released between the steps, so a concurrent
+    writer may have rebound the member in a gap -- which is exactly what makes
+    the fork answer ``stale_binding`` -- or deleted it and recreated a same-id
+    member from the same source, whose only tell is the store name. A member
+    someone has already started shaping is theirs, not this hire's to delete.
+    When the copy step had already produced the member's own agent file
+    (*copy_name*), that file and its lineage record go too -- but only while the
+    sidecar still says the copy is private to THIS member and no other row is
+    bound to it, the same reference check the fork's own unwind makes. A row
+    already absent, one that became the default, or one whose binding or
+    generation moved is left alone and reported as NOT rolled back, so the
+    caller names the member instead.
     """
     try:
         async with _agents_handlers._get_config_lock():
@@ -1214,7 +1345,40 @@ async def _roll_back_hire(
                 )
                 return False
             await _agents_handlers._delete_crew_record(request, member_id)
+            if copy_name:
+                await asyncio.to_thread(_remove_private_copy, copy_name, member_id)
     except Exception:
         logger.exception("hire roll-back failed for %r", member_id)
         return False
     return True
+
+
+def _remove_private_copy(copy_name: str, member_id: str) -> None:
+    """Delete the agent file a rolled-back hire copied, and its lineage record.
+
+    Under the spec lock. Refuses when the sidecar does not name *member_id* as
+    the copy's owner, or when any row in the document is still bound to the
+    copy: the file may then be someone else's, and leaving an orphan is the
+    recoverable mistake where deleting a live binding is not.
+    """
+    from kiro_crew.agent import agents_spec_lock
+    from kiro_crew.config.loader import config_path
+
+    agents_dir = _agents_handlers.kiro_agents_dir_path()
+    with agents_spec_lock(agents_dir):
+        fork = agent_state.get_fork_info(copy_name)
+        if not fork or fork.get("private_to") != member_id:
+            return
+        try:
+            raw = json.loads(config_path().read_text(encoding="utf-8"))
+        except Exception:
+            raw = {}
+        rows = raw.get("agents", {}) if isinstance(raw, dict) else {}
+        if isinstance(rows, dict) and any(
+            isinstance(e, dict) and e.get("kiro_agent") == copy_name for e in rows.values()
+        ):
+            logger.warning("roll-back: a crew is bound to copy %r; leaving it in place", copy_name)
+            return
+        (agents_dir / f"{copy_name}.json").unlink(missing_ok=True)
+        agent_state.prune(copy_name)
+    _agents_handlers.clear_list_agents_cache()

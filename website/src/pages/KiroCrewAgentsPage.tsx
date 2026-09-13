@@ -7,6 +7,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppDispatch } from '../store'
 import { createSlot } from '../store/chatSlice'
 import { api, type HireMemberResult, type WebhookTokenEntry } from '../api/client'
+import { crewTemplatesOf, type CrewTemplateCard } from '../components/appstore/categories'
 import { memberLabel } from './members/rosterFilter'
 import { useProvider } from '../providers'
 import { useAvailableModels } from '../hooks/useAvailableModels'
@@ -51,6 +52,40 @@ const HEX_COLOR_EXAMPLE = '#4f8ef7'
 const MEMBER_LABEL_MAX_LEN = 80
 // Longest id the member-id grammar admits (member_identity.MEMBER_ID_MAX_LEN).
 const MEMBER_ID_MAX_LEN = 64
+
+/** One store template offered for hire: an enabled installed app's card. */
+export type StoreTemplateOption = {
+  /** `<app>/<agent path>` — the option key and the deep-link value. */
+  key: string
+  app: string
+  appDisplayName: string
+  card: CrewTemplateCard
+  /** The materialized agent file's stem (`<app>--<agent name>`), the binding the
+   *  hire creates against. The declared agent name is not in the manifest, so the
+   *  path's stem stands in; the server resolves the real one. */
+  materialized: string
+}
+
+/** The templates enabled installed apps offer, flattened to options. */
+export function storeTemplateOptions(
+  apps: readonly { name: string; enabled: boolean; manifest?: { displayName?: string; crew?: unknown } }[],
+): StoreTemplateOption[] {
+  const out: StoreTemplateOption[] = []
+  for (const app of apps) {
+    if (!app.enabled) continue
+    for (const card of crewTemplatesOf(app.manifest)) {
+      const stem = card.agent.replace(/^.*[\/]/, '').replace(/\.json$/i, '')
+      out.push({
+        key: `${app.name}/${card.agent}`,
+        app: app.name,
+        appDisplayName: app.manifest?.displayName || app.name,
+        card,
+        materialized: `${app.name}--${stem}`,
+      })
+    }
+  }
+  return out
+}
 
 /** `base`, else `base-2`, `base-3`, … — the first no member id holds. Every
  *  candidate is inside the member-id grammar (a template name is), so each IS
@@ -99,7 +134,7 @@ interface CreatePayload {
 interface HirePayload {
   display_name: string
   role: string
-  source: { kind: 'local'; agent: string }
+  source: { kind: 'local'; agent: string } | { kind: 'store'; app: string; agent: string }
   workspace: string
   triggers: string
   session_color: string
@@ -980,6 +1015,9 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
    *  id when the record stores none); `role` the job title. */
   const [displayName, setDisplayName] = useState('')
   const [role, setRole] = useState('')
+  /** The store template the member form is hiring from, or '' for a local agent
+   *  file. Keyed `<app>/<agent path>` (a `StoreTemplateOption.key`). */
+  const [storeTemplate, setStoreTemplate] = useState('')
   const [editModel, setEditModel] = useState(INHERIT_MODEL)
   const [editEffort, setEditEffort] = useState('')
   /** Draft avatar override. null = the name-derived face (no override). */
@@ -1064,6 +1102,7 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
     setTriggers('')
     setSessionColor('')
     setRole('')
+    setStoreTemplate('')
     setSheet(origin ? { mode: 'create', origin } : { mode: 'create' })
   }, [])
   /** The page's own "New crew" entries: no origin, the form closes back onto
@@ -1188,6 +1227,18 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
   }, [linkedNew, linkedFromMembers, openCreateFrom, setParams])
 
   const fromMembers = sheet?.mode === 'create' && sheet.origin === 'members'
+  // The store templates the member form can hire from: enabled installed apps
+  // whose manifest offers a `crew.templates` card. Fetched only while the
+  // member form is open — the crew manager's own create has no store path.
+  const { data: installedApps, error: installedAppsError } = useQuery({
+    queryKey: ['apps'],
+    queryFn: () => api.listApps(),
+    enabled: fromMembers,
+  })
+  const storeTemplates = useMemo(
+    () => storeTemplateOptions(installedApps || []),
+    [installedApps],
+  )
   /** Every string in the create form names the thing the way the surface
    *  that opened it does — the Crew Members roster says "member" — so the
    *  form never renames it one field in (#9513 UX review). The field label
@@ -1364,15 +1415,41 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
    *  a stale seed would mint a permanent id from the wrong template's name,
    *  while a name the user typed over it is theirs. */
   const lastSeedRef = useRef('')
-  const pickTemplateAndPrefillName = useCallback((template: string) => {
-    setKiroAgent(template)
+  const seedName = useCallback((base: string) => {
     setName(prev => {
       if (prev.trim() && prev !== lastSeedRef.current) return prev
-      const seed = freeMemberName(template, agents.map(a => a.name))
+      const seed = freeMemberName(base, agents.map(a => a.name))
       lastSeedRef.current = seed
       return seed
     })
   }, [agents])
+  const pickTemplateAndPrefillName = useCallback((template: string) => {
+    setKiroAgent(template)
+    // Choosing an agent file by hand is choosing NOT to hire from the store
+    // template: the binding no longer matches the card.
+    setStoreTemplate('')
+    seedName(template)
+  }, [seedName])
+  /** Hiring from a STORE template: the binding is the app's materialized agent
+   *  file, the card's role and triggers seed the empty fields (the user's word
+   *  wins, and the server applies the same defaults), and the name proposal
+   *  comes from the agent's stem. '' returns to hiring from an agent file. */
+  const cardSeedRef = useRef({ role: '', triggers: '' })
+  const pickStoreTemplate = useCallback((key: string) => {
+    setStoreTemplate(key)
+    const opt = storeTemplates.find(t => t.key === key)
+    if (!opt) return
+    setKiroAgent(opt.materialized)
+    // Seeds follow the card the way the name seed follows the template: a field
+    // still holding the PREVIOUS card's seed takes the new card's value, a field
+    // the user typed into is theirs. Otherwise switching cards leaves the form
+    // reading card A's role beside card B's name.
+    const prevSeed = cardSeedRef.current
+    setRole(prev => (prev.trim() && prev !== prevSeed.role ? prev : opt.card.role))
+    setTriggers(prev => (prev.trim() && prev !== prevSeed.triggers ? prev : opt.card.triggers || ''))
+    cardSeedRef.current = { role: opt.card.role, triggers: opt.card.triggers || '' }
+    seedName(opt.materialized.replace(/^.*--/, ''))
+  }, [storeTemplates, seedName])
 
   const create = () => {
     setError(''); setSheetHint('')
@@ -1383,7 +1460,11 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
     // alias for the DEFAULT agent (#1684).
     if (!kiroAgent) { setSheetHint(i18nT('pages.kiroCrewAgentsPage.agent_template_is_required')); return }
     if (fromMembers) {
-      hireMut.mutate({ display_name: n, role: role.trim(), source: { kind: 'local', agent: kiroAgent }, workspace, triggers, session_color: sessionColor, epoch: sheetEpoch.current })
+      const picked = storeTemplates.find(t => t.key === storeTemplate)
+      const source = picked
+        ? { kind: 'store' as const, app: picked.app, agent: picked.card.agent }
+        : { kind: 'local' as const, agent: kiroAgent }
+      hireMut.mutate({ display_name: n, role: role.trim(), source, workspace, triggers, session_color: sessionColor, epoch: sheetEpoch.current })
       return
     }
     createMut.mutate({ name: n, role: role.trim(), kiro_agent: kiroAgent, workspace, memory_store: 'default', triggers, session_color: sessionColor, epoch: sheetEpoch.current })
@@ -2311,6 +2392,36 @@ export default function KiroCrewAgentsPage({ embedded }: { embedded?: boolean } 
                   <h3 className="text-[12px] font-semibold uppercase tracking-wider text-muted">
                     {fromMembers ? i18nT('pages.kiroCrewAgentsPage.runtime_binding_member') : i18nT('pages.kiroCrewAgentsPage.runtime_binding')}
                   </h3>
+                  {/* Store templates: the job postings enabled apps offer. Shown only
+                      when there is at least one — a member form with nothing to
+                      hire from the store is the local-file form, no empty control.
+                      Picking one fills the agent-file dropdown below with the app's
+                      materialized agent, so the two controls never disagree. */}
+                  {/* A failed installed-apps read is said, not swallowed: without
+                      it the picker simply never appears and the user cannot tell a
+                      store with no templates from a store that could not be read.
+                      No hand-off to an agent — the form holds unsaved input. */}
+                  {fromMembers && installedAppsError && (
+                    <ErrorNotice
+                      message={i18nT('pages.kiroCrewAgentsPage.store_templates_unavailable')}
+                      variant="inline"
+                      testId="store-templates-error"
+                    />
+                  )}
+                  {fromMembers && storeTemplates.length > 0 && (
+                    <Field label={i18nT('pages.kiroCrewAgentsPage.store_template')} hint={i18nT('pages.kiroCrewAgentsPage.store_template_hint')}>
+                      <SimpleSelect
+                        options={['', ...storeTemplates.map(t => t.key)]}
+                        optionLabels={[
+                          i18nT('pages.kiroCrewAgentsPage.store_template_none'),
+                          ...storeTemplates.map(t => `${t.appDisplayName} · ${t.card.role}`),
+                        ]}
+                        value={storeTemplate}
+                        onChange={pickStoreTemplate}
+                        aria-label={i18nT('pages.kiroCrewAgentsPage.store_template')}
+                      />
+                    </Field>
+                  )}
                   <BindingFields
                     subject={formSubject}
                     templateLabel={provider.labels.agentTemplateField}

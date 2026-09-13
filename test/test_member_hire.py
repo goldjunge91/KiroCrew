@@ -389,8 +389,12 @@ class TestHireValidation:
             ({"display_name": "x"}, "invalid_source"),
             ({"display_name": "x", "source": "reviewer"}, "invalid_source"),
             (
-                {"display_name": "x", "source": {"kind": "store", "agent": SOURCE}},
+                {"display_name": "x", "source": {"kind": "cloud", "agent": SOURCE}},
                 "unsupported_source_kind",
+            ),
+            (
+                {"display_name": "x", "source": {"kind": "store", "app": 3, "agent": SOURCE}},
+                "invalid_source",
             ),
             # Unhashable kinds: a 400, not a TypeError out of the frozenset test.
             (
@@ -458,3 +462,295 @@ class TestHireValidation:
             resp = await client.post("/api/members/hire", json=_hire("Triage"))
             assert resp.status in (401, 403)
         assert set(KiroCrewConfig.load().agents) == {"default"}
+
+
+# ---------------------------------------------------------------------------
+# Store hire: a template an installed app offers in its manifest's ``crew``.
+# ---------------------------------------------------------------------------
+
+APP = "oncall-pack"
+TEMPLATE_AGENT = "agents/triage.json"
+
+
+@pytest.fixture
+def store_app(agents_dir: Path):
+    """An installed, enabled app offering one template, with its agent materialized.
+
+    Mirrors what ``apps.bridges._register_agents`` leaves behind on enable: the
+    app directory (manifest + shipped agent + briefing), ``installed.json``, and
+    the ``<app>--<agent>.json`` copy in the agents directory.
+    """
+    from kiro_crew.apps.manager import (
+        APP_MANIFEST_FILENAME,
+        InstalledApp,
+        _write_installed,
+        app_dir,
+    )
+
+    root = app_dir(APP)
+    (root / "agents").mkdir(parents=True)
+    (root / "briefings").mkdir()
+    spec = {
+        "name": "triage",
+        "description": "Triages pages.",
+        "prompt": "You triage incidents.",
+        "tools": ["ReadFile"],
+    }
+    (root / TEMPLATE_AGENT).write_text(json.dumps(spec), encoding="utf-8")
+    (root / "briefings" / "triage.md").write_text(
+        "# Day one\nRead the runbook.\n", encoding="utf-8"
+    )
+    manifest = {
+        "name": APP,
+        "version": "1.2.0",
+        "displayName": "Oncall pack",
+        "description": "Oncall roles",
+        "author": "tester",
+        "agents": [TEMPLATE_AGENT],
+        "crew": {
+            "templates": [
+                {
+                    "agent": TEMPLATE_AGENT,
+                    "role": "Oncall Triage Engineer",
+                    "triggers": "incident, prod outage",
+                    "initial_briefing": "briefings/triage.md",
+                }
+            ]
+        },
+    }
+    (root / APP_MANIFEST_FILENAME).write_text(json.dumps(manifest), encoding="utf-8")
+    _write_installed(APP, InstalledApp(name=APP, version="1.2.0", enabled=True))
+    materialized = agents_dir / f"{APP}--triage.json"
+    materialized.write_text(json.dumps(spec), encoding="utf-8")
+    return root
+
+
+def _store_hire(display_name: str, **extra) -> dict:
+    body = {
+        "display_name": display_name,
+        "source": {"kind": "store", "app": APP, "agent": TEMPLATE_AGENT},
+    }
+    body.update(extra)
+    return body
+
+
+class TestStoreHire:
+    @pytest.mark.asyncio
+    async def test_gate_one_template_hired_twice_with_different_names(
+        self, agents_dir: Path, store_app: Path
+    ):
+        """The step-3 gate: two members from one store template coexist, each
+        with its own copy, the card's defaults, provenance and pristine copy."""
+        from kiro_crew import member_templates, members
+
+        async with TestClient(TestServer(_app())) as client:
+            a = await client.post("/api/members/hire", json=_store_hire("Checkout triage"))
+            assert a.status == 200, await a.text()
+            b = await client.post(
+                "/api/members/hire", json=_store_hire("Payments triage", role="Payments Oncall")
+            )
+            assert b.status == 200, await b.text()
+            roster = {
+                r["name"]: r for r in (await (await client.get("/api/members")).json())["members"]
+            }
+        cfg = KiroCrewConfig.load()
+        for member_id, role in (
+            ("Checkout-triage", "Oncall Triage Engineer"),
+            ("Payments-triage", "Payments Oncall"),
+        ):
+            row = cfg.agents[member_id]
+            # Bound to its OWN copy of the materialized template file.
+            assert row.kiro_agent == member_id
+            assert (agents_dir / f"{member_id}.json").exists()
+            assert json.loads((agents_dir / f"{member_id}.json").read_text())["prompt"] == (
+                "You triage incidents."
+            )
+            # The card's defaults, the caller's word winning.
+            assert row.role == role
+            assert row.triggers == "incident, prod outage"
+            # Provenance on the row and the roster.
+            assert row.template == f"{APP}/triage"
+            assert row.template_version == "1.2.0"
+            assert roster[member_id]["template"] == f"{APP}/triage"
+            assert roster[member_id]["template_version"] == "1.2.0"
+            # Lineage names the copy's source by its DECLARED name, as the fork records it.
+            assert roster[member_id]["template_origin"] == "triage"
+            # The pristine copy (BASE of a later merge) and the seeded briefing.
+            slug = members.slug_for_name(member_id)
+            pristine = json.loads(member_templates.pristine_copy_path(slug).read_text())
+            assert pristine["template"] == f"{APP}/triage"
+            assert pristine["version"] == "1.2.0"
+            assert pristine["agent"]["prompt"] == "You triage incidents."
+            assert pristine["card"] == {
+                "role": "Oncall Triage Engineer",
+                "triggers": "incident, prod outage",
+            }
+            if members.member_briefing_supported():
+                assert (
+                    members.member_briefing_path(slug).read_text()
+                    == "# Day one\nRead the runbook.\n"
+                )
+        # The shipped and materialized files are untouched.
+        assert json.loads((agents_dir / f"{APP}--triage.json").read_text())["name"] == "triage"
+        assert roster["default"]["template"] == ""
+
+    @pytest.mark.asyncio
+    async def test_the_briefing_is_seeded_once_and_never_overwrites_lived_state(
+        self, agents_dir: Path, store_app: Path
+    ):
+        from kiro_crew import members
+
+        if not members.member_briefing_supported():
+            pytest.skip("briefings are not read on this platform")
+        slug = members.slug_for_name("Checkout-triage")
+        path = members.member_briefing_path(slug)
+        path.parent.mkdir(parents=True)
+        path.write_text("my own notes", encoding="utf-8")
+        async with TestClient(TestServer(_app())) as client:
+            resp = await client.post("/api/members/hire", json=_store_hire("Checkout triage"))
+            assert resp.status == 200, await resp.text()
+        assert path.read_text() == "my own notes"
+
+    @pytest.mark.asyncio
+    async def test_a_planted_link_in_the_app_tree_is_refused_not_followed(
+        self, agents_dir: Path, store_app: Path, tmp_path: Path
+    ):
+        """The app's tree is the app's to change after install. A symlink where
+        the briefing (or the shipped spec) should be must not be followed into
+        a credential file and copied into a prompt-visible briefing."""
+        from kiro_crew import members
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("AKIAIOSFODNN7EXAMPLE\n", encoding="utf-8")
+        briefing = store_app / "briefings" / "triage.md"
+        briefing.unlink()
+        briefing.symlink_to(secret)
+        async with TestClient(TestServer(_app())) as client:
+            resp = await client.post("/api/members/hire", json=_store_hire("Checkout triage"))
+            assert resp.status == 200, await resp.text()
+        # Hired, but no briefing was seeded from the planted link.
+        slug = members.slug_for_name("Checkout-triage")
+        assert not members.member_briefing_path(slug).exists()
+        # The shipped spec through a link: the listing is unhireable.
+        spec = store_app / TEMPLATE_AGENT
+        spec.unlink()
+        spec.symlink_to(secret)
+        async with TestClient(TestServer(_app())) as client:
+            resp = await client.post("/api/members/hire", json=_store_hire("Payments triage"))
+            assert resp.status == 409
+            assert (await resp.json())["code"] == "template_spec_unreadable"
+        assert "Payments-triage" not in KiroCrewConfig.load().agents
+
+    def test_seeding_is_decided_by_the_create_not_by_a_check_before_it(self, agents_dir: Path):
+        """A member that starts its notes between an existence check and an
+        atomic replace would lose them to template text. The create is exclusive."""
+        from kiro_crew import member_templates, members
+
+        if not members.member_briefing_supported():
+            pytest.skip("briefings are not read on this platform")
+        slug = "race-member"
+        path = members.member_briefing_path(slug)
+        path.parent.mkdir(parents=True)
+        # Two seeds racing for one file: exactly one wins, the other reports False
+        # and the winner's bytes are what remain.
+        assert member_templates.seed_briefing(slug, "first") is True
+        assert member_templates.seed_briefing(slug, "second") is False
+        assert path.read_text() == "first"
+        # A link planted at the name is neither followed nor replaced.
+        path.unlink()
+        target = path.parent / "elsewhere.md"
+        target.write_text("theirs")
+        path.symlink_to(target)
+        assert member_templates.seed_briefing(slug, "template") is False
+        assert target.read_text() == "theirs"
+
+    @pytest.mark.asyncio
+    async def test_a_store_hire_holds_the_apps_lifecycle_lock(
+        self, agents_dir: Path, store_app: Path
+    ):
+        """An app update landing between resolving the listing and copying its
+        materialized agent would record a pristine BASE that never existed. The
+        hire holds the same lock install/update/uninstall take."""
+        import asyncio
+
+        from kiro_crew.apps.manager import app_lifecycle_lock
+
+        observed: list[bool] = []
+        real_fork = _agents.__dict__["_fork_template_for_crew"]
+
+        async def observe_then_fork(request, name, crew, **kwargs):
+            observed.append(app_lifecycle_lock(APP).locked())
+            return await real_fork(request, name, crew, **kwargs)
+
+        with patch(
+            "kiro_crew.dashboard.handlers.members._agents_handlers._fork_template_for_crew",
+            observe_then_fork,
+        ):
+            async with TestClient(TestServer(_app())) as client:
+                resp = await client.post("/api/members/hire", json=_store_hire("Checkout triage"))
+                assert resp.status == 200, await resp.text()
+        assert observed == [True]
+        assert not app_lifecycle_lock(APP).locked()
+        del asyncio
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mutate, status, code",
+        [
+            ("uninstall", 404, "app_not_installed"),
+            ("disable", 409, "app_disabled"),
+            ("no-card", 404, "template_not_offered"),
+            ("unmaterialized", 409, "template_not_materialized"),
+            ("bad-spec", 409, "template_spec_unreadable"),
+        ],
+    )
+    async def test_an_unhireable_listing_is_refused_before_anything_is_written(
+        self, agents_dir: Path, store_app: Path, mutate, status, code
+    ):
+        from kiro_crew.apps.manager import APP_MANIFEST_FILENAME, InstalledApp, _write_installed
+
+        if mutate == "uninstall":
+            import shutil
+
+            shutil.rmtree(store_app)
+        elif mutate == "disable":
+            _write_installed(APP, InstalledApp(name=APP, version="1.2.0", enabled=False))
+        elif mutate == "no-card":
+            m = json.loads((store_app / APP_MANIFEST_FILENAME).read_text())
+            m["crew"]["templates"][0]["agent"] = "agents/other.json"
+            m["agents"].append("agents/other.json")
+            (store_app / APP_MANIFEST_FILENAME).write_text(json.dumps(m))
+        elif mutate == "unmaterialized":
+            (agents_dir / f"{APP}--triage.json").unlink()
+        elif mutate == "bad-spec":
+            (store_app / TEMPLATE_AGENT).write_text("not json")
+        before = sorted(p.name for p in agents_dir.iterdir())
+        async with TestClient(TestServer(_app())) as client:
+            resp = await client.post("/api/members/hire", json=_store_hire("Checkout triage"))
+            assert resp.status == status, await resp.text()
+            assert (await resp.json())["code"] == code
+        assert sorted(p.name for p in agents_dir.iterdir()) == before
+        assert set(KiroCrewConfig.load().agents) == {"default"}
+
+    @pytest.mark.asyncio
+    async def test_a_failed_template_link_rolls_the_hire_back(
+        self, agents_dir: Path, store_app: Path
+    ):
+        with patch(
+            "kiro_crew.dashboard.handlers.members._link_member_to_template",
+            side_effect=OSError("disk full"),
+        ):
+            async with TestClient(TestServer(_app())) as client:
+                resp = await client.post("/api/members/hire", json=_store_hire("Checkout triage"))
+                assert resp.status == 500
+                data = await resp.json()
+        assert data["code"] == "template_link_failed"
+        assert data["rolled_back"] is True
+        assert set(KiroCrewConfig.load().agents) == {"default"}
+        # The copy the fork had already made goes with the row, lineage included.
+        assert not (agents_dir / "Checkout-triage.json").exists()
+        assert agent_state.get_fork_info("Checkout-triage") is None
+        # And the retry is clean.
+        async with TestClient(TestServer(_app())) as client:
+            resp = await client.post("/api/members/hire", json=_store_hire("Checkout triage"))
+            assert resp.status == 200, await resp.text()

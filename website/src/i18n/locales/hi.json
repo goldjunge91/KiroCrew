@@ -5533,7 +5533,8 @@
         "oncall_ops": "ऑन-कॉल और ऑप्स",
         "other": "अन्य",
         "productivity": "उत्पादकता",
-        "research_writing": "शोध और लेखन"
+        "research_writing": "शोध और लेखन",
+        "templates": "टेम्पलेट"
       },
       "categoryRail": {
         "add_source": "स्रोत जोड़ें",
@@ -10921,7 +10922,11 @@
       "uses_global_memory_v1": "वैश्विक स्मृति V1 का उपयोग करता है",
       "memory_binding_mismatch": "इस सदस्य का कॉन्फ़िगर किया गया मेमोरी स्टोर किसी अन्य सदस्य का है। इसका उपयोग यहाँ नहीं किया जा सकता।",
       "memory_binding_diagnostic": "गेटवे पर कारण की जाँच करें: {{command}}",
-      "open_crew_manager": "क्रू प्रबंधक खोलें"
+      "open_crew_manager": "क्रू प्रबंधक खोलें",
+      "store_template": "स्टोर से नियुक्त करो",
+      "store_template_hint": "किसी इंस्टॉल किए गए ऐप की बनी-बनाई भूमिका। चुनने पर नीचे भूमिका, ट्रिगर और एजेंट टेम्पलेट भर जाते हैं।",
+      "store_template_none": "कोई नहीं — एजेंट फ़ाइल से नियुक्त करो",
+      "store_templates_unavailable": "इंस्टॉल किए गए ऐप पढ़े नहीं जा सके, इसलिए अभी स्टोर टेम्पलेट उपलब्ध नहीं हैं।"
     },
     "knowledge": {
       "detailView": {
@@ -14696,7 +14701,8 @@
       "filter_source_package_description": "क्षमता पैकेजों द्वारा इंस्टॉल किए गए क्रू",
       "member_count_filtered": "{{count}} में से {{shown}} सदस्य",
       "setup_in_crew_manager": "निजी मेमोरी सेट अप करें",
-      "own_copy_of": "{{template}} — अनुकूलित कॉपी"
+      "own_copy_of": "{{template}} — अनुकूलित कॉपी",
+      "provenance_store": "टेम्पलेट {{template}} (v{{version}})"
     }
   },
   "privacyDisclosure": {

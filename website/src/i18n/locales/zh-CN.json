@@ -5444,7 +5444,8 @@
         "oncall_ops": "值班与运维",
         "other": "其他",
         "productivity": "效率",
-        "research_writing": "研究与写作"
+        "research_writing": "研究与写作",
+        "templates": "模板"
       },
       "categoryRail": {
         "add_source": "添加来源",
@@ -10765,7 +10766,11 @@
       "uses_global_memory_v1": "使用全局记忆 V1",
       "memory_binding_mismatch": "为此成员配置的记忆存储属于另一位成员，无法在此使用。",
       "memory_binding_diagnostic": "在网关上检查原因：{{command}}",
-      "open_crew_manager": "打开团队管理页"
+      "open_crew_manager": "打开团队管理页",
+      "store_template": "从商店雇用",
+      "store_template_hint": "来自已安装应用的现成角色。选择后会填入下方的角色、触发词和 agent 模板。",
+      "store_template_none": "无——从 agent 文件雇用",
+      "store_templates_unavailable": "无法读取已安装的应用，目前无法提供商店模板。"
     },
     "knowledge": {
       "detailView": {
@@ -14503,7 +14508,8 @@
       "filter_source_package_description": "由能力安装包安装的成员",
       "member_count_filtered": "显示 {{shown}} / {{count}} 位成员",
       "setup_in_crew_manager": "设置私有记忆",
-      "own_copy_of": "{{template}}——自定义副本"
+      "own_copy_of": "{{template}}——自定义副本",
+      "provenance_store": "模板 {{template}}（v{{version}}）"
     }
   },
   "privacyDisclosure": {

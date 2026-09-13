@@ -148,12 +148,31 @@ installed agent file (`~/.kiro/agents/<agent>.json`):
  "workspace": "default", "triggers": "", "session_color": ""}
 ```
 
-`source.kind` must be a string in `_HIRE_SOURCE_KINDS` (an unhashable value is a
-400 `unsupported_source_kind`, never a `TypeError`); `source.agent` must be in the
-shared agent-name grammar (`invalid_source_agent`). The route composes three
-existing cores, owner-gated once at the top, and is **atomic** -- the member
-either exists with its own copy of the source or does not exist. Steps 2 onward run
-as ONE transaction under `chat_utils.drained` (the coroutine twin of
+`source.kind` must be a string in `_HIRE_SOURCE_KINDS` -- `local` or `store` (an
+unhashable value is a 400 `unsupported_source_kind`, never a `TypeError`);
+`source.agent` must be in the shared agent-name grammar (`invalid_source_agent`).
+Source kind **`store`** hires from a template an installed app offers in its
+manifest's `crew.templates` (`app-kit-platform.md` 3.1): `source: {kind: "store",
+app, agent}` where `agent` is the manifest `agents` path the card names. The whole
+store hire runs under the app's lifecycle lock (`apps.manager.app_lifecycle_lock`,
+the one install/update/uninstall take): an update of the app between resolving the
+listing and copying its materialized agent would copy the new bytes while recording
+the old version and spec as the member's pristine BASE. Inside it,
+`member_templates.resolve_store_template` resolves the listing BEFORE anything is
+written: the app must be installed (404 `app_not_installed`) and enabled (409
+`app_disabled` -- only an enabled app has its agents materialized), the manifest
+must carry a card for that agent (404 `template_not_offered`), the shipped spec must
+read (409 `template_spec_unreadable`) and the materialized `<app>--<agent name>`
+file must exist (409 `template_not_materialized`). The shipped spec and the initial
+briefing are read through `pinned_fs.read_file_pinned` (ancestors pinned, a
+non-regular final component refused): the app's tree is the app's to change after
+install, and a by-name read there is a disclosure primitive pointed at whatever the
+name resolves to. The materialized name becomes the `agent` the local steps below
+run against, and the card's `role` and `triggers` fill the create body where the
+caller sent none (the card is the default; the caller's word wins). The route
+composes three existing cores, owner-gated once at the top, and is **atomic** --
+the member either exists with its own copy of the source or does not exist. Steps
+2 onward run as ONE transaction under `chat_utils.drained` (the coroutine twin of
 `drained_to_thread`): a cancellation of the request between steps -- a gateway
 shutdown, a client that closed the connection -- is absorbed until the transaction
 reaches its own end (success or roll-back) and re-raised afterwards, so a row can
@@ -164,6 +183,20 @@ never be left committed with the copy and the roll-back skipped:
 | 1. resolve the source | `_load_template_specs` | 404 `template_not_found` / 409 `ambiguous_template_name`; nothing written. The create path tolerates a missing template (a crew may be bound ahead of an install); a hire may not, because its promise is a copy of that file |
 | 2. create the wrapper row | `_create_crew` (the body of `POST /api/agents`: id minted from `display_name`, private memory provisioned, bound to the source) | its own 4xx/409, verbatim |
 | 3. copy-on-hire | `_fork_template_for_crew` (the body of `POST /api/agents/detail/{name}/fork`): copy the source into a member-owned file whose stem derives from the member id, record lineage in the `agent_state` sidecar, rebind the row -- all under the config lock | **roll back step 2** through `_delete_crew_record` (the delete route's own mutation: row removed, a private V2 store archived under the retirement marker, cached handles released) -- but ONLY while the row is still the one this hire made -- bound to the source and carrying the private store name the create minted (unique per creation, so it is the row's generation): the lock is released between steps 2 and 3, and a writer that rebinds the member in that gap, or deletes it and recreates a same-id member from the same source (the fork is handed the generation too and answers `stale_binding` for either), has started shaping it, so their row is not this hire's to delete. Then answer the copy's own status and code plus `rolled_back: true`. If the roll-back is refused or fails, 500 `hire_incomplete` naming the member `id` so the operator can decide |
+
+A store hire has a **step 4**, inside the same atom: `_link_member_to_template`
+records `template` (`<app>/<agent name>`) and `template_version` (the app's
+manifest version) on the row in a locked read-modify-write that requires the row
+to still carry this hire's generation and copy, writes the **pristine copy**
+`members/<slug>/template.json` (`member_templates.write_pristine_copy`: the agent
+definition as shipped plus the card's `role`/`triggers` at that version -- the BASE
+a later role update three-way merges against), and seeds `members/<slug>/briefing.md`
+from the card's `initial_briefing` ONCE (`seed_briefing`: an existing briefing is the
+member's lived state and is never overwritten; a platform where briefings are not
+read gets none). A failure rolls the hire back -- row, memory, and the copy the fork
+already made (`_remove_private_copy`, only while the sidecar still names this member
+as the copy's owner and no row is bound to it) -- and answers 500
+`template_link_failed` with `rolled_back: true`.
 
 The create and fork bodies are this package's own contract (pinned by their
 tests); the hire reads them strictly -- a missing `name`/`display_name` or
@@ -177,7 +210,9 @@ its own copy and row; a second hire whose display name mints a taken id is a 409
 
 Success: `{"ok": true, "id"}` -- the minted id (what `/members?member=` resolves);
 the copy the member is bound to and what the caller sent (label, role, source) are
-read back from the roster row, not echoed. The `GET /api/members` row carries
+read back from the roster row, not echoed. The `GET /api/members` row carries `template` and
+`template_version` (store provenance, `""` for a hand-made or locally adopted
+member; the drawer's Source row reads `Template <app>/<agent> (v<version>)`) and
 `template_origin` -- the template a member's own
 copy was made from (`forked_from` where the sidecar's `private_to` is this
 member), `""` when bound to a shared template directly -- so the drawer reads
@@ -187,7 +222,18 @@ same redactor as the other identity fields: a declared template name is text a
 package or a hand-edited spec wrote.
 
 Frontend: the Crew Members roster's **Add member** opens the crew manager's
-member form (`?new=1&from=members`); its Create IS a hire. Picking a template
+member form (`?new=1&from=members`); its Create IS a hire. When at least one
+ENABLED installed app offers templates, the form shows a **Hire from the store**
+picker above the binding block (`storeTemplateOptions`: one option per card,
+labelled `<app display name> · <role>`); picking one sets the Agent template to the
+app's materialized agent (display only -- the hire sends `{app, agent}` and the
+server resolves the binding), seeds Role and Triggers from the card and the name
+from the agent's stem (a seed follows a card switch; a value the user typed is
+theirs, the same rule the name seed follows), and the Create sends
+`source: {kind: "store", app, agent}`; choosing an agent file by hand afterwards
+returns to a local hire. A failed installed-apps read is said in the form
+(`ErrorNotice`, no hand-off: the form holds unsaved input) rather than the picker
+silently not appearing. Picking a template
 pre-fills an EMPTY name with the first of `reviewer`, `reviewer-2`, … that no
 member id holds (`freeMemberName`). Those candidates are inside the id grammar,
 so each IS its own minted id and the client needs no copy of the sanitizer; a
@@ -196,8 +242,12 @@ the way the server's own collision suffixing does; the server's 409 stays the
 authority. A typed name is never overwritten, and re-picking
 the template re-seeds the field only while it still holds the previous seed. The copy note renders under the
 template dropdown. The crew manager's own **New crew** stays a plain create
-(bind to a shared template). Pinned in `test/test_member_hire.py` (the gate: two
-members from one file coexist; a failed copy rolls back and a retry is clean; a
+(bind to a shared template). Pinned in `test/test_member_hire.py` (the gates: two
+members from one file coexist; one store template hired twice with different names
+coexist, each with the card's defaults, provenance, pristine copy and seeded
+briefing; an unhireable listing -- uninstalled, disabled, no card, unmaterialized,
+unreadable spec -- is refused before anything is written; a failed template link
+rolls the hire back, copy included; a failed copy rolls back and a retry is clean; a
 source that vanishes mid-hire rolls back with the fork's 404; a failed roll-back
 names the member; unhashable kinds are 400; lineage on the roster) and
 `website/src/test/CrewRoster.test.tsx` (hire vs plain create, pre-fill, note

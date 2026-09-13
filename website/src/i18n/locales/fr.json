@@ -5622,7 +5622,8 @@
         "oncall_ops": "Astreinte et exploitation",
         "other": "Autres",
         "productivity": "Productivité",
-        "research_writing": "Recherche et rédaction"
+        "research_writing": "Recherche et rédaction",
+        "templates": "Modèles"
       },
       "categoryRail": {
         "add_source": "Ajouter une source",
@@ -11077,7 +11078,11 @@
       "uses_global_memory_v1": "Utilise la mémoire globale V1",
       "memory_binding_mismatch": "La mémoire configurée de ce membre appartient à un autre membre. Elle ne peut pas être utilisée ici.",
       "memory_binding_diagnostic": "Examine la cause sur la passerelle : {{command}}",
-      "open_crew_manager": "Ouvrir le gestionnaire d’équipes"
+      "open_crew_manager": "Ouvrir le gestionnaire d’équipes",
+      "store_template": "Recruter depuis le store",
+      "store_template_hint": "Un rôle prêt à l’emploi fourni par une app installée. Le choisir remplit le rôle, les déclencheurs et le modèle d’agent ci-dessous.",
+      "store_template_none": "Aucun — recruter depuis un fichier d’agent",
+      "store_templates_unavailable": "Les apps installées n’ont pas pu être lues ; les modèles du store ne sont pas proposés pour le moment."
     },
     "knowledge": {
       "detailView": {
@@ -14888,7 +14893,8 @@
       "filter_source_package_description": "Crews installés par des packages de capacités",
       "member_count_filtered": "{{shown}} membres sur {{count}}",
       "setup_in_crew_manager": "Configurer la mémoire privée",
-      "own_copy_of": "{{template}} — copie personnalisée"
+      "own_copy_of": "{{template}} — copie personnalisée",
+      "provenance_store": "Modèle {{template}} (v{{version}})"
     }
   },
   "privacyDisclosure": {

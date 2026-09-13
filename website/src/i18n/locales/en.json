@@ -6796,7 +6796,11 @@
       "workspace": "workspace",
       "workspace_2": "Workspace",
       "workspace_hint_member": "The folder this member reads and writes. Switch it and new chats start fresh in the new folder; the old one is kept.",
-      "yes_delete_it": "Yes, delete it"
+      "yes_delete_it": "Yes, delete it",
+      "store_template": "Hire from the store",
+      "store_template_hint": "A ready-made role from an installed app. Picking one fills in the role, the triggers and the agent template below.",
+      "store_template_none": "None — hire from an agent file",
+      "store_templates_unavailable": "Installed apps could not be read, so store templates are not offered right now."
     },
     "knowledge": {
       "detailView": {
@@ -7084,7 +7088,8 @@
       "filter_source_builtin_description": "Crews that ship with {{productName}}",
       "filter_source_package_description": "Crews installed by capability packages",
       "member_count_filtered": "{{shown}} of {{count}} members",
-      "own_copy_of": "{{template}} — customized copy"
+      "own_copy_of": "{{template}} — customized copy",
+      "provenance_store": "Template {{template}} (v{{version}})"
     },
     "migrationPage": {
       "app_migration": "App Migration",
