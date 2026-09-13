@@ -1319,6 +1319,40 @@ Examples:
         help="Collect logs + crash reports into a redacted diagnostics zip",
     )
 
+    # ledger-sweep -- its own command, NOT a ``doctor`` mode. ``doctor`` is
+    # read-only by its own contract (a diagnostic you run because something
+    # broke must not unlink files), and ``--purge`` is irreversible; hosting the
+    # purge there also gave every modifier a way to be parsed without its mode.
+    ls_parser = cli_help.add_command(
+        sub,
+        "ledger-sweep",
+        description=(
+            "List the session and conductor-work ledgers that look finished. A dry "
+            "run by default: nothing is deleted without --purge, and --purge is a "
+            "second, separate invocation over the report the dry run printed."
+        ),
+    )
+    ls_parser.add_argument(
+        "--purge",
+        action="store_true",
+        help="Actually delete the listed ledgers (irreversible)",
+    )
+    ls_parser.add_argument(
+        "--older-than-days",
+        type=float,
+        default=None,
+        metavar="N",
+        help="Idle window before a ledger qualifies (default: 30)",
+    )
+    ls_parser.add_argument(
+        "--purge-unreadable",
+        action="store_true",
+        help=(
+            "With --purge: also delete records this sweep could not parse "
+            "(they are listed but kept by default)"
+        ),
+    )
+
     # gateway
     gw_parser = cli_help.add_command(sub, "gateway")
     gw_parser.add_argument(
@@ -3011,7 +3045,18 @@ The dashboard port is set with the KIROCREW_PORT env var, not a config key.
             whatsapp=getattr(args, "whatsapp", False),
         )
     elif args.command == "doctor":
-        _doctor(platform_boot_error=_platform_boot_error, bundle=getattr(args, "bundle", False))
+        _doctor(
+            platform_boot_error=_platform_boot_error,
+            bundle=getattr(args, "bundle", False),
+        )
+    elif args.command == "ledger-sweep":
+        # Lazy on purpose, through ``importlib`` like ``secrets`` above: the
+        # store modules behind the sweep are not part of the CLI's start-up cost.
+        importlib.import_module("kiro_crew.ledger_sweep").run_command(
+            purge=args.purge,
+            older_than_days=args.older_than_days,
+            purge_unreadable=args.purge_unreadable,
+        )
     elif args.command == "manifest":
         _manifest(
             alias=getattr(args, "alias", None),
