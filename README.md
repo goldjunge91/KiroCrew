@@ -833,6 +833,7 @@ make this tool possible:
 <a href="https://github.com/estenger" title="Evan Stenger"><img src="https://github.com/estenger.png?size=64" width="64" height="64" alt="Evan Stenger" /></a>
 <a href="https://github.com/estesp" title="Phil Estes"><img src="https://github.com/estesp.png?size=64" width="64" height="64" alt="Phil Estes" /></a>
 <a href="https://github.com/ethanlevine" title="ethanlevine"><img src="https://github.com/ethanlevine.png?size=64" width="64" height="64" alt="ethanlevine" /></a>
+<a href="https://github.com/etoscano" title="Eleonora Toscano"><img src="https://github.com/etoscano.png?size=64" width="64" height="64" alt="Eleonora Toscano" /></a>
 <a href="https://github.com/evajcwork-max" title="evajcwork-max"><img src="https://github.com/evajcwork-max.png?size=64" width="64" height="64" alt="evajcwork-max" /></a>
 <a href="https://github.com/EzzatQ" title="Ezzat Qupty"><img src="https://github.com/EzzatQ.png?size=64" width="64" height="64" alt="Ezzat Qupty" /></a>
 <a href="https://github.com/fanhongy" title="Stan Fan"><img src="https://github.com/fanhongy.png?size=64" width="64" height="64" alt="Stan Fan" /></a>
@@ -1071,6 +1072,7 @@ make this tool possible:
 <a href="https://github.com/omarMokh" title="Omar Abo Mokh"><img src="https://github.com/omarMokh.png?size=64" width="64" height="64" alt="Omar Abo Mokh" /></a>
 <a href="https://github.com/omerrubi-amzn" title="Omer Rubinstein"><img src="https://github.com/omerrubi-amzn.png?size=64" width="64" height="64" alt="Omer Rubinstein" /></a>
 <a href="https://github.com/OnlyOneByte" title="Rengang (Angelo) Yang"><img src="https://github.com/OnlyOneByte.png?size=64" width="64" height="64" alt="Rengang (Angelo) Yang" /></a>
+<a href="https://github.com/ophilli" title="Owen Phillips"><img src="https://github.com/ophilli.png?size=64" width="64" height="64" alt="Owen Phillips" /></a>
 <a href="https://github.com/parimaldeshmukh" title="Parimal Deshmukh"><img src="https://github.com/parimaldeshmukh.png?size=64" width="64" height="64" alt="Parimal Deshmukh" /></a>
 <a href="https://github.com/patrigao" title="patrigao"><img src="https://github.com/patrigao.png?size=64" width="64" height="64" alt="patrigao" /></a>
 <a href="https://github.com/PatryckSans" title="Patryck Sans"><img src="https://github.com/PatryckSans.png?size=64" width="64" height="64" alt="Patryck Sans" /></a>
@@ -1105,6 +1107,7 @@ make this tool possible:
 <a href="https://github.com/raanan245" title="raanan245"><img src="https://github.com/raanan245.png?size=64" width="64" height="64" alt="raanan245" /></a>
 <a href="https://github.com/rabinarayanpatra" title="Rabinarayan Patra"><img src="https://github.com/rabinarayanpatra.png?size=64" width="64" height="64" alt="Rabinarayan Patra" /></a>
 <a href="https://github.com/radical-beard" title="radical-beard"><img src="https://github.com/radical-beard.png?size=64" width="64" height="64" alt="radical-beard" /></a>
+<a href="https://github.com/rainsupreme" title="Rain Valentine"><img src="https://github.com/rainsupreme.png?size=64" width="64" height="64" alt="Rain Valentine" /></a>
 <a href="https://github.com/raiyanlabs" title="raiyanlabs"><img src="https://github.com/raiyanlabs.png?size=64" width="64" height="64" alt="raiyanlabs" /></a>
 <a href="https://github.com/Rajnita" title="Rajnita Leichombam"><img src="https://github.com/Rajnita.png?size=64" width="64" height="64" alt="Rajnita Leichombam" /></a>
 <a href="https://github.com/rajpuram09" title="Raj Puram"><img src="https://github.com/rajpuram09.png?size=64" width="64" height="64" alt="Raj Puram" /></a>
