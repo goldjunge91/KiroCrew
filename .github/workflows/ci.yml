@@ -866,13 +866,32 @@ jobs:
   # dashboard socket does not exist there), and that `pod down` really reaps both
   # the task and the process tree. Every one of those is faked in the sharded
   # test_pod_windows.py, which is what makes this job worth its minutes.
+  #
+  # LABEL OPT-IN: a pull request carrying the `ci:pod-scenarios` label ALSO runs
+  # the full 55-test pod scenario suite (test/e2e/scenarios/) here, against a
+  # real Vite-built SPA, with the same invocation and count pin as nightly.yml's
+  # pod-scenarios leg. That is how a current revision gets hosted Windows
+  # evidence for the suite without dispatching the release-publishing nightly and
+  # without charging every PR for a Node toolchain, an SPA build, a wheel build
+  # and a second pod bring-up. Every step the label adds carries the same
+  # `if: env.POD_SCENARIOS == 'true'`; unlabelled PRs and pushes to main run the
+  # original boot-only shape, byte for byte. The workflow does not listen for
+  # `labeled`, so the label must be on the PR BEFORE the push that should run it,
+  # and a re-run of an earlier run keeps that run's original event payload.
+  # test/test_pod_scenario_matrix.py pins both shapes.
   pod-boot-windows:
     name: Pod Boot Canary (Windows)
     needs: [await-fast-gate]
     runs-on: windows-latest
     # A cold boot pays for the venv build, interpreter start, config seeding and
-    # the health wait. The test's own bound is 180s; this is the job's.
+    # the health wait. The test's own bound is 180s; this is the job's. The
+    # label opt-in measured 76s (boot canary) + 205s (55 scenarios) plus the SPA
+    # build on a hosted runner, well inside the same ceiling.
     timeout-minutes: 30
+    env:
+      # `true` only for a pull_request event whose labels include the opt-in;
+      # anything else (push to main, an unlabelled PR) is the string `false`.
+      POD_SCENARIOS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:pod-scenarios') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -891,11 +910,28 @@ jobs:
             pyproject.toml
             setup.cfg
 
+      # Label opt-in only: the scenario suite's pod serves the built SPA, so the
+      # frontend toolchain is a prerequisite there. Same pin and cache shape as
+      # the `e2e` job. Skipped on the default boot-only run.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: env.POD_SCENARIOS == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
       # The CONTROL plane: the interpreter that runs pytest and drives the pod
       # verbs. Deliberately separate from the payload below, which is the real
       # split the pod design rests on.
       - name: Install dependencies (control plane)
         run: uv pip install --system -e ".[voice,desktop]" --group dev
+
+      # Label opt-in only: the wheel scenario runs `python -m build --wheel` with
+      # THIS interpreter (sys.executable) and, under KIROCREW_E2E_REQUIRE=1, fails
+      # rather than skips without it. `build` is not in the dev group on purpose.
+      - name: Install the wheel scenario's build tool (label opt-in)
+        if: env.POD_SCENARIOS == 'true'
+        run: uv pip install --system build==1.3.0
 
       # The PAYLOAD: the worktree's own `.venv\Scripts\kirocrew.exe`, which is
       # what the scheduled task actually boots. Without this the test FAILS
@@ -912,11 +948,30 @@ jobs:
       # placed by the WORKFLOW rather than by the test: a test that wrote into
       # the checkout could be killed by its own timeout before cleaning up.
       - name: Place a one-file SPA stand-in for `pod up`
+        if: env.POD_SCENARIOS != 'true'
         shell: bash
         run: |
           mkdir -p src/kiro_crew/static/dist
           [ -f src/kiro_crew/static/dist/index.html ] || \
             printf '<!doctype html><title>pod boot canary</title>' > src/kiro_crew/static/dist/index.html
+
+      # Label opt-in only: the scenario suite drives the served dashboard and
+      # packages it into the wheel it installs, so the bundle is the real Vite
+      # build, staged exactly as the `e2e` job and nightly.yml stage it. It
+      # replaces the stand-in above, so the boot canary serves the same bundle.
+      - name: Build and stage the SPA bundle (label opt-in)
+        if: env.POD_SCENARIOS == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd website
+          npm ci --no-audit --no-fund
+          npm run build
+          cd ..
+          rm -rf src/kiro_crew/static/dist
+          mkdir -p src/kiro_crew/static
+          cp -R website/dist src/kiro_crew/static/dist
+          test -f src/kiro_crew/static/dist/index.html
 
       - name: Assert a real pod boots and is reclaimed (not skipped)
         shell: bash
@@ -951,12 +1006,54 @@ jobs:
             exit 1
           }
 
+      # Label opt-in only: the full scenario suite, on the prerequisites the
+      # canary just used, with the SAME invocation and anchored count as
+      # nightly.yml's pod-scenarios leg so a green here is evidence for that
+      # matrix entry at THIS revision. `-o addopts=` drops `-n auto` (one pod for
+      # the whole session, and a killed xdist worker on Windows aborts the run),
+      # `--timeout=600` is the per-test cap (the wheel scenario carries its own
+      # wider mark), and `--basetemp` pins the plane under runner.temp so a failed
+      # run's pod logs land where the upload step below can find them.
+      # KIROCREW_E2E_REQUIRE=1 turns every precondition skip into a failure; the
+      # anchored `55 passed` grep is the second lock, for the same reason as the
+      # canary's: pytest exits 0 on a collected-but-skipped suite.
+      - name: Run the full pod scenario suite (label opt-in, 55 tests, not skipped)
+        if: env.POD_SCENARIOS == 'true'
+        shell: bash
+        env:
+          KIROCREW_E2E_SCENARIOS: "1"
+          KIROCREW_E2E_REQUIRE: "1"
+        run: |
+          set -uo pipefail
+          echo "::remove-matcher owner=python::"
+          pytest -v -p no:cacheprovider -o addopts= -n0 --timeout=600 \
+            --basetemp "${RUNNER_TEMP}/pod-scenarios-tmp" \
+            test/e2e/scenarios/ 2>&1 | tee pod-scenarios.log
+          status="${PIPESTATUS[0]}"
+          echo "pytest exit: ${status}"
+          # Six user-flow scenarios and 49 fixture-isolation checks must execute.
+          # Anchored so 155 passed cannot satisfy the 55-test contract; raise the
+          # number here AND in nightly.yml when you add a scenario.
+          if ! grep -qE '(^|[^0-9])55 passed' pod-scenarios.log; then
+            echo "::error::the pod scenario suite did not report 55 passed on windows-latest; a skipped or collapsed suite is not a pass"
+            exit 1
+          fi
+          exit "${status}"
+
+      # On the default run only pod-boot.log exists; the scenario globs match
+      # nothing and `if-no-files-found: ignore` keeps that from being a second
+      # failure. On a labelled run the pod's own log files are the only place a
+      # boot refusal is legible, and the plane root is the --basetemp above.
       - name: Upload the pod boot log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pod-boot-windows
-          path: pod-boot.log
+          path: |
+            pod-boot.log
+            pod-scenarios.log
+            ${{ runner.temp }}/pod-scenarios-tmp/kce2e-*/a/**
+            ${{ runner.temp }}/pod-scenarios-tmp/kce2e-*/h/**/*.log
           if-no-files-found: ignore
           retention-days: 7
   # The Windows fail-closed sandbox opt-in contract, asserted to have RUN.

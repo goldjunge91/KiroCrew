@@ -288,7 +288,7 @@ KIROCREW_E2E_SCENARIOS=1 \
   -n0 --timeout=600 test/e2e/scenarios/
 ```
 
-Add `KIROCREW_E2E_SCENARIOS_REQUIRE=1` when you need a verdict rather than a
+Add `KIROCREW_E2E_REQUIRE=1` when you need a verdict rather than a
 best-effort run: it turns every precondition skip into a failure, so a missing
 venv, an unbuilt SPA bundle or a host with no pod backend cannot read as a pass.
 That is the setting the nightly job uses. Each file also runs alone, so

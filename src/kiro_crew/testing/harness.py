@@ -60,7 +60,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Callable, Iterator, Optional
 
@@ -132,6 +132,14 @@ class GatewayHandle:
     #: Bound diagnostics provider (exit status, stderr tail, stdout tail).
     #: ``None`` for handles built outside :func:`spawn_feature_gateway`.
     _diagnostics: Optional[Callable[[], str]] = None
+    _teardown_confirmed: threading.Event = field(
+        default_factory=threading.Event, init=False, repr=False, compare=False
+    )
+
+    @property
+    def teardown_confirmed(self) -> bool:
+        """Whether the harness confirmed the whole spawned tree stopped."""
+        return self._teardown_confirmed.is_set()
 
     def diagnostics(self) -> str:
         """Exit status plus the stderr and stdout tails of the child, for a
@@ -889,6 +897,8 @@ def spawn_feature_gateway(
     *,
     crons: bool = False,
     timeout: Optional[float] = None,
+    kiro_bin: Optional[str | Path] = None,
+    before_spawn: Optional[Callable[[dict[str, str], Path], None]] = None,
 ) -> Iterator[GatewayHandle]:
     """Spin up an isolated gateway from the current workspace checkout.
 
@@ -912,6 +922,18 @@ def spawn_feature_gateway(
         timeout: Override the ready-line timeout in seconds. Falls back to
             ``KIROCREW_HARNESS_READY_TIMEOUT`` env var, then to
             ``DEFAULT_READY_TIMEOUT``.
+        kiro_bin: Exact ``kiro-cli`` path to publish as
+            ``KIROCREW_KIRO_BIN`` in the child environment. Use this when a
+            prerequisite probe and the gateway must execute the same binary;
+            ``None`` preserves the inherited resolver behavior. An explicit
+            binary also requires an existing launcher; its directory is
+            prepended to child PATH to prevent host-wide launcher installation.
+            ``KIRO_HOME`` is always the owned ``<throwaway home>/kiro`` tree.
+        before_spawn: Optional preflight called with a copy of the final child
+            environment and cwd before ``Popen``. The fixture is seeded first
+            using the ordinary seed API in a child; preflight-created private
+            files are preserved and gateway startup does not seed again.
+            Mutating the environment copy does not alter the gateway launch.
 
     Yields:
         ``GatewayHandle`` once the gateway has bound its dashboard port
@@ -971,6 +993,19 @@ def spawn_feature_gateway(
             # kick the 610MB embedding-model download during a test run.
             "KIROCREW_SKIP_MODEL_DOWNLOAD": "1",
         }
+        if kiro_bin is not None:
+            env["KIROCREW_KIRO_BIN"] = str(kiro_bin)
+            from kiro_crew.agent import _resolve_kirocrew_bin
+
+            # First-run setup may install a host PATH shim even when shared
+            # agent-spec writes are declined. Expose an existing launcher instead.
+            launcher = Path(_resolve_kirocrew_bin())
+            if not launcher.is_absolute() or not launcher.is_file():
+                raise GatewaySpawnError("explicit kiro_bin requires an existing kirocrew launcher")
+            env["PATH"] = str(launcher.parent) + os.pathsep + env.get("PATH", "")
+            reachable = shutil.which("kirocrew", path=env["PATH"])
+            if not reachable or Path(reachable).resolve() != launcher.resolve():
+                raise GatewaySpawnError("existing kirocrew launcher is not reachable on child PATH")
 
         cmd = [
             sys.executable,
@@ -978,13 +1013,6 @@ def spawn_feature_gateway(
             "kiro_crew",
             "gateway",
             "--test-mode",
-            # ``--seed`` populates the (empty) tmp KIROCREW_HOME from the named
-            # fixture (empty / minimal / rich) before binding the dashboard.
-            # Atomic with the gateway start: a bad fixture name → gateway exits
-            # with seed's exit code before READY, which the readline loop below
-            # surfaces as a GatewaySpawnError with stderr.
-            "--seed",
-            fixture,
             "--approval",
             approval,
         ]
@@ -994,8 +1022,37 @@ def spawn_feature_gateway(
             # that specifically exercise the cron path opt back in via
             # ``crons=True``.
             cmd.append("--no-crons")
+        spawn_cwd = src.parent
+        if before_spawn is not None:
+            # Native authentication/config preflights can create private files.
+            # Seed the empty owned tree FIRST, retaining seed's ordinary guards.
+            # Use a child so seed's environment lookup never changes our parent.
+            seeded = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from kiro_crew.seed import seed; import sys; seed(sys.argv[1])",
+                    fixture,
+                ],
+                cwd=str(spawn_cwd),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+            )
+            if seeded.returncode != 0:
+                raise GatewaySpawnError(
+                    f"preflight fixture seed failed (exit {seeded.returncode}): {seeded.stderr}"
+                )
+            before_spawn(dict(env), spawn_cwd)
+        else:
+            # Ordinary callers still seed atomically in gateway startup.
+            cmd.extend(["--seed", fixture])
         proc = subprocess.Popen(
             cmd,
+            cwd=str(spawn_cwd),
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1034,6 +1091,7 @@ def spawn_feature_gateway(
             pump.start()
 
         known_descendants: dict[int, str] = {}
+        handle: Optional[GatewayHandle] = None
         try:
             ready = _wait_for_ready_line(
                 proc, timeout=timeout, stderr_buffer=stderr_buffer, pump=pump
@@ -1079,6 +1137,8 @@ def spawn_feature_gateway(
             yield handle
         finally:
             exited = _terminate_process_group(proc, known_descendants)
+            if exited is True and handle is not None:
+                handle._teardown_confirmed.set()
     finally:
         # Clean up the tmp home only once the gateway is confirmed gone: a
         # tree kill that failed (a protected descendant, an access denial on
