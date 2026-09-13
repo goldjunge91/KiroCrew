@@ -4157,6 +4157,36 @@ class TestAcpSessionHandleState:
         ]
         assert handle.get_valid_effort_levels() == ["low", "medium", "high"]
 
+    def test_get_valid_effort_levels_asks_for_the_harness_own_option_id(self):
+        """The option id is per harness, so the handle reads it rather than spelling it.
+
+        Every backend this runtime serves today spells the option ``effort``, so a
+        literal and ``effort_option_id`` agree on all of them and the test above
+        cannot tell the two apart. deepseek advertises the same channel as
+        ``reasoning_effort``, which is what makes the difference observable: with
+        the literal restored this returns ``[]``, which a caller reads as "no
+        effort levels offered" rather than as a lookup that missed.
+        """
+        from kiro_crew.acp.types import ACP_BACKEND_DEEPSEEK
+
+        rt, _, _ = _make_runtime()
+        rt._acp_backend = ACP_BACKEND_DEEPSEEK
+        q = _register(rt, "s1")
+        handle = AcpSessionHandle("s1", q["s1"], rt)
+
+        handle._config_options = [
+            {"id": "effort", "options": [{"value": "decoy"}]},
+            {
+                "id": "reasoning_effort",
+                "options": [
+                    {"value": "low", "label": "Low"},
+                    {"value": "high", "label": "High"},
+                    {"value": "max", "label": "Max"},
+                ],
+            },
+        ]
+        assert handle.get_valid_effort_levels() == ["low", "high", "max"]
+
     def test_set_model_updates_state(self):
         """set_model updates the _model field."""
         rt, _, _ = _make_runtime()

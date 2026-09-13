@@ -124,6 +124,7 @@ from kiro_crew.acp.types import (
     AcpEvent,
     AcpPromptStats,
     JsonRpcMessage,
+    effort_option_id,
 )
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.constants import COMPACT_WAIT_TIMEOUT_SECS
@@ -1982,11 +1983,21 @@ class AcpSessionHandle:
         )
 
     def get_valid_effort_levels(self) -> list[str]:
-        """Return valid effort levels from config options, preserving order."""
+        """Return valid effort levels from config options, preserving order.
+
+        The option's id is read from ``effort_option_id`` rather than spelled
+        here, for the reason ``AcpClient.get_valid_effort_levels`` gives: the
+        spelling is per harness, and a literal returns an empty list for one that
+        spells it differently -- which reads as "no effort levels offered" rather
+        than as a lookup that missed. Every backend this runtime serves today
+        spells it ``effort``, so the two agree here; that agreement is what made
+        the literal invisible to tests, not a reason to keep it.
+        """
+        wanted = effort_option_id(self._runtime.acp_backend)
         for opt in self._config_options:
             if not isinstance(opt, dict):
                 continue
-            if opt.get("id") == "effort":
+            if opt.get("id") == wanted:
                 options = opt.get("options", [])
                 if isinstance(options, list):
                     return [
