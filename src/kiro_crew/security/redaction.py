@@ -462,10 +462,35 @@ _SECRET_ENTROPY_MIN = 4.3
 # do not. NOTE: unlike a naive design we deliberately do NOT treat the presence
 # of '/' or '+' as a free pass to redact — 40-char mixed-case file paths contain
 # '/' yet are benign, so a '/' token must still clear both structural gates.
+# Neither gate can speak for a path LONGER than one window, though: its straddling
+# sub-windows are built from fragments of several components and clear both, which
+# is what `_SECRET_MAX_SLASHES` below is for.
 # Thresholds are chosen from measured distributions (see test_security.py) with a
 # wide margin toward NOT redacting.
 _SECRET_MAX_LOWER_RUN = 5
 _SECRET_MAX_VOWEL_RATIO = 0.30
+
+# Ceiling on the separators a WINDOW CUT OUT OF A LONGER RUN may hold, applied by
+# :func:`_contains_bare_secret`. It is the signal that tells a path apart from a
+# key, which the two gates above cannot do: they judge a token in isolation, and a
+# window straddling several path components is a token nobody wrote -- CamelCase
+# caps its lowercase run, consonant-heavy acronyms crush its vowel ratio, a
+# version digit supplies the third character class, and the separators lift its
+# entropy. In the base64 alphabet `/` is 1 character in 64, so a real 40-char key
+# averages 0.6 of them, while a window spanning components carries one per
+# component.
+#
+# Measured on 200,000 uniformly random 40-char keys -- a genuine AWS secret's own
+# shape -- and asserted in ``TestSecretSlashCapIsMeasured``. Share of those keys
+# each gate declines on its own: lowercase run 9.29%, vowel ratio 6.60%, THIS
+# 0.36%, missing character class 0.11%, entropy 0.03%. So the ceiling is the least
+# lossy structural signal here by more than an order of magnitude, and the
+# classifier it joins already declines 15.39% of genuine keys -- the module's
+# documented bias toward not redacting, not an accident.
+#
+# Three is the measured knee. Four costs only 0.04% but leaves the reported paths
+# redacted; two fixes nothing further and costs 2.42%.
+_SECRET_MAX_SLASHES = 3
 
 # A token that base64-decodes to >=85% printable ASCII is encoded *text*, not a
 # random key (random 40-char keys decode to mostly non-printable bytes). Such a
@@ -757,6 +782,23 @@ def _contains_bare_secret(run: str) -> bool:
     lifted to run granularity so a misaligned window cannot defeat it. A genuine
     glued secret (``X`` + key, key + ``ABC``, key + ``X`` + key) does NOT decode
     cleanly as a whole run, so it still reaches the sliding window below.
+
+    SEPARATOR CEILING FOR A FRAGMENT. ``/`` is in the run alphabet, so a deep
+    absolute path is a single run that breaks only at ``-``, ``_``, ``.`` or
+    whitespace, and its straddling sub-windows clear every per-window gate for the
+    reasons ``_SECRET_MAX_SLASHES`` sets out. A window whose separator density is
+    a path's is therefore declined -- but only when the run is LONGER than one
+    whole key, because that is the only case in which a window is a fragment cut
+    out of something. A run of exactly ``_SECRET_KEY_LEN`` chars IS the token
+    somebody wrote, has no surrounding structure to disambiguate, and is judged by
+    the seven gates alone: a standalone bare key is unaffected by this ceiling
+    however many separators it contains.
+
+    EVERY WINDOW IS STILL CLASSIFIED. The ceiling is read AFTER
+    :func:`_looks_like_secret_key` has answered, so no offset goes unexamined and
+    a key at an arbitrary offset is still classified at its own offset. Declining
+    to look at an offset would leave a key whose true offset was never examined
+    undetected, which is a different and worse thing than declining a window.
     """
     if len(run) < _SECRET_KEY_LEN:
         return False
@@ -772,7 +814,8 @@ def _contains_bare_secret(run: str) -> bool:
     # and the pre-check would be pure duplicate work. This is what keeps the
     # slide affordable on long non-secret runs (hex digests, lowercase blobs),
     # which are the common shape in tool output.
-    if len(run) > _SECRET_KEY_LEN:
+    is_fragment = len(run) > _SECRET_KEY_LEN
+    if is_fragment:
         if not _has_all_three_char_classes(run):
             return False
         if _HEX_ONLY_RE.match(run):
@@ -780,8 +823,13 @@ def _contains_bare_secret(run: str) -> bool:
     if _decodes_to_printable_text(run):
         return False
     for start in range(len(run) - _SECRET_KEY_LEN + 1):
-        if _looks_like_secret_key(run[start : start + _SECRET_KEY_LEN]):
-            return True
+        window = run[start : start + _SECRET_KEY_LEN]
+        if not _looks_like_secret_key(window):
+            continue
+        if is_fragment and window.count("/") > _SECRET_MAX_SLASHES:
+            # Key-shaped, but a fragment carrying a path's separator density.
+            continue
+        return True
     return False
 
 
