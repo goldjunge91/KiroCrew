@@ -20,6 +20,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Literal, overload
 
 from kiro_crew.atomic_write import atomic_write, replace_with_retry
+from kiro_crew.chat_attachments import (
+    purge_staged_attachments,
+    restore_staged_attachments,
+    stage_attachments_removal,
+)
 from kiro_crew.history_cache import _FileChangeCacheEntry
 from kiro_crew.jsonl_util import bounded_raw_records
 
@@ -1220,10 +1225,32 @@ class SessionMetadataProjection:
                         key,
                     )
                     return False
+                # The images this session's messages showed are its content,
+                # served by ``/api/file-raw`` the way the transcript's text is
+                # served by the session view. They leave with the transcript in
+                # three all-or-nothing steps: the attachments directory is moved
+                # aside in ONE rename (a failure aborts with everything intact),
+                # the transcript is unlinked (a failure moves the directory back,
+                # so the retained rows still resolve), and only then are the
+                # staged bytes purged -- nothing references them any more, so a
+                # leftover is an orphan for an operator, never a served image.
+                try:
+                    staged = stage_attachments_removal(path.parent, path.stem)
+                except OSError:
+                    _HISTORY_LOGGER.warning(
+                        "delete_session: cannot move attachments aside for key=%s, not deleting",
+                        key,
+                        exc_info=True,
+                    )
+                    return False
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
+                    if staged is not None:
+                        restore_staged_attachments(staged, path.parent, path.stem)
                     return False
+                if staged is not None:
+                    purge_staged_attachments(staged)
                 for sidecar in (
                     self._log._summary_cache_path(key),
                     self._log._intent_summary_cache_path(key),

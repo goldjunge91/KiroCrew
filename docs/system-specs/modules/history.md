@@ -867,6 +867,106 @@ inner JSONL fallback; only an absent replay requests fallback construction.
 5. User returns → new session with history re-injected
 6. After 10+ messages → background consolidation → structured memory updated
 
+## Inline Image Attachments (`chat_attachments.py`)
+
+A message's inline images are session-scoped content and are stored with its
+transcript. `![alt](/abs/path.png)` is resolved off disk by the dashboard at VIEW
+time (`/api/file-raw`), and the path an agent writes normally points into its own
+per-process scratch directory (`agent_scratch.py`), which is reclaimed when the
+agent process dies — so the reference outlives the bytes and the transcript
+renders a missing-file chip.
+
+At each write boundary the referenced image is copied into
+`<sessions dir>/<transcript stem>.attachments/<sha256[:16]>-<basename>` and the
+**persisted** destination is rewritten to point there. Two boundaries share the
+one helper, `persist_inline_images`:
+
+| Boundary | Covers |
+|---|---|
+| `ConversationLog.append` / `append_if_absent` | agent, channel, cron and workflow rows |
+| `chat_persistence._build_message_entry` | the dashboard slot save's window re-serialization |
+
+Contract:
+
+- **Copy, never move.** The original file stays where the agent put it. The
+  dashboard slot save COMMITS the rewritten destination back into its in-memory
+  row: the save re-serializes the whole window on every flush, so a row still
+  naming the scratch file would be re-resolved each time and, once scratch is
+  reclaimed, overwrite the good persisted path with the dead one. The live UI
+  reads the image from disk at view time either way.
+- **Content-addressed**, so one image referenced by many messages is stored once.
+- **Idempotent**: a destination already inside the attachments directory is left
+  alone, which lets the two boundaries compose and lets the slot save
+  re-serialize its window on every flush without re-copying.
+- **A preserved image corroborates an id match.** The two boundaries can meet
+  one message at different times: the slot save (or an injector's
+  `append_if_absent`) lands it with the image rewritten to its stored copy, and
+  by the time the other writer runs the agent's scratch file can be gone, so
+  that writer's rewrite fails open to the original path and the bodies disagree.
+  Both id-aware dedup sites — `append_if_absent`'s same-`meta.mid` check and the
+  slot save's pass-0 fold in `_frozen_prefix_and_foreign_appends` — therefore
+  accept `same_text_modulo_images` (equal text, image destinations compared by
+  the stored copy's own naming, at least one already inside this transcript's
+  attachments directory) as corroboration alongside equal body or equal `ts`.
+  Corroboration stays required, because `meta.mid` is caller-suppliable; body
+  equality stays the rule for id-less callers.
+- **`role != "user"`**, the same gate the redaction boundary uses: an inline image
+  is agent output, and a path the user typed names a file of their own.
+- **Bounded scan.** A row with more than `MAX_IMAGE_OPENERS_PER_MESSAGE` (256)
+  `![` openers is left as written without scanning: the reference scanner is
+  quadratic in the opener count and this runs under the session lock on
+  LLM-authored text. The Storage page's empty-shell `rmdir` of a drained
+  attachments directory re-takes the transcript lock, because a resuming writer
+  creates that directory and lands its first image under the same lock.
+- **Fail-open per image**, at debug level. Skipped: remote and `data:`
+  destinations, relative paths, non-image extensions, anything over 25 MiB,
+  sensitive paths, and non-regular files — **symlinks are refused, never
+  followed**, because the copy lands where the dashboard serves it.
+- `delete_session` takes the attachments with the transcript in three
+  all-or-nothing steps: rename the directory aside (one atomic rename — a failure
+  aborts with transcript and images intact), unlink the transcript (a failure
+  renames the directory back, so the retained rows still resolve), then purge the
+  staged copy. A purge residue (Windows: a file still open in a viewer) is an
+  orphan under a `.attachments.trash-*` name that nothing serves, logged at
+  WARNING for the operator; it never fails the delete and never leaves a
+  transcript pointing at missing pictures.
+- The Storage page's reclaim (`session_storage.py`) treats the directory as the
+  session's third half: `_unit_paths` lists its files, so they are measured with
+  the session, moved to the trash batch under `crew/<stem>.attachments/`, restored
+  with it, and emptied with it; an image written recently keeps the session
+  fresh. The drained directory is removed after the batch is durable and
+  recreated by restore. Only regular files are taken -- a foreign entry stays,
+  and so does the directory holding it.
+
+Reads go through `hooks.safe_read_file_bytes_nolink`, the house chokepoint: it
+opens the final component as itself on every platform and validates the
+descriptor it opened (regular, not hardlinked, not sensitive), so no
+check-to-use window remains.
+
+**Reclamation is delete-only, by decision.** Rotation moves old rows to
+`archive/`, and those rows still name their attachments — so rotation orphans
+nothing and must not sweep; sweeping against the live transcript alone would
+break the references the archive keeps. An attachment becomes genuinely
+unreferenced only when archive retention expires its last row. The ceilings are
+**per message** (12 images, 64 MiB, 25 MiB each); across messages a session's
+attachments grow with every distinct image it posts until the session is
+deleted — content-addressing dedups repeats, not a stream of unique pictures. A
+per-session byte ceiling, or a sweep coupled to archive-retention expiry, is a
+follow-up ([issue #10437](https://github.com/kirodotdev/KiroCrew/issues/10437)), not part of the write
+boundary.
+
+**Known limitation:** the rewritten destination is the absolute path of the
+attachments directory. Relocating or restoring the data home under a different
+path breaks every persisted image reference the same way the original scratch
+path did; a home-relative encoding belongs with the next renderer change. For
+the same reason attachments do not travel with a session transfer or export
+(`session_transfer.py` carries the transcript text and drops host-local
+references by design), exactly as the scratch path they replace never did.
+
+`sessions/` is write-protected but deliberately not read-sensitive
+(`security/paths.py`), so `/api/file-raw` serves an attachment under the existing
+sensitive-path policy.
+
 ## Source Provenance
 
 Messages include `source_thread` and `source_user` fields:
