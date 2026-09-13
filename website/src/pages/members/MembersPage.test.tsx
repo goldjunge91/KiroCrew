@@ -74,11 +74,17 @@ vi.mock('../../hooks/useDevMode', () => ({ useDevMode: () => false }))
  * contract is only "mount it with the thread's slot key", so a stub that
  * ECHOES the slot key is the strongest cheap assertion available. */
 vi.mock('../../components/ChatPane', () => ({
-  default: ({ slotKey, agentLocked, followContentWidth, busyMode }: { slotKey: string; agentLocked?: boolean; followContentWidth?: boolean; busyMode?: string }) => (
-    <div data-testid="chat-pane-stub" data-agent-locked={agentLocked ? '1' : '0'} data-follow-content-width={followContentWidth ? '1' : '0'} data-busy-mode={busyMode ?? 'split'}>
+  default: ({ slotKey, agentLocked, followContentWidth, busyMode, transcript }: { slotKey: string; agentLocked?: boolean; followContentWidth?: boolean; busyMode?: string; transcript?: React.ReactNode }) => (
+    <div data-testid="chat-pane-stub" data-agent-locked={agentLocked ? '1' : '0'} data-follow-content-width={followContentWidth ? '1' : '0'} data-busy-mode={busyMode ?? 'split'} data-has-transcript={transcript !== undefined ? '1' : '0'}>
       {slotKey}
+      {transcript}
     </div>
   ),
+}))
+// The inbox-model projection has its own suite (MemberProjection.test.tsx);
+// here it only needs to be recognisably mounted for the flagged member.
+vi.mock('./MemberProjection', () => ({
+  default: ({ slug }: { slug: string }) => <div data-testid="member-projection-stub">{slug}</div>,
 }))
 
 /** Records every navigate() call AND performs it against the MemoryRouter, so
@@ -1239,6 +1245,28 @@ describe('MembersPage unread drain', () => {
     })
     // Exactly one dot: the flagged member's, not every row's.
     expect(screen.getAllByTestId('member-unread-dot')).toHaveLength(1)
+  })
+
+  it('an inbox-model member shows its durable unread COUNT instead of the dot, and mounts the projection', async () => {
+    localStorage.setItem(LAST_MEMBER_KEY, 'scout')
+    await renderPage([
+      row({ bound: true, slot_key: 'member-oncall', inbox_model: true, unread: 3 }),
+      row({ name: 'scout', slug: 'scout' }),
+    ])
+    const pane = await screen.findByTestId('chat-pane-stub', undefined, PANE_READY)
+    expect(pane).toHaveTextContent('member-scout')
+    // scout is on the session model: the pane keeps its own transcript.
+    expect(pane).toHaveAttribute('data-has-transcript', '0')
+    expect(screen.queryByTestId('member-projection-stub')).toBeNull()
+    const badge = screen.getByTestId('member-unread-count')
+    expect(badge).toHaveTextContent('3')
+    expect(badge).toHaveAccessibleName('3 unread messages')
+    expect(screen.queryByTestId('member-unread-dot')).toBeNull()
+    // Opening the flagged member hands the pane the projection.
+    fireEvent.click(await rosterRow('oncall'))
+    await waitFor(() => expect(screen.getByTestId('chat-pane-stub')).toHaveTextContent('member-oncall'))
+    expect(screen.getByTestId('chat-pane-stub')).toHaveAttribute('data-has-transcript', '1')
+    expect(screen.getByTestId('member-projection-stub')).toHaveTextContent('oncall')
   })
 
   it('opening the thread clears the roster dot along with the badge', async () => {

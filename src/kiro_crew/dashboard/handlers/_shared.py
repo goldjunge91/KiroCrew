@@ -55,6 +55,12 @@ def _redact_memory_field(val: object) -> object:
     Lives here (not in ``memory.py``) so handlers that ``memory.py`` itself
     imports from -- e.g. ``cron.py`` -- can share the chain without an import
     cycle.
+
+    Dictionary KEYS go through the same string chain as values: a mapping an
+    LLM built (a member envelope's ``refs``, a memory record's metadata) is
+    model text in both positions, and a credential placed as a key would pass
+    a value-only walk untouched. A redacted key that collides keeps the later
+    entry, which loses only metadata the response was never going to show.
     """
     if isinstance(val, (bytes, memoryview)):
         return None
@@ -65,7 +71,10 @@ def _redact_memory_field(val: object) -> object:
     if isinstance(val, list):
         return [_redact_memory_field(item) for item in val]
     if isinstance(val, dict):
-        return {k: _redact_memory_field(v) for k, v in val.items()}
+        return {
+            (_redact_memory_field(k) if isinstance(k, str) else k): _redact_memory_field(v)
+            for k, v in val.items()
+        }
     return val
 
 

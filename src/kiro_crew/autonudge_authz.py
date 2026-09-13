@@ -60,7 +60,10 @@ logger = logging.getLogger(__name__)
 # itself awake -- so the one admitted exception is a SELF-ARM: the arming
 # request came from a turn of the bound session itself. See
 # :func:`is_self_arm`.
-_EXTERNAL_ARM_REFUSED_MODES = frozenset({"crew", "member"})
+# ``member-wake`` (the inbox model's ephemeral wake context) is refused on the
+# same grounds as the thread: the scheduler is the only thing that wakes a
+# member, so nothing external may arm a loop on either of its slots.
+_EXTERNAL_ARM_REFUSED_MODES = frozenset({"crew", "member", "member-wake"})
 
 
 def is_self_arm(slot_key: str, initiator_slot_key: str) -> bool:

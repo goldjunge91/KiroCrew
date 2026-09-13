@@ -414,6 +414,16 @@
     "apps.meetings.broadcastBar.pausingPlaceholder": "Compose-bar placeholder while the pause request is still in flight; must not claim the meeting is already paused.",
     "apps.meetings.broadcastBar.resumingPlaceholder": "Compose-bar placeholder while the resume request is in flight; must not instruct the user to click Resume again.",
     "apps.meetings.transcript.emptyHintPaused": "Empty-transcript hint while the meeting is paused; reassures nothing was discarded without promising live speech.",
-    "apps.meetings.meeting.endingReview": "Transitional badge and compose placeholder while the End-and-review request is in flight; explains why controls are disabled."
+    "apps.meetings.meeting.endingReview": "Transitional badge and compose placeholder while the End-and-review request is in flight; explains why controls are disabled.",
+    "pages.membersPage.inbox_kind_peer_dm": "Crew Members thread, badge on a collapsed row: a message exchanged with a fellow crew member, not with the human. The product's own word for a crew member (the same noun the Members page uses), never 'peer'; the arrow beside it says sent or received.",
+    "pages.membersPage.inbox_kind_user_dm": "Crew Members thread, badge on a collapsed row: a message stamped as typed by the person but carrying a foreign sender, so it is shown as machinery rather than as the human's bubble. A short noun.",
+    "pages.membersPage.inbox_kind_session_dm": "Crew Members thread, badge on a collapsed row: a message another SESSION (not the person) relayed into this member's inbox through session_send. Short label.",
+    "pages.membersPage.inbox_kind_reply": "Crew Members thread, badge: the member's own reply row. A short noun.",
+    "pages.membersPage.inbox_kind_system": "Crew Members thread, badge: a notice the gateway itself wrote (e.g. dead-lettered envelopes). Noun, as in 'system notice'.",
+    "pages.membersPage.inbox_hop": "Crew Members thread, expanded peer row: the causal hop count of a member-to-member relay, e.g. 'hop 2'. Networking sense of hop; keep short.",
+    "pages.membersPage.inbox_state_dead": "Crew Members thread, expanded row: the message could not be delivered — every wake that received it crashed, so it was set aside and the member was told. Plain-language state label; a tooltip (inbox_state_dead_tip) carries the detail.",
+    "pages.membersPage.inbox_state_pending": "Crew Members thread, expanded row on an inbound message: it has been delivered to the member's inbox and is waiting for the member to wake and act on it (NOT undelivered). Short state label; inbox_state_pending_tip carries the sentence.",
+    "pages.membersPage.inbox_rows_one": "Crew Members thread, count pill on a collapsed group header, e.g. '3 items' next to the kind badge (singular form).",
+    "pages.membersPage.inbox_rows_other": "Crew Members thread, count pill on a collapsed group header, e.g. '3 items' next to the kind badge (plural form)."
   }
 }

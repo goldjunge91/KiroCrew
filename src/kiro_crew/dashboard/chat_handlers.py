@@ -381,7 +381,8 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
     # BEFORE the _human_seen attendance mark, so a denied request leaves the
     # slot exactly as it found it.
     if members_mod.is_member_mode(slot.mode) and agent and agent != slot.agent:
-        # Member DM threads (and member wakes) are pinned to their crew. The generic mismatch
+        # Member slots -- the DM thread and a wake context alike -- are pinned to
+        # their crew (``is_member_mode``). The generic mismatch
         # branch below would also refuse this, but the pin deserves its own
         # machine-readable refusal — and it must hold even for a member slot
         # whose agent is somehow empty (the elif below would otherwise adopt
@@ -423,7 +424,14 @@ async def api_chat(request: web.Request) -> web.StreamResponse:
         # than after the message is composed into an unreachable thread.
         # Same rare-send IO budget as the registry check above.
         if slot.key.startswith(members_mod.DM_SLOT_KEY_PREFIX):
-            _send_binding = await asyncio.to_thread(members_mod.read_dm_binding_for_slot, slot.key)
+            # A wake slot (``member-<slug>.wake-<n>``) folds to the thread key
+            # first: the binding names the THREAD, and the wake is the same
+            # member (``member_owner_key`` is the M0 ownership fold).
+            from kiro_crew.member_inbox import member_owner_key as _fold_wake
+
+            _send_binding = await asyncio.to_thread(
+                members_mod.read_dm_binding_for_slot, _fold_wake(slot.key)
+            )
             if _send_binding is None or _send_binding.get("member", "") != slot.agent:
                 sel().log_api_access(
                     caller=request.remote or "",
@@ -6129,7 +6137,8 @@ async def api_chat_slot_agent(request: web.Request) -> web.Response:
     if agent_name and not _AGENT_NAME_RE.match(agent_name):
         return web.json_response({"error": "invalid agent name"}, status=400)
     if members_mod.is_member_mode(slot.mode) and agent_name != slot.agent:
-        # Member DM threads (and member wakes) are pinned to their crew: refuse the switch before
+        # Member slots (DM thread and wake context) are pinned to their crew:
+        # refuse the switch before
         # any state is touched. A same-name "switch" stays allowed — it is a
         # session reset, not a re-bind. Audited like every other pin denial
         # (the send path's guard emits the same event), so a probe against the

@@ -2297,7 +2297,60 @@ export interface MemberRosterRow {
   source?: 'kirocrew' | 'builtin' | 'package' | string
   /** User's favourite mark; toggled via PUT /api/agents/{name}. */
   starred?: boolean
+  /** Member inbox model (RFC member-inbox-model): the page renders this
+   *  member's thread from GET /api/members/{slug}/projection instead of the
+   *  slot transcript. Absent on a backend that predates the flag = false. */
+  inbox_model?: boolean
+  /** Durable unread count for an inbox-model member — outbox rows newer than
+   *  the person's read marker. Only meaningful when `inbox_model` is true. */
+  unread?: number
   [extra: string]: unknown
+}
+
+/** Envelope kinds an inbox-model member's projection can carry. `reply` is
+ *  the member's own answer (an outbox row); the rest are inbox kinds. */
+export type MemberEnvelopeKind =
+  | 'user_dm'
+  | 'session_dm'
+  | 'reply'
+  | 'peer_dm'
+  | 'worker_report'
+  | 'wake_timer'
+  | 'system'
+  | string
+
+/** One row of GET /api/members/{slug}/projection — an envelope from the
+ *  member's inbox (any state) or outbox, already merged in time order by the
+ *  server. `direction` says who wrote it relative to the member; `state`
+ *  says where the inbox has it (`sent` for every outbox row). */
+export interface MemberProjectionRow {
+  id: string
+  /** `user` (the person typed), `member:<slug>`, `session:<key>` (a `session_dm`), `system`. */
+  from: string
+  to: string
+  kind: MemberEnvelopeKind
+  body: string
+  hop: number
+  /** ISO-8601 UTC with microseconds; sorts lexicographically. */
+  created_at: string
+  refs: Record<string, unknown>
+  attempts: number
+  acked_at: string | null
+  direction: 'in' | 'out'
+  state: 'pending' | 'acked' | 'dead' | 'sent'
+}
+
+export interface MemberProjection {
+  slug: string
+  /** False for a member that is not on the inbox model — rows are then empty
+   *  and the page renders the slot transcript instead. */
+  inbox_model: boolean
+  /** The served window: the newest rows, widened to include every row newer
+   *  than the read marker, so marking the newest served row read can never
+   *  skip an unread one the client was not shown. */
+  rows: MemberProjectionRow[]
+  unread: number
+  marker: { last_read_id: string; last_read_at: string } | null
 }
 
 /** One entry of GET /api/members/{slug}/activity — a recorded engagement.
@@ -3067,6 +3120,19 @@ export const api = {
       capped: boolean
       entries: MemberActivityEntry[]
     }>,
+  // The inbox-model thread: inbox + outbox rows merged, the unread count and
+  // the read marker. Polled while the member is open (envelopes arrive from
+  // wakes and peers, not from this tab), never for an unflagged member.
+  memberProjection: (slug: string) =>
+    fetch('/api/members/' + encodeURIComponent(slug) + '/projection').then(j) as Promise<MemberProjection>,
+  // The person has seen the projection: advance the read marker to the newest
+  // rendered row. Idempotent and monotone server-side.
+  // `lastReadId` is the row the projection rendered last -- required, the server
+  // has no "everything shown" mode (the marker only moves forward).
+  memberMarkRead: (slug: string, lastReadId: string) =>
+    post('/api/members/' + encodeURIComponent(slug) + '/read', { last_read_id: lastReadId }).then(
+      j,
+    ) as Promise<{ ok: boolean; slug: string; unread: number; marker: { last_read_id: string; last_read_at: string } }>,
   updateKirocrewAgent: (name: string, body: object) =>
     put('/api/agents/' + encodeURIComponent(name), body).then(j),
   deleteKirocrewAgent: (name: string) =>

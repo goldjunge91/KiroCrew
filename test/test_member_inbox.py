@@ -1,4 +1,5 @@
-"""Member inbox model, M0: store, peer admission, scheduler, wake runner, shim.
+"""Member inbox model, M0 + M1: store, peer admission, scheduler, wake runner, shim,
+read marker / unread, worker_report production, member-mode predicate.
 
 ``KIROCREW_HOME`` is pinned to a per-test tmp dir by the autouse conftest
 fixture, so every member directory here resolves under tmp. Config is stubbed
@@ -25,6 +26,7 @@ from kiro_crew.member_inbox import (
     make_envelope,
     member_owner_key,
     member_slug_from_key,
+    projection,
     wake_slot_key_for,
 )
 
@@ -331,6 +333,572 @@ class TestOutboxAndProjection:
         out.append(kind="peer_dm", body="y", refs={"to": "member:fixer"})
         assert out.peer_sends_since("") == 2
         assert out.peer_sends_since(first.created_at) == 1
+
+    def test_projection_marks_a_failed_peer_mirror_undeliverable(self):
+        out = OutboxStore("radar")
+        ok = out.append(
+            kind="peer_dm", body="x", refs={"to": "member:fixer", "delivery": "delivered"}
+        )
+        bad = out.append(
+            kind="peer_dm", body="y", refs={"to": "member:fixer", "delivery": "failed"}
+        )
+        reply = out.append(kind=mi.OUTBOX_REPLY_KIND, body="r")
+        state = {r["id"]: r["state"] for r in projection("radar")}
+        assert (state[ok.id], state[bad.id], state[reply.id]) == ("sent", "dead", "sent")
+
+
+# ------------------------------------------------------------ read marker (M1)
+
+
+class TestReadMarkerAndUnread:
+    def test_unread_counts_only_outbox_rows_newer_than_the_marker(self):
+        InboxStore("radar").append(_env("radar", body="hello"))
+        out = OutboxStore("radar")
+        r1 = out.append(kind=mi.OUTBOX_REPLY_KIND, body="first reply")
+        assert mi.read_marker("radar") == {"last_read_id": "", "last_read_at": ""}
+        assert mi.unread_count("radar") == 1  # the user_dm is not news to its author
+        rows = projection("radar")
+        marker = mi.write_read_marker("radar", rows[-1])
+        assert marker["last_read_id"] == r1.id
+        assert mi.unread_count("radar") == 0
+        r2 = out.append(kind="peer_dm", body="to fixer", refs={"to": "member:fixer"})
+        InboxStore("radar").append(_env("radar", kind="system", body="notice", from_="system"))
+        assert mi.unread_count("radar") == 1  # the mirrored send counts, the system row does not
+        assert (
+            mi.write_read_marker("radar", projection("radar")[-1])["last_read_at"] >= r2.created_at
+        )
+
+    def test_marker_is_monotone_and_ignores_an_empty_projection(self):
+        out = OutboxStore("radar")
+        a = out.append(kind=mi.OUTBOX_REPLY_KIND, body="a")
+        b = out.append(kind=mi.OUTBOX_REPLY_KIND, body="b")
+        rows = projection("radar")
+        newest = mi.write_read_marker("radar", rows[-1])
+        assert newest["last_read_id"] == b.id
+        older = mi.write_read_marker("radar", rows[0])
+        assert older == newest, "moving the marker backwards is refused"
+        assert mi.write_read_marker("radar", None) == newest
+        assert a.id != b.id
+
+    def test_malformed_marker_reads_as_never_read(self):
+        path = mi.member_store_dir("radar") / mi.READ_MARKER_FILE_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json")
+        assert mi.read_marker("radar") == {"last_read_id": "", "last_read_at": ""}
+        OutboxStore("radar").append(kind=mi.OUTBOX_REPLY_KIND, body="x")
+        assert mi.unread_count("radar") == 1
+
+    def test_concurrent_marker_writes_never_move_it_backwards(self):
+        import threading
+
+        out = OutboxStore("radar")
+        rows_env = [out.append(kind=mi.OUTBOX_REPLY_KIND, body=f"r{i}") for i in range(5)]
+        by_id = {r["id"]: r for r in projection("radar")}
+        order = [4, 0, 2, 1, 3] * 6
+        threads = [
+            threading.Thread(target=mi.write_read_marker, args=("radar", by_id[rows_env[i].id]))
+            for i in order
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert mi.read_marker("radar")["last_read_id"] == rows_env[4].id
+        assert mi.unread_count("radar") == 0
+
+    def test_served_window_never_starts_after_the_first_unread_row(self):
+        out = OutboxStore("radar")
+        rows_env = [out.append(kind=mi.OUTBOX_REPLY_KIND, body=f"r{i}") for i in range(6)]
+        rows = projection("radar")
+        no_marker = {"last_read_id": "", "last_read_at": ""}
+        # Nothing read: the window is everything, whatever the limit.
+        assert mi.served_window(rows, no_marker, 2) == rows
+        # Read up to r1: the window starts at r2 even though the limit is 2.
+        marker = {"last_read_id": rows_env[1].id, "last_read_at": rows_env[1].created_at}
+        win = mi.served_window(rows, marker, 2)
+        assert [r["id"] for r in win] == [e.id for e in rows_env[2:]]
+        # Everything read: plain newest-N window.
+        marker = {"last_read_id": rows_env[5].id, "last_read_at": rows_env[5].created_at}
+        assert [r["id"] for r in mi.served_window(rows, marker, 2)] == [
+            rows_env[4].id,
+            rows_env[5].id,
+        ]
+        assert mi.served_window(rows, marker, 0) == rows
+
+
+# ------------------------------------------------------- projection endpoint (M1)
+
+
+def _projection_app() -> Any:
+    from types import SimpleNamespace
+
+    from aiohttp import web
+
+    from kiro_crew.dashboard.handlers.members import api_member_projection, api_member_read
+
+    @web.middleware
+    async def _owner(request, handler):
+        # The standalone-local owner subject the owner gate accepts when no
+        # owner_id is configured; `app == ""` is the dashboard (non-app) caller.
+        request["app"] = ""
+        request["user"] = "local-app"
+        return await handler(request)
+
+    app = web.Application(middlewares=[_owner])
+    app["state"] = SimpleNamespace(owner_id="")
+    app.router.add_get("/api/members/{slug}/projection", api_member_projection)
+    app.router.add_post("/api/members/{slug}/read", api_member_read)
+    return app
+
+
+class TestProjectionEndpoint:
+    @pytest.mark.asyncio
+    async def test_successful_reads_and_marker_writes_are_audited(self, monkeypatch):
+        """Refusals on these routes are audited by the gates; a successful owner
+        read of the projection and a marker write must leave an `allowed` SEL
+        row too, or the owner's trail shows only what was denied."""
+        from types import SimpleNamespace
+
+        from aiohttp.test_utils import TestClient, TestServer
+
+        import kiro_crew.dashboard.handlers as handlers_pkg
+
+        rows: list[dict[str, Any]] = []
+        fake = SimpleNamespace(log_api_access=lambda **kw: rows.append(kw))
+        monkeypatch.setattr(handlers_pkg, "sel", lambda: fake)
+        inbox = InboxStore("radar")
+        a = inbox.append(_env("radar", body="hello"))
+        inbox.ack([a.id])
+        async with TestClient(TestServer(_projection_app())) as client:
+            assert (await client.get("/api/members/radar/projection")).status == 200
+            resp = await client.post("/api/members/radar/read", json={"last_read_id": a.id})
+            assert resp.status == 200
+        allowed = [(r["operation"], r["outcome"], r["resources"]) for r in rows]
+        assert ("members.projection", "allowed", "slug=radar") in allowed
+        assert ("members.read", "allowed", "slug=radar") in allowed
+
+    @pytest.mark.asyncio
+    async def test_every_string_in_a_row_is_redacted_refs_included(self):
+        """`refs` is the model's, stored verbatim; it crosses the same boundary as `body`.
+
+        A worker that puts a credential in a metadata field (``refs``) must
+        get the same treatment as one that puts it in the body -- the
+        projection response is what the dashboard renders, and the redaction
+        chain runs recursively over the whole row, not over ``body`` alone.
+        """
+        from aiohttp.test_utils import TestClient, TestServer
+
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        OutboxStore("radar").append(
+            kind="peer_dm",
+            body=f"token {secret} in body",
+            refs={
+                "to": "member:fixer",
+                "note": f"key={secret}",
+                "nested": [f"{secret}", {f"k-{secret}": "v"}],
+                f"key-{secret}": "a credential used as a KEY, not a value",
+            },
+        )
+        async with TestClient(TestServer(_projection_app())) as client:
+            resp = await client.get("/api/members/radar/projection")
+            assert resp.status == 200
+            data = await resp.json()
+        assert data["inbox_model"] is True and len(data["rows"]) == 1
+        assert "AKIA" not in json.dumps(data["rows"]), data["rows"]
+        row = data["rows"][0]
+        assert row["refs"]["to"] == "member:fixer"  # non-secret metadata survives
+        assert "key=" in row["refs"]["note"] and len(row["refs"]["nested"]) == 2
+        # keys are model text too: the credential-bearing keys are redacted
+        assert all("AKIA" not in k for k in row["refs"]) and len(row["refs"]) == 4
+        assert all("AKIA" not in k for k in row["refs"]["nested"][1])
+
+    @pytest.mark.asyncio
+    async def test_read_without_a_named_row_is_refused_never_everything_shown(self):
+        """The read marker only moves forward: a body that is missing, empty, not a
+        JSON object, or without `last_read_id` must be a 400, never "mark the
+        newest served row read" -- that row may have raced in after the client's
+        last render, and a marker past it clears an unread reply for good."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from kiro_crew.member_inbox import read_marker
+
+        inbox = InboxStore("radar")
+        row = inbox.append(_env("radar", body="unread"))
+        inbox.ack([row.id])
+        async with TestClient(TestServer(_projection_app())) as client:
+            deep = (
+                b"[" * 30_000 + b"]" * 30_000
+            )  # within the byte cap, blows the parser stack: 400 not 500
+            for raw in (b"not json", b"[1, 2]", b'"env_x"', b"42", deep):
+                resp = await client.post(
+                    "/api/members/radar/read",
+                    data=raw,
+                    headers={"Content-Type": "application/json"},
+                )
+                assert resp.status == 400, raw[:20]
+                assert (await resp.json())["code"] in ("invalid_json", "body_not_object")
+            # no body, an empty object, a wrong-typed id: refused, the marker untouched
+            assert (await client.post("/api/members/radar/read")).status == 400
+            resp = await client.post("/api/members/radar/read", json={})
+            assert resp.status == 400 and (await resp.json())["code"] == "invalid_marker"
+            resp = await client.post("/api/members/radar/read", json={"last_read_id": 7})
+            assert resp.status == 400 and (await resp.json())["code"] == "invalid_marker"
+            assert read_marker("radar")["last_read_id"] == ""  # nothing was marked read
+            # the row the client rendered last, by id, is what moves the marker
+            resp = await client.post("/api/members/radar/read", json={"last_read_id": row.id})
+            assert resp.status == 200
+        assert read_marker("radar")["last_read_id"] == row.id
+
+    @pytest.mark.asyncio
+    async def test_an_unflagged_member_answers_inbox_model_false_not_an_error(self):
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(_projection_app())) as client:
+            resp = await client.get("/api/members/nobody/projection")
+            assert resp.status == 200
+            data = await resp.json()
+        assert data == {
+            "slug": "nobody",
+            "inbox_model": False,
+            "rows": [],
+            "unread": 0,
+            "marker": None,
+        }
+
+
+# ------------------------------------------------------------ worker_report (M1)
+
+
+class _WorkerSlot:
+    def __init__(self, key: str, created_by: str, mode: str = "", reply: str = "done") -> None:
+        self.key = key
+        self._created_by = created_by
+        self.mode = mode
+        self.title = "Triage #42"
+        self.messages = [{"role": "user", "content": "go"}]
+        if reply:
+            self.messages.append({"role": "assistant", "content": reply})
+
+
+class TestWorkerReport:
+    @pytest.fixture(autouse=True)
+    def _wake_module(self, monkeypatch):
+        from kiro_crew.dashboard import member_wake as mw
+
+        monkeypatch.setattr(mw, "inbox_model_enabled", lambda slug: slug in FLAGGED)
+        self.mw = mw
+
+    def _report(self, slot) -> str | None:
+        """The two halves the queue-cycle end runs: snapshot on the loop, write off it."""
+        turn = self.mw.snapshot_worker_turn(slot)
+        return None if turn is None else self.mw.report_worker_turn(object(), turn)
+
+    def test_a_worker_created_by_a_wake_reports_to_the_member(self):
+        notified: list[tuple[str, str]] = []
+        sched = type(
+            "S",
+            (),
+            {"notify": lambda self, slug, immediate=False: notified.append((slug, immediate))},
+        )()
+        ms.set_scheduler(sched)
+        slot = _WorkerSlot("chat-7-1", created_by="member-radar.wake-3", reply="PR opened.")
+        env_id = self._report(slot)
+        pending = InboxStore("radar").pending()
+        assert env_id and [e.id for e in pending] == [env_id]
+        env = pending[0]
+        assert env.kind == "worker_report" and env.from_ == "session:chat-7-1"
+        assert env.body == "[Triage #42]\nPR opened."
+        assert env.refs["session_key"] == "chat-7-1"
+        assert notified == [("radar", False)]  # coalesced, not immediate
+
+    @pytest.mark.parametrize(
+        "slot",
+        [
+            _WorkerSlot("member-radar.wake-2", created_by="member-radar", mode="member-wake"),
+            _WorkerSlot("member-radar", created_by="member-radar", mode="member"),
+            _WorkerSlot("chat-1-1", created_by="chat-0-0"),
+            _WorkerSlot("chat-1-2", created_by=""),
+        ],
+        ids=["own-wake", "own-thread", "human-created", "no-creator"],
+    )
+    def test_nothing_is_written_when_the_slot_reports_to_nobody(self, slot):
+        assert self.mw.snapshot_worker_turn(slot) is None
+        assert InboxStore("radar").pending() == []
+
+    def test_unflagged_creator_is_decided_off_loop_and_gets_no_report(self, monkeypatch):
+        """The snapshot (on the loop) does not read config; the writer does, and an
+        unflagged creator gets no file. The on-loop half must stay I/O-free."""
+        slot = _WorkerSlot("chat-1-3", created_by="member-nobody")
+        turn = self.mw.snapshot_worker_turn(slot)
+        assert turn is not None and turn.slug == "nobody"
+        assert self.mw.report_worker_turn(object(), turn) is None
+        assert not (mi.member_store_dir("nobody") / "inbox").exists()
+
+        def blow(slug):
+            raise AssertionError("config read on the loop")
+
+        monkeypatch.setattr(self.mw, "inbox_model_enabled", blow)
+        assert self.mw.snapshot_worker_turn(slot) is not None  # no config read here
+
+    def test_reply_tail_is_bounded(self):
+        slot = _WorkerSlot("chat-9-9", created_by="member-fixer", reply="x" * 10_000)
+        self._report(slot)
+        (env,) = InboxStore("fixer").pending()
+        assert len(env.body) <= self.mw.WORKER_REPORT_MAX_CHARS + len("[Triage #42]\n")
+        assert env.body.endswith("x") and env.refs["outcome"] == "ok"
+
+    def test_a_tool_using_turn_reports_every_assistant_segment(self):
+        """Text, then a tool call, then more text: each segment is its own
+        assistant row, and the report carries all of them in order -- not only
+        the last one, which would silently drop what the worker said first."""
+        slot = _WorkerSlot("chat-8-0", created_by="member-radar", reply="Reading the failing test.")
+        slot.messages += [
+            {"role": "tool", "content": "pytest ... 1 failed"},
+            {"role": "assistant", "content": "The fixture is stale; patching it."},
+            {"role": "tool", "content": "edit applied"},
+            {"role": "assistant", "content": "Fixed and pushed as abc123."},
+        ]
+        self._report(slot)
+        (env,) = InboxStore("radar").pending()
+        assert env.refs["outcome"] == "ok"
+        assert env.body.index("Reading the failing test.") < env.body.index("fixture is stale")
+        assert env.body.endswith("Fixed and pushed as abc123.")
+
+    def test_a_failed_turn_reports_the_failure_not_the_previous_reply(self):
+        """Prior turn succeeded, this turn raised an error row before replying."""
+        slot = _WorkerSlot("chat-8-1", created_by="member-radar", reply="first reply")
+        slot.messages += [
+            {"role": "user", "content": "again"},
+            {"role": "error", "content": "model timed out"},
+            {"role": "done", "content": ""},
+        ]
+        env_id = self._report(slot)
+        (env,) = [e for e in InboxStore("radar").pending() if e.id == env_id]
+        assert env.refs["outcome"] == "failed"
+        assert "model timed out" in env.body and "turn failed" in env.body
+        assert "first reply" not in env.body
+
+    @pytest.mark.parametrize("opener", ["nudge", "subagent"])
+    def test_a_turn_opened_by_a_nudge_or_subagent_row_reports_only_its_own_reply(self, opener):
+        """Auto-nudge cycles and subagent completions open turns without a `user`
+        row; the report must start at THAT boundary, or the previous turn's reply
+        rides along in this turn's `worker_report`."""
+        slot = _WorkerSlot("chat-8-3", created_by="member-radar", reply="previous reply")
+        slot.messages += [
+            {"role": opener, "content": "[cycle 2]" if opener == "nudge" else "[Subagent done]"},
+            {"role": "assistant", "content": "this turn only"},
+            {"role": "done", "content": ""},
+        ]
+        env_id = self._report(slot)
+        (env,) = [e for e in InboxStore("radar").pending() if e.id == env_id]
+        assert env.refs["outcome"] == "ok"
+        assert env.body.endswith("this turn only") and "previous reply" not in env.body
+        # and the same boundary bounds a FAILED turn's report
+        slot.messages += [
+            {"role": opener, "content": "[cycle 3]"},
+            {"role": "error", "content": "model timed out"},
+        ]
+        env_id2 = self._report(slot)
+        (env2,) = [e for e in InboxStore("radar").pending() if e.id == env_id2]
+        assert env2.refs["outcome"] == "failed" and "this turn only" not in env2.body
+
+    def test_a_turn_with_no_new_assistant_text_is_reported_as_failed(self):
+        slot = _WorkerSlot("chat-8-2", created_by="member-radar", reply="old reply")
+        slot.messages += [{"role": "user", "content": "again"}, {"role": "done", "content": ""}]
+        env_id = self._report(slot)
+        (env,) = [e for e in InboxStore("radar").pending() if e.id == env_id]
+        assert env.refs["outcome"] == "failed" and "without a reply" in env.body
+        assert "old reply" not in env.body
+        # And a fresh turn with a fresh reply reports THAT reply, nothing older.
+        slot.messages += [
+            {"role": "user", "content": "once more"},
+            {"role": "assistant", "content": "new"},
+        ]
+        env_id2 = self._report(slot)
+        (env2,) = [e for e in InboxStore("radar").pending() if e.id == env_id2]
+        assert env2.refs["outcome"] == "ok" and env2.body.endswith("new")
+
+    def test_the_report_describes_the_turn_that_ended_not_the_prompt_that_followed(self):
+        """The snapshot is taken while the slot is busy; the write happens later.
+
+        Between ``chat_done`` and the writer thread's read, the next prompt can
+        land on ``slot.messages``. The snapshot the writer receives is immutable,
+        so a ``user`` row (or a whole failed second turn) appended after it does
+        not turn the finished turn's "ok" into "failed" or swap its reply.
+        """
+        slot = _WorkerSlot("chat-r-1", created_by="member-radar", reply="PR opened.")
+        turn = self.mw.snapshot_worker_turn(slot)
+        assert turn is not None and turn.outcome == "ok"
+        slot.messages += [
+            {"role": "user", "content": "next prompt lands first"},
+            {"role": "error", "content": "and fails"},
+        ]
+        env_id = self.mw.report_worker_turn(object(), turn)
+        (env,) = [e for e in InboxStore("radar").pending() if e.id == env_id]
+        assert env.refs["outcome"] == "ok" and env.body.endswith("PR opened.")
+        assert "next prompt" not in env.body and "and fails" not in env.body
+        # The snapshot is frozen: nothing downstream can edit what was decided.
+        from dataclasses import FrozenInstanceError
+
+        with pytest.raises(FrozenInstanceError):
+            turn.outcome = "failed"  # type: ignore[misc]
+
+    def test_worker_report_wakes_are_budgeted_until_the_owner_speaks(self):
+        notified: list[str] = []
+        ms.set_scheduler(
+            type("S", (), {"notify": lambda self, slug, **kw: notified.append(slug)})()
+        )
+        budget = self.mw.WORKER_REPORT_BUDGET
+        for i in range(budget):
+            self._report(_WorkerSlot(f"chat-b-{i}", created_by="member-radar"))
+        assert len(notified) == budget
+        inbox = InboxStore("radar")
+        assert not any(e.kind == "system" for e in inbox.pending())
+        # The report past the budget is written, does not wake, and the member
+        # is told exactly once.
+        over = self._report(_WorkerSlot("chat-b-over", created_by="member-radar"))
+        assert over is not None and len(notified) == budget
+        notices = [e for e in inbox.pending() if e.kind == "system"]
+        assert len(notices) == 1 and notices[0].refs["reason"] == "worker_report_budget"
+        self._report(_WorkerSlot("chat-b-over2", created_by="member-radar"))
+        assert len(notified) == budget
+        assert sum(1 for e in inbox.pending() if e.kind == "system") == 1
+        # Only the person refills it: a user_dm resets the count, a system or
+        # peer envelope does not.
+        inbox.append(_env("radar", kind="system", body="notice", from_="system"))
+        self._report(_WorkerSlot("chat-b-over3", created_by="member-radar"))
+        assert len(notified) == budget
+        inbox.append(_env("radar", body="owner here"))
+        self._report(_WorkerSlot("chat-b-after", created_by="member-radar"))
+        assert len(notified) == budget + 1
+
+    def test_concurrent_reports_count_each_other_once_at_the_budget_boundary(self):
+        """Two workers finishing together at budget-1 must not both slip under it.
+
+        The append, the count and the one-time notice run under the member's
+        report lock: exactly ``WORKER_REPORT_BUDGET`` reports wake the member,
+        the one past it does not, and the notice is written once -- whatever
+        order the two threads land in.
+        """
+        import threading
+
+        notified: list[str] = []
+        ms.set_scheduler(
+            type("S", (), {"notify": lambda self, slug, **kw: notified.append(slug)})()
+        )
+        budget = self.mw.WORKER_REPORT_BUDGET
+        for i in range(budget - 1):
+            self._report(_WorkerSlot(f"chat-c-{i}", created_by="member-radar"))
+        assert len(notified) == budget - 1
+        turns = [
+            self.mw.snapshot_worker_turn(_WorkerSlot(f"chat-c-race-{i}", created_by="member-radar"))
+            for i in range(2)
+        ]
+        gate = threading.Barrier(2)
+
+        def _go(turn):
+            gate.wait()
+            self.mw.report_worker_turn(object(), turn)
+
+        threads = [threading.Thread(target=_go, args=(t,)) for t in turns]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        inbox = InboxStore("radar")
+        reports = [e for e in inbox.pending() if e.kind == "worker_report"]
+        assert len(reports) == budget + 1  # every report is written
+        assert len(notified) == budget  # exactly one of the two got no wake
+        notices = [e for e in inbox.pending() if e.kind == "system"]
+        assert len(notices) == 1 and notices[0].refs["reason"] == "worker_report_budget"
+
+    @pytest.mark.asyncio
+    async def test_a_queued_successor_still_yields_a_report_for_the_finished_turn(self, tmp_path):
+        """The report hook runs at every turn end, before the queue drain.
+
+        ``_finish_queue_cycle`` is skipped when a queued successor starts; the
+        snapshot must not live there. Two real ``_run_chat`` turns on a worker
+        slot -- the second dequeued by the first's teardown -- yield two
+        reports, and the first names the first turn's reply, not the second's.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from chat_test_helpers import _make_state
+
+        from kiro_crew.dashboard.chat_runner import _run_chat
+        from kiro_crew.providers.base import EVENT_COMPLETE, EVENT_TEXT_CHUNK, LLMEvent
+
+        async def stream(stream_message: str):
+            yield LLMEvent(kind=EVENT_TEXT_CHUNK, text=f"response to {stream_message}")
+            yield LLMEvent(kind=EVENT_COMPLETE)
+
+        client = MagicMock()
+        client.stream = stream
+        client.stream_command = stream
+        client.context_usage_pct = MagicMock(return_value=1.0)
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        state.push_slots_update = MagicMock()
+        state.context_builder = None
+        state.consolidator = None
+        state._hook_store = None
+        state._yolo = False
+        state._background_tasks = set()
+        state.sessions.get_or_create = AsyncMock(return_value=(client, True, False))
+        slot = state.get_or_create_slot("chat-q-1")
+        slot._titled = True
+        slot._created_by = "member-radar"
+        slot.queue_append("second message")
+
+        await _run_chat(state, slot, "first message")
+        assert slot.task is not None
+        await slot.task  # the dequeued successor
+        assert slot._queue == []
+        # The reports are fire-and-forget off-loop writes; let them land.
+        await asyncio.gather(*list(state._background_tasks), return_exceptions=True)
+
+        reports = sorted(
+            (e for e in InboxStore("radar").pending() if e.kind == "worker_report"),
+            key=lambda e: (e.created_at, e.id),
+        )
+        assert [e.refs["outcome"] for e in reports] == ["ok", "ok"]
+        assert reports[0].body.endswith("response to first message")
+        assert "second message" in reports[1].body
+        assert "second message" not in reports[0].body
+
+    def test_a_turn_awaiting_a_synthetic_recovery_is_not_reported_yet(self, monkeypatch):
+        """An empty or transient-failed response queues a runner-authored recovery
+        nudge; that turn is not terminal, so no "failed" report (and no wake) may be
+        filed before the recovery runs. The recovery turn reports its own outcome."""
+        from kiro_crew.dashboard import chat_runner as cr
+        from kiro_crew.dashboard.chat_utils import SYNTHETIC_RECOVERY_KIND
+
+        reported: list[Any] = []
+        monkeypatch.setattr(self.mw, "snapshot_worker_turn", lambda slot: reported.append(slot))
+        slot = _WorkerSlot("chat-r-1", created_by="member-radar", reply="")
+        slot._queue = [{"content": "continue", "kind": SYNTHETIC_RECOVERY_KIND}]
+        cr._report_worker_turn_end(object(), slot)
+        assert reported == []  # deferred: the recovery turn reports
+        slot._queue = [{"content": "a real follow-up", "kind": ""}]
+        cr._report_worker_turn_end(object(), slot)
+        assert reported == [slot]  # an ordinary queued successor does not defer
+
+
+# ------------------------------------------------------------ member modes (M1)
+
+
+class TestMemberModePredicate:
+    def test_both_member_modes_and_nothing_else(self):
+        from kiro_crew.members import DM_SLOT_MODE, WAKE_SLOT_MODE, is_member_mode
+
+        assert (DM_SLOT_MODE, WAKE_SLOT_MODE) == ("member", "member-wake")
+        assert is_member_mode("member") and is_member_mode("member-wake")
+        assert not is_member_mode("") and not is_member_mode(None) and not is_member_mode("crew")
+
+    def test_external_arm_is_refused_on_a_wake_slot(self):
+        from kiro_crew.autonudge_authz import _EXTERNAL_ARM_REFUSED_MODES
+
+        assert "member-wake" in _EXTERNAL_ARM_REFUSED_MODES
 
 
 # ------------------------------------------------------------------ peer_send

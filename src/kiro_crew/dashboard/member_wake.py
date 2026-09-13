@@ -23,6 +23,11 @@ A wake is an ephemeral execution context bound to the member identity:
    the slot.
 
 Nothing of the wake survives except ledger, outbox and SEL.
+
+:func:`report_worker_turn` is the other producer this module hosts: when a
+session a member created (its ``_created_by`` folds to the member's key) finishes
+a turn, the reply tail becomes a ``worker_report`` envelope in that member's
+inbox, so members stop polling ``session_read_message`` to learn a worker is done.
 """
 
 from __future__ import annotations
@@ -30,6 +35,8 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import threading
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from kiro_crew.agent_sdk import TURN_STOP_REASON_END_TURN
@@ -46,22 +53,38 @@ from kiro_crew.member_inbox import (
     OutboxStore,
     inbox_model_enabled,
     make_envelope,
+    member_owner_key,
+    member_slug_from_key,
     member_thread_key,
     wake_slot_key_for,
 )
-from kiro_crew.members import read_dm_binding
+from kiro_crew.members import is_member_mode, read_dm_binding
 
 if TYPE_CHECKING:
     from kiro_crew.dashboard.state import DashboardState, _ChatSlot
 
 logger = logging.getLogger(__name__)
 
+#: A ``worker_report`` carries the reply TAIL, not the transcript: the member
+#: reads its ledger plus this envelope on the next wake, and a report is a
+#: summary a worker owes, not a second copy of its conversation.
+WORKER_REPORT_MAX_CHARS = 4000
+#: Worker reports that may WAKE a member since the newest ``user_dm`` in its
+#: inbox. ``worker_report`` is the same shape as ``peer_dm`` -- an envelope that
+#: buys a model turn -- so it gets a bound of the same family: past this many
+#: reports with no word from the owner, further reports are still written (the
+#: member reads them on its next human-triggered or timer wake) but do not
+#: notify the scheduler, and one ``system`` envelope says so. Refilled the way
+#: the peer budget is: only by the person typing in the thread.
+WORKER_REPORT_BUDGET = 24
+_WORKER_REPORT_BUDGET_REASON = "worker_report_budget"
 _seq = itertools.count(1)
 
 _KIND_LABEL = {
     "user_dm": "from the owner",
     "session_dm": "from another session, not the owner",
     "peer_dm": "from a fellow crew member",
+    "worker_report": "report from a session you dispatched",
     "wake_timer": "scheduled wake",
     "system": "gateway notice",
 }
@@ -613,3 +636,224 @@ async def _escalate_dead_letters(state: "DashboardState", slug: str, dead: list[
         )
     except Exception:  # noqa: BLE001
         logger.warning("member wake: owner notification failed for %s", slug, exc_info=True)
+
+
+def worker_report_target(slot: "_ChatSlot") -> str | None:
+    """The member a finished turn on *slot* would report to, or ``None``.
+
+    Pure decision, NO I/O: the slot must be an ordinary session (a member's own
+    thread or wake never reports to itself — that is how a wake would loop
+    forever) and its creator must fold to a member key. Whether that member is
+    on the inbox model is a config read (disk) and is checked off the loop by
+    :func:`report_worker_turn`, never here: this runs on the loop at every
+    turn end.
+    """
+    if is_member_mode(getattr(slot, "mode", "")):
+        return None
+    created_by = str(getattr(slot, "_created_by", "") or "")
+    if not created_by:
+        return None
+    return member_slug_from_key(member_owner_key(created_by))
+
+
+#: Rows that OPEN a turn on a worker session: the person's prompt, a cron /
+#: hook injection, an auto-nudge cycle, a subagent completion delivered as the
+#: next turn. The runner's own turn-boundary set (`chat_handlers._TURN_OPENER_ROLES`)
+#: plus `inject`; a report that walked past a `nudge` or `subagent` opener would
+#: fold the previous turn's reply into this turn's `worker_report`.
+_REPORT_TURN_OPENERS = frozenset({"user", "inject", "nudge", "subagent"})
+
+
+def _turn_outcome(slot: "_ChatSlot") -> tuple[str, str]:
+    """``(outcome, text)`` of the turn that just ended on *slot*.
+
+    Reads only the rows appended SINCE the last turn-opening row
+    (:data:`_REPORT_TURN_OPENERS`), never the whole transcript: a report must
+    describe this turn, and a failed turn must not be reported with the
+    previous turn's reply. ``("ok", reply)`` when the turn produced assistant
+    text; ``("failed", error)`` when it appended an error row or ended with no
+    assistant text.
+    """
+    rows = list(getattr(slot, "messages", []) or [])
+    start = 0
+    for i in range(len(rows) - 1, -1, -1):
+        if rows[i].get("role") in _REPORT_TURN_OPENERS:
+            start = i + 1
+            break
+    # ALL assistant rows of the turn, joined: a tool-using turn writes text,
+    # calls a tool, writes more text, and each segment is its own row -- keeping
+    # only the last would silently drop what the worker said before its tools.
+    parts: list[str] = []
+    error = ""
+    for row in rows[start:]:
+        role = row.get("role")
+        text = str(row.get("content") or "").strip()
+        if role == "assistant" and text:
+            parts.append(text)
+        elif role == "error" and text:
+            error = text
+    if error:
+        return "failed", error
+    if parts:
+        return "ok", "\n\n".join(parts)
+    return "failed", "the turn ended without a reply"
+
+
+def _report_budget_exhausted(slug: str, inbox: InboxStore) -> bool:
+    """Whether *slug* has already spent its worker-report wakes since the owner last spoke.
+
+    On the crossing (exactly at the budget) a ``system`` envelope tells the
+    member once; the notice itself is written pending and drains with the next
+    wake that does run.
+    """
+    since = inbox.last_user_dm_at()
+    used = inbox.worker_reports_since(since)  # includes the report just written
+    if used <= WORKER_REPORT_BUDGET:
+        return False
+    if used == WORKER_REPORT_BUDGET + 1 and not inbox.has_system_notice_since(
+        _WORKER_REPORT_BUDGET_REASON, since
+    ):
+        inbox.append(
+            make_envelope(
+                to_slug=slug,
+                kind="system",
+                body=(
+                    f"{WORKER_REPORT_BUDGET} worker reports have arrived since the owner last "
+                    "wrote to you; further reports are stored but no longer wake you. They "
+                    "are delivered with your next scheduled wake or the owner's next message."
+                ),
+                from_="system",
+                refs={"reason": _WORKER_REPORT_BUDGET_REASON},
+            )
+        )
+    return True
+
+
+@dataclass(frozen=True)
+class WorkerTurn:
+    """What a finished turn reports, captured while the slot is still busy.
+
+    The report is written off the loop, after ``chat_done`` has declared the
+    slot idle -- and the next prompt can land on ``slot.messages`` before the
+    writer thread reads them, moving the "last prompt row" past the turn that
+    just ended and storing its outcome as failed or misattributed. So the
+    outcome is read ONCE, synchronously on the loop, by
+    :func:`snapshot_worker_turn`, and only this immutable record crosses to
+    the writer.
+    """
+
+    slug: str
+    session_key: str
+    title: str
+    outcome: str
+    text: str
+
+
+def snapshot_worker_turn(slot: "_ChatSlot") -> WorkerTurn | None:
+    """Capture the turn that just ended on *slot*, or ``None`` if it reports to nobody.
+
+    Pure and synchronous: called from the queue-cycle end on the loop thread,
+    before the slot is marked idle, so no other coroutine can append to
+    ``slot.messages`` between the decision and the read.
+    """
+    try:
+        slug = worker_report_target(slot)
+        if slug is None:
+            return None
+        outcome, text = _turn_outcome(slot)
+        if len(text) > WORKER_REPORT_MAX_CHARS:
+            text = text[-WORKER_REPORT_MAX_CHARS:]
+        return WorkerTurn(
+            slug=slug,
+            session_key=str(slot.key),
+            title=str(getattr(slot, "title", "") or ""),
+            outcome=outcome,
+            text=text,
+        )
+    except Exception:  # noqa: BLE001 - a lost report is logged, never a failed turn
+        logger.warning(
+            "member inbox: worker_report snapshot for %s failed",
+            getattr(slot, "key", "?"),
+            exc_info=True,
+        )
+        return None
+
+
+# One lock per member around append + budget count + notice: the reports run
+# on the thread pool, and two workers finishing together at budget-1 would
+# both append before either counted -- report N+1 gets no wake and the notice
+# is written twice. Same shape as ``member_peer._sender_lock``.
+_report_locks: dict[str, threading.Lock] = {}
+_report_locks_guard = threading.Lock()
+
+
+def _report_lock(slug: str) -> threading.Lock:
+    with _report_locks_guard:
+        lock = _report_locks.get(slug)
+        if lock is None:
+            lock = _report_locks[slug] = threading.Lock()
+        return lock
+
+
+def report_worker_turn(state: "DashboardState", turn: WorkerTurn) -> str | None:
+    """End-of-turn hook: append a ``worker_report`` for the turn's creator, wake it.
+
+    Returns the envelope id, or ``None`` when the write failed. A turn that
+    produced assistant text reports that text (``refs.outcome == "ok"``); a
+    turn that appended an error row, or ended with no new assistant text,
+    reports the failure as such (``refs.outcome == "failed"``) -- never a
+    previous turn's reply, because *turn* was snapshotted while the slot was
+    still busy. Synchronous (one fsync'd file write) and meant to run off the
+    loop — the queue-cycle end in ``chat_runner`` dispatches it through
+    ``asyncio.to_thread``; ``notify_member`` hops back to the loop itself.
+    Every failure is logged and swallowed, because a report that cannot be
+    written must never fail the turn that produced it.
+
+    Bounded by :data:`WORKER_REPORT_BUDGET`: past the budget since the owner's
+    newest ``user_dm``, the envelope is still written but the scheduler is not
+    notified, so two agents cannot buy each other model turns indefinitely. The
+    append, the budget count and the one-time notice run under a per-member
+    lock (:func:`_report_lock`), so concurrent reports count each other exactly
+    once: the budget boundary lands on one report and the notice is written once.
+    """
+    slug = turn.slug
+    try:
+        # The flag is a config read: here, on the writer thread, not in the
+        # on-loop snapshot. An unflagged creator gets no report and no file.
+        if not inbox_model_enabled(slug):
+            return None
+        title = turn.title
+        label = f"[{title}]" if title and title != turn.session_key else ""
+        if turn.outcome == "failed":
+            label = f"{label} turn failed:".strip()
+        body = f"{label}\n{turn.text}" if label else turn.text
+        inbox = InboxStore(slug)
+        with _report_lock(slug):
+            env = inbox.append(
+                make_envelope(
+                    to_slug=slug,
+                    kind="worker_report",
+                    body=body,
+                    from_=f"session:{turn.session_key}",
+                    refs={
+                        "session_key": turn.session_key,
+                        "title": title[:200],
+                        "outcome": turn.outcome,
+                    },
+                )
+            )
+            wake = not _report_budget_exhausted(slug, inbox)
+    except Exception:  # noqa: BLE001 - a lost report is logged, never a failed turn
+        logger.warning("member inbox: worker_report for %s failed", turn.session_key, exc_info=True)
+        return None
+    if wake:
+        from kiro_crew.member_scheduler import notify_member
+
+        notify_member(slug, kind="worker_report")
+    else:
+        logger.info(
+            "member inbox: worker_report budget spent for %s; %s written without a wake",
+            slug,
+            env.id,
+        )
+    return env.id

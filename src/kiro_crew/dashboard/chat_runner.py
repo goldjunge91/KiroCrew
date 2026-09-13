@@ -6229,6 +6229,45 @@ async def _run_pending_synthesis(state: DashboardState, slot: _ChatSlot) -> None
         slot._synthesis_inflight = False
 
 
+def _report_worker_turn_end(state: DashboardState, slot: _ChatSlot) -> None:
+    """Member inbox model: report the turn that just ended on *slot* to its creator.
+
+    A session a flagged member created reports its reply tail into that
+    member's inbox as a ``worker_report`` envelope (RFC member-inbox-model,
+    M1). Called from ``_run_chat``'s finally for EVERY turn end, BEFORE the
+    queue drain decides whether a queued successor starts -- not from
+    ``_finish_queue_cycle``, which a started successor bypasses (the
+    ``if not next_turn_started`` guard), so an intermediate turn's outcome
+    would otherwise never reach the inbox. The outcome is read HERE,
+    synchronously on the loop, while the slot is still busy: no other
+    coroutine can append to ``slot.messages`` between the decision and the
+    read, and the successor's ``user`` row lands only after this returns. Only
+    the immutable snapshot crosses to the off-loop writer. Deferred import and
+    self-guarding: a no-op unless ``_created_by`` folds to a flagged member.
+    """
+    if not getattr(slot, "_created_by", ""):
+        return
+    # A turn the runner itself is about to retry is not terminal: an empty or
+    # transient-failed response queues a synthetic recovery nudge, and reporting
+    # NOW would file a "failed" report and wake the member before the recovery
+    # runs. The recovery turn ends through this same hook and reports its own
+    # outcome; if it exhausts, that end is the failed one.
+    if any(is_synthetic_recovery_item(item) for item in (slot._queue or ())):
+        return
+    from kiro_crew.dashboard.member_wake import report_worker_turn, snapshot_worker_turn
+
+    worker_turn = snapshot_worker_turn(slot)
+    if worker_turn is None:
+        return
+    # Off the loop: the report is an fsync'd envelope write of the snapshot.
+    # Fire-and-forget like the title and summary tasks; the scheduler notify
+    # inside is thread-safe, and a write failure is logged inside rather than
+    # raised into the turn end.
+    report_task = asyncio.create_task(asyncio.to_thread(report_worker_turn, state, worker_turn))
+    state._background_tasks.add(report_task)
+    report_task.add_done_callback(state._background_tasks.discard)
+
+
 def _finish_queue_cycle(
     state: DashboardState, slot: _ChatSlot, *, allow_automatic_successor: bool = True
 ) -> None:
@@ -13491,6 +13530,9 @@ async def _run_chat(
         # runs stages as separate _run_chat calls, can mirror this same
         # "hold the queue for post-login resume" guard on its end-of-plan handoff.
         slot._last_turn_auth_required = _auth_required
+        # Every turn end, whether or not a queued successor starts below: the
+        # successor's own ``user`` row must not become this report's boundary.
+        _report_worker_turn_end(state, slot)
         next_turn_started = False
         if slot._queue and not _auth_required and _memory_preparation_admitted:
             # After startup admission, the successor's own ACP attempt remains

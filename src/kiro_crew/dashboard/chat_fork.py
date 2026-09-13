@@ -863,11 +863,11 @@ async def api_chat_slot_fork(request: web.Request) -> web.Response:
     elif at_index is not None:
         visible = visible[: at_index + 1]
 
-    # A fork of a member DM thread is an ordinary chat, never a second "member"
-    # slot: the fork mints a chat-* key, so member mode would make it invisible
-    # everywhere (excluded from Sessions by surface mode, and absent from the
-    # roster, whose threads live only on member-<slug> keys). The override
-    # allowlist deliberately cannot name "member".
+    # A fork of a member slot (DM thread or wake context) is an ordinary chat,
+    # never a second member slot: the fork mints a chat-* key, so a member mode
+    # would make it invisible everywhere (excluded from Sessions by surface
+    # mode, and absent from the roster, whose threads live only on member-<slug>
+    # keys). The override allowlist deliberately cannot name a member mode.
     if mode_override is not None:
         fork_mode = mode_override
     elif is_member_mode(slot.mode):

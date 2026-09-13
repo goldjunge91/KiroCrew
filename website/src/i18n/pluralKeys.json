@@ -167,6 +167,8 @@
   "pages.membersPage.activity_more_days",
   "pages.membersPage.activity_projects_more",
   "pages.membersPage.activity_routed_count",
+  "pages.membersPage.inbox_rows",
+  "pages.membersPage.inbox_unread_count",
   "pages.membersPage.member_count",
   "pages.overview.mcpTab.applied_change",
   "pages.overview.mcpTab.pending_change",

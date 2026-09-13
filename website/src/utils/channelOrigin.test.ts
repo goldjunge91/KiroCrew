@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { slotChannelLabel, slotChannelNamespace } from './channelOrigin'
+import { isChatPageSurface, slotChannelLabel, slotChannelNamespace } from './channelOrigin'
 
 describe('slotChannelLabel', () => {
   it('labels every channel namespace', () => {
@@ -93,5 +93,13 @@ describe('isChatPageSurface — member exclusion', () => {
     // Crew Mode retired: a persisted `crew` slot is restored server-side as
     // the default surface, so the predicate no longer admits the value.
     expect(isChatPageSurface('crew')).toBe(false)
+  })
+})
+
+describe('isChatPageSurface — member-wake exclusion', () => {
+  it('never admits the inbox model wake context either', () => {
+    // A wake slot (member-<slug>.wake-<n>, mode member-wake) is a member slot
+    // the chat page never shows, exactly like the DM thread.
+    expect(isChatPageSurface('member-wake')).toBe(false)
   })
 })

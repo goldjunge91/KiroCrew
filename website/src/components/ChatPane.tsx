@@ -85,6 +85,7 @@ export default function ChatPane({
   openSideChat,
   hostsPanelControls,
   busyMode = 'split',
+  transcript,
 }: {
   slotKey: string
   focused?: boolean
@@ -136,6 +137,13 @@ export default function ChatPane({
    *  turn. Decided by the host, never inferred here, so no pane changes
    *  behaviour by accident. */
   busyMode?: ComposerBusyMode
+  /** Replace the pane's transcript with a host-owned view while keeping the
+   *  composer, footer and every slot binding. The Members page passes the
+   *  inbox-model PROJECTION (RFC member-inbox-model): what a flagged member's
+   *  thread shows is the merge of its inbox and outbox on disk, not this slot's
+   *  message list, but what the person TYPES still goes through this pane's
+   *  composer into api_chat. Undefined = the ordinary transcript. */
+  transcript?: React.ReactNode
 }) {
   // One instance covers both dropdown filter inputs (never open at once).
   const dispatch = useAppDispatch()
@@ -1242,7 +1250,27 @@ export default function ChatPane({
 
         {/* The scroller (theming hook 'chat-container', overflow contract,
             sentinels/spacers) is ChatMessageList's virtualized mount — see
-            TranscriptScrollShell for the style contract it enforces. */}
+            TranscriptScrollShell for the style contract it enforces. A host
+            that owns the transcript (the inbox-model projection) mounts its own
+            scroller in the same flex slot; the pin band, jump button and edge
+            fades above/below stay, so the pane's chrome does not shift. */}
+        {/* The slot-hydration failure and its retry live OUTSIDE the transcript
+            branch: a host-owned transcript (the inbox-model projection) replaces
+            the message list, and the slot's own hydration read can still fail
+            underneath it -- the notice must reach the person on both branches. */}
+        {slotDetailFailed && (
+          <div className="mx-4 my-2 flex items-start gap-2">
+            {/* No hand-off: the composer draft (`input`) in this pane is unsaved local
+                state. The retry is the recovery path for the hydration read. */}
+            <ErrorNotice
+              className="flex-1"
+              testId="chat-pane-hydrate-error"
+              message={i18nT('components.chatPane.history_load_failed')}
+            />
+            <Btn onClick={() => { void refetchSlotDetail() }}>{i18nT('components.chatPane.retry')}</Btn>
+          </div>
+        )}
+        {transcript !== undefined ? transcript : (
         <ChatMessageList
           ref={listRef}
           messages={messages}
@@ -1263,18 +1291,6 @@ export default function ChatPane({
             scrollerStyle: { paddingTop: 12, paddingBottom: 12, minHeight: 0 },
             aboveRows: (
               <>
-                {slotDetailFailed && (
-                  <div className="mx-4 my-2 flex items-start gap-2">
-                    {/* No hand-off: the composer draft (`input`) in this pane is unsaved local
-                        state. The retry is the recovery path for the hydration read. */}
-                    <ErrorNotice
-                      className="flex-1"
-                      testId="chat-pane-hydrate-error"
-                      message={i18nT('components.chatPane.history_load_failed')}
-                    />
-                    <Btn onClick={() => { void refetchSlotDetail() }}>{i18nT('components.chatPane.retry')}</Btn>
-                  </div>
-                )}
                 {messages.length === 0 && !running && !slotDetailFailed && !hideEmptyHint && (
                   <div className="text-center text-muted text-[13px] py-8">{i18nT('components.chatPane.session_ready_type_a_message_to_start')}</div>
                 )}
@@ -1312,12 +1328,13 @@ export default function ChatPane({
             ),
           }}
         />
+        )}
         {/* Bottom fade overlays the scroller's last 24px above the status bars
             and composer (in-flow height cancelled by its own negative margin). */}
         <EdgeFade side="bottom" />
 
         <div className="relative">
-        <JumpToBottomButton visible={!isAtBottom && messages.length > 0} onClick={scrollToBottom} />
+        <JumpToBottomButton visible={transcript === undefined && !isAtBottom && messages.length > 0} onClick={scrollToBottom} />
 
         <SubagentProgressBar slot={slotKey} />
 

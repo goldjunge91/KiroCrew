@@ -422,8 +422,11 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
             # skips and thread-open refuses (orphaned the moment the slot
             # dies). Same rare-send thread-IO budget as the registry check.
             if slot.key.startswith(members_mod.DM_SLOT_KEY_PREFIX):
+                # Fold a wake key to its thread key first (see chat_send).
+                from kiro_crew.member_inbox import member_owner_key as _fold_wake
+
                 _send_binding = await asyncio.to_thread(
-                    members_mod.read_dm_binding_for_slot, slot.key
+                    members_mod.read_dm_binding_for_slot, _fold_wake(slot.key)
                 )
                 if _send_binding is None or _send_binding.get("member", "") != slot.agent:
                     sel().log_api_access(
@@ -525,7 +528,8 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
 
     if agent:
         if members_mod.is_member_mode(slot.mode) and agent != slot.agent:
-            # Member DM threads (and member wakes) are pinned to their crew. Only an EXISTING slot
+            # Member slots (DM thread and wake context) are pinned to their
+            # crew. Only an EXISTING slot
             # can be in member mode (a slot this request just created carries
             # the caller's own mode), so no freshly_created cleanup applies.
             sel().log_api_access(

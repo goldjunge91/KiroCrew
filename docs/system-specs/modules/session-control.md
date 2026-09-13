@@ -411,6 +411,92 @@ gateway owns (`RESERVED_REF_KEYS`: `completed`, `wake_key`, `in_reply_to`, `deli
 `pair_id`, …) before the merge, so a wake steered by an untrusted envelope cannot
 stamp its own "on it…" row `completed` and have the owner's message acked without a turn.
 
+**M1 — projection, read marker, worker reports.** The Members page renders a
+flagged member's thread from the PROJECTION, not the slot transcript:
+`GET /api/members/{slug}/projection` (cookie + owner, app tokens 404 like the
+roster) returns the time-ordered merge of inbox and outbox rows with
+`direction` / `state` (an outbox `peer_dm` mirror whose `refs.delivery` is
+`failed` reads `dead` — undeliverable — rather than `sent`), the `unread` count
+and the read marker. Every string in
+a served row — the body AND `refs`, which `outbox_send` / `peer_send` store
+from the model's call — goes through the shared recursive redaction chain
+(`handlers._shared._redact_memory_field`: exfiltration URLs, then credentials,
+over values AND dictionary keys — the key walk lives in the shared helper, so
+every memory / cron / member handler that serves a model-built mapping gets it,
+not this route alone) before the response, because the response is a network
+boundary and a secret an agent put in a metadata field — or used as a metadata
+key — is no less a secret than one in the body;
+Both routes audit a successful owner call (`members.projection` / `members.read`, `allowed`)
+as well as the refusals their gates record, so the owner's trail shows reads and marker
+writes, not only denials. `POST /api/members/{slug}/read` advances the marker (`member_store_dir(slug)/read.json`)
+to `last_read_id`, the row the client rendered last -- required: there is no "everything
+shown" mode, because the marker never moves backwards and a server-picked newest row could
+be a reply that raced in after the client's last render, an unread row cleared for good. A
+missing, empty or malformed body, or an id the served window does not hold, is refused
+(`invalid_marker` 400 / `unknown_marker` 404) and writes nothing.
+The marker is monotone under a
+per-member lock (compare-and-set on the stored value, so two tabs marking read at
+once cannot move it backwards), and the projection's served window — the newest
+rows, widened backwards to include every row newer than the marker
+(`member_inbox.served_window`) — is the only set a `last_read_id` may name, so the
+client can never advance the marker past an unread row it was not shown. Unread is
+*outbox rows newer than the marker* — what the member said — and the roster
+(`GET /api/members`) carries `inbox_model` and `unread` per row so the badge
+survives a reload. `user_dm` rows render as the person's bubbles, outbox `reply`
+rows as the member's; `session_dm`, `peer_dm`, `worker_report`, `wake_timer` and
+`system` rows render as compact badged rows collapsed per kind AND direction
+group — the collapsed strip describes the group by its newest row (arrow,
+From/To, preview), so a received message never folds under a sent one.
+
+A session a member created reports back through the inbox: when a slot whose
+`_created_by` folds to a flagged member's key finishes a turn, `_run_chat`'s
+turn-end (`chat_runner._report_worker_turn_end`, run for EVERY turn end, BEFORE
+the queue drain decides whether a queued successor starts — not from
+`_finish_queue_cycle`, which a started successor bypasses, so an intermediate
+turn's outcome would never be reported) snapshots the turn
+(`member_wake.snapshot_worker_turn`, an immutable `WorkerTurn`) synchronously on
+the loop while the slot is still busy — the successor's own prompt row lands only
+afterwards, and a report read after it would describe the wrong turn; the snapshot
+is I/O-free, deciding only from the slot's mode and creator — then
+`member_wake.report_worker_turn`, off the loop, reads the creator's `inbox_model` flag
+(a config read) and, for a flagged member, writes that snapshot as a
+`worker_report` envelope in the member's inbox, under a per-member lock
+(`_report_lock`) that covers the append, the budget count and the one-time
+notice, so two workers finishing together are counted one after the other and
+the budget boundary lands on exactly one of them: the assistant text of
+THIS turn (every assistant row since the last prompt row, joined in order — a
+tool-using turn writes a segment before and after each tool call), bounded to `WORKER_REPORT_MAX_CHARS`,
+`from session:<key>`, `refs.outcome: "ok"`; a turn that appended an error row or
+ended with no new assistant text is reported as `refs.outcome: "failed"` with the
+error, never with a previous turn's reply. A member's own thread or wake never
+reports to itself (that is how a wake would loop), and a report that cannot be
+written is logged, never a failed turn.
+
+`worker_report` is bounded like `peer_dm`, because it is the same shape — an
+envelope that buys a model turn. `member_wake.WORKER_REPORT_BUDGET` (24) caps the
+report-triggered wakes per member since the newest `user_dm` in its inbox: past
+it, reports are still written (they drain with the next timer or human-triggered
+wake) but no longer notify the scheduler, and one `system` envelope
+(`refs.reason: worker_report_budget`) tells the member. Only the person typing in
+the thread refills it, exactly as with the peer-DM budget.
+
+`members.is_member_mode` (M0) names both member modes (`member` and
+`member-wake`); M1 applies it at every site that hides or LOCKS a member slot: the
+fork override, the mode lock, external auto-nudge arming AND fire-time admission
+(the gateway's `_dashboard_mode_admits` imports the authorizer's
+`_EXTERNAL_ARM_REFUSED_MODES` rather than restating it, so a self-armed loop on a
+wake slot needs the same two-source `self_armed` + trust-record proof a thread's
+does), and the agent-pin guards in `chat_handlers` (send, agent switch),
+`openai_compat` (send, agent write) and `chat_runner` (the mid-turn provider switch
+veto) — a wake runs as its member and is pinned like the thread; the send-path
+binding check folds a wake key to its thread key first (`member_owner_key`). The
+sites that still compare the literal
+`member` are IDENTITY checks, not locks, and are DM-thread-only on purpose: the
+thread endpoint's binding round-trip, the restore / resume metadata guards, the
+`session_send` shim's target test and the persistence rehydrate — each asks
+"is this THE thread bound in `dm.json`", which a wake is not. The frontend's
+`isChatPageSurface` admits neither mode.
+
 ### Cron callers: unattended admission, bounded by the same fence
 
 A cron job's own slot (`cron-<job_id>`, minted at run start by

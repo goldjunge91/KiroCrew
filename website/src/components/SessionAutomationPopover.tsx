@@ -190,7 +190,9 @@ export default function SessionAutomationPopover({
   automationRef.current = automation
   const slotKeyRef = useRef(slotKey)
   slotKeyRef.current = slotKey
-  const sessionModeUnsupported = sessionMode === 'crew' || sessionMode === 'member'
+  // A member's slots -- the DM thread and the inbox model's wake context --
+  // are woken by the member scheduler, never by an armed loop.
+  const sessionModeUnsupported = sessionMode === 'crew' || sessionMode === 'member' || sessionMode === 'member-wake'
   const legacyView = automation?.kind === 'legacy_goal_loop'
     || (!monitor && boundedModeSlot !== slotKey)
 

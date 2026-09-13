@@ -31,7 +31,11 @@ from kiro_crew.dashboard.chat_persistence import (
     rehydrate_slot_from_history_async,
 )
 from kiro_crew.dashboard.chat_utils import effective_session_key
-from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
+from kiro_crew.dashboard.handlers._shared import (
+    _redact_memory_field,
+    read_bounded_json,
+    require_owner_dashboard_request,
+)
 from kiro_crew.dashboard.state import DashboardState, request_slot_origin
 from kiro_crew.members import MemberSlugError
 from kiro_crew.validation import _AGENT_NAME_RE
@@ -271,6 +275,38 @@ async def api_members(request: web.Request) -> web.Response:
         mt, preview = tails.get(row["slot_key"], (0.0, ""))
         row["last_active_ts"] = mt
         row["last_message"] = preview
+
+    # Member inbox model (RFC member-inbox-model, M1): which rows render the
+    # projection instead of the slot transcript, and the durable unread count
+    # (outbox rows newer than the person's read marker). One thread hop for
+    # the roster; an unflagged member costs one config read and no directory
+    # scan. Fail-soft per row: a bad inbox directory reads as 0 unread, never
+    # as a roster that will not load.
+    def _read_inbox_state() -> dict[str, tuple[bool, int]]:
+        # Boot path: this module is imported at handlers package init, so the
+        # optional inbox subsystem is loaded here, on the request, not at boot.
+        from kiro_crew import member_inbox as inbox_mod
+
+        out: dict[str, tuple[bool, int]] = {}
+        for row in rows:
+            slug = row["slug"]
+            if slug in out:
+                continue
+            flagged = inbox_mod.inbox_model_enabled(slug)
+            unread = 0
+            if flagged:
+                try:
+                    unread = inbox_mod.unread_count(slug)
+                except Exception:  # noqa: BLE001 - a badge must never fail the roster
+                    logger.debug("member inbox: unread count failed for %s", slug, exc_info=True)
+            out[slug] = (flagged, unread)
+        return out
+
+    inbox_state = await asyncio.to_thread(_read_inbox_state)
+    for row in rows:
+        flagged, unread = inbox_state.get(row["slug"], (False, 0))
+        row["inbox_model"] = flagged
+        row["unread"] = unread
 
     return web.json_response({"members": rows})
 
@@ -571,6 +607,24 @@ async def api_member_thread(request: web.Request) -> web.Response:
                 status=500,
             )
 
+    # Member inbox model: a wake that found envelopes but no binding leaves them
+    # pending (member_wake refuses to run as nobody). This endpoint is what
+    # creates the binding, so it is the moment those envelopes can be drained --
+    # re-notify the scheduler, which is a no-op for an unflagged member or an
+    # empty inbox, and never fails the open.
+    try:
+        # Boot path: optional subsystem, imported on the request (see api_members).
+        from kiro_crew import member_inbox as inbox_mod
+        from kiro_crew.member_scheduler import notify_member
+
+        if await asyncio.to_thread(inbox_mod.inbox_model_enabled, slug):
+            pending = await asyncio.to_thread(inbox_mod.InboxStore(slug).pending)
+            if pending:
+                notify_member(slug, kind=pending[0].kind)
+    except (
+        Exception
+    ):  # noqa: BLE001 - the thread opened; a missed nudge is the scheduler's next tick
+        logger.debug("member thread: inbox re-notify failed for %s", slug, exc_info=True)
     return web.json_response({"slot_key": slot.key, "slug": slug, "member": member_name})
 
 
@@ -891,3 +945,173 @@ async def api_member_rules_put(request: web.Request) -> web.Response:
         # cold session picks the new rules up at its next start regardless.
         logger.debug("could not flag member session for reinjection", exc_info=True)
     return web.json_response({"slug": slug, "ok": True})
+
+
+#: Projection rows returned per read. A display cap like ``_ACTIVITY_LIMIT``:
+#: the inbox and outbox directories are the durable record; the page shows the
+#: newest window and the unread count is computed over the whole set.
+_PROJECTION_LIMIT = 200
+
+
+def _projection_slug(request: web.Request) -> str | web.Response:
+    slug = request.match_info["slug"]
+    try:
+        return members_mod.validate_slug(slug)
+    except MemberSlugError:
+        return web.json_response(
+            {"error": "invalid member slug", "code": "invalid_member_slug"}, status=400
+        )
+
+
+async def api_member_projection(request: web.Request) -> web.Response:
+    """GET /api/members/{slug}/projection — the inbox-model thread the page renders.
+
+    The time-ordered merge of a member's inbox (pending / acked / dead) and
+    outbox rows (``member_inbox.projection``), plus ``unread`` — outbox rows
+    newer than the read marker — and the marker itself, so the client can tell
+    whether a newly arrived row is news. Same cookie-only posture as the roster:
+    an app token gets the same 404 (a projection is the person's view of a
+    crew's mail, not an app surface).
+
+    ``inbox_model: false`` with empty rows for an unflagged member rather than
+    an error: the page asks before it knows, and "not on the inbox model" is a
+    legal answer that tells it to render the slot transcript instead.
+    """
+    denied = await _deny_app_caller(request, "members.projection")
+    if denied is not None:
+        return denied
+    # Owner-only like the rules read: the projection is the person's view of a
+    # crew's mail, including peer notes and worker reports, so a non-owner
+    # dashboard identity does not get to read it either.
+    owner_denied = await require_owner_dashboard_request(request, "members.projection")
+    if owner_denied is not None:
+        return owner_denied
+    slug = _projection_slug(request)
+    if isinstance(slug, web.Response):
+        return slug
+
+    def _read() -> dict:
+        # Boot path: optional subsystem, imported on the request (see api_members).
+        from kiro_crew import member_inbox as inbox_mod
+
+        if not inbox_mod.inbox_model_enabled(slug):
+            return {"slug": slug, "inbox_model": False, "rows": [], "unread": 0, "marker": None}
+        rows = inbox_mod.projection(slug)
+        marker = inbox_mod.read_marker(slug)
+        # The served window is the newest _PROJECTION_LIMIT rows widened to
+        # include every row newer than the marker, so the client can never
+        # advance the marker past an unread row it was not shown.
+        return {
+            "slug": slug,
+            "inbox_model": True,
+            "rows": inbox_mod.served_window(rows, marker, _PROJECTION_LIMIT),
+            "unread": inbox_mod.unread_count(slug, rows),
+            "marker": marker,
+        }
+
+    payload = await asyncio.to_thread(_read)
+    # Every string in a row is text a member, a peer or a worker wrote -- the
+    # body, AND `refs` (keys included), which `outbox_send` / `peer_send` store
+    # from the model's call -- and this response is a network boundary. The
+    # same recursive chain the memory handlers run (exfiltration URLs, then
+    # credentials) over the whole row, so a secret an agent put in a metadata
+    # field, or as a metadata KEY, is redacted exactly like one in the body.
+    payload["rows"] = [_redact_memory_field(row) for row in payload["rows"]]
+    _audit_allowed(request, "members.projection", slug)
+    return web.json_response(payload)
+
+
+def _audit_allowed(request: web.Request, operation: str, slug: str) -> None:
+    """SEL row for a successful owner-gated projection operation.
+
+    The refusals on these routes are audited by ``_deny_app_caller`` and the
+    owner gate; a successful read of a member's inbox projection, or a marker
+    write that changes what counts as unread, is the event the owner's audit
+    trail would otherwise lack. Direct enqueue (SEL warmed at startup), and
+    the audit never changes the outcome.
+    """
+    try:
+        _sel().log_api_access(
+            caller=request.remote or "",
+            operation=operation,
+            outcome="allowed",
+            source="dashboard",
+            resources=f"slug={slug}",
+        )
+    except Exception:  # pragma: no cover - audit must never change the outcome
+        logger.debug("SEL audit for %s failed", operation, exc_info=True)
+
+
+async def api_member_read(request: web.Request) -> web.Response:
+    """POST /api/members/{slug}/read — the person has seen the projection.
+
+    Advances the read marker to ``last_read_id`` -- the row the client rendered
+    last -- which must lie inside the window the projection endpoint serves
+    (``served_window``), so the marker can never run ahead of what was shown;
+    without a body it advances to the newest served row. Idempotent and
+    monotone under the member's marker lock: it never moves backwards, and an
+    empty projection leaves it untouched. Returns the new marker and the
+    resulting ``unread`` so the roster badge can settle without a second round
+    trip.
+    """
+    denied = await _deny_app_caller(request, "members.read")
+    if denied is not None:
+        return denied
+    owner_denied = await require_owner_dashboard_request(request, "members.read")
+    if owner_denied is not None:
+        return owner_denied
+    slug = _projection_slug(request)
+    if isinstance(slug, web.Response):
+        return slug
+    # The client names the row it rendered last; there is no "everything shown"
+    # mode. The marker only ever moves forward, so a request that let the server
+    # pick the newest served row would advance it past a reply that raced in
+    # after the client's last render -- a row nobody saw, cleared for good. A
+    # missing, empty or malformed body is a 400, never a marker write.
+    # `read_bounded_json` owns the parse-and-shape guard (bounded read, and a
+    # deeply nested document is a 400 like any other malformed body, not a 500).
+    body, err = await read_bounded_json(request)
+    if err is not None:
+        return err
+    assert body is not None
+    wanted = body.get("last_read_id")
+    if not isinstance(wanted, str) or not wanted.startswith("env_"):
+        return web.json_response(
+            {
+                "error": "last_read_id must name the projection row rendered last",
+                "code": "invalid_marker",
+            },
+            status=400,
+        )
+
+    def _mark() -> dict | web.Response:
+        # Boot path: optional subsystem, imported on the request (see api_members).
+        from kiro_crew import member_inbox as inbox_mod
+
+        if not inbox_mod.inbox_model_enabled(slug):
+            return web.json_response(
+                {"error": "member is not on the inbox model", "code": "member_not_flagged"},
+                status=409,
+            )
+        rows = inbox_mod.projection(slug)
+        served = inbox_mod.served_window(rows, inbox_mod.read_marker(slug), _PROJECTION_LIMIT)
+        # Only a row the projection endpoint would have served may become the
+        # marker: the client cannot name a row it was never shown.
+        target = next((r for r in served if r.get("id") == wanted), None)
+        if target is None:
+            return web.json_response(
+                {"error": "no such projection row", "code": "unknown_marker"}, status=404
+            )
+        marker = inbox_mod.write_read_marker(slug, target)
+        return {
+            "ok": True,
+            "slug": slug,
+            "marker": marker,
+            "unread": inbox_mod.unread_count(slug, rows),
+        }
+
+    result = await asyncio.to_thread(_mark)
+    if isinstance(result, web.Response):
+        return result
+    _audit_allowed(request, "members.read", slug)
+    return web.json_response(result)

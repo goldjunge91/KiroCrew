@@ -40,6 +40,17 @@ export const membersRosterQuery = {
 export const memberActivityQueryKey = (slug: string, member: string) =>
   ['member-activity', slug, member] as const
 
+/** The inbox-model projection of one member (GET /api/members/{slug}/projection).
+ *  Keyed by slug: the projection is the member DIRECTORY's content, and the
+ *  directory is keyed by slug. */
+export const memberProjectionQueryKey = (slug: string) => ['member-projection', slug] as const
+
+/** Poll cadence while an inbox-model member is open. Envelopes are written by
+ *  wakes, peers and workers — nothing in this tab — so the projection has no
+ *  push path yet; a short interval keeps the thread conversational (a wake's
+ *  reply shows within a few seconds) without a WS frame per envelope. */
+export const MEMBER_PROJECTION_POLL_MS = 4_000
+
 /**
  * The outcome of the last thread open for one member — what
  * POST /api/members/{slug}/thread answered. Written by the open mutation

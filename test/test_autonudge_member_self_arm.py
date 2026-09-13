@@ -703,14 +703,22 @@ class TestFireTimeModeRecheck:
         return False
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", ["crew", "member"])
+    @pytest.mark.parametrize("mode", ["crew", "member", "member-wake"])
     async def test_self_armed_member_wake_is_authorized(self, mode: str) -> None:
         assert await self._authorize(mode=mode, self_armed=True) is True
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", ["crew", "member"])
+    @pytest.mark.parametrize("mode", ["crew", "member", "member-wake"])
     async def test_externally_armed_wake_on_a_member_slot_is_still_refused(self, mode: str) -> None:
         assert await self._authorize(mode=mode, self_armed=False) is False
+
+    def test_fire_time_set_is_the_arm_time_set(self) -> None:
+        """One boundary, two checks: the gateway imports the authorizer's set."""
+        from kiro_crew.autonudge_authz import _EXTERNAL_ARM_REFUSED_MODES
+        from kiro_crew.slack import gateway as gw
+
+        assert gw._EXTERNAL_ARM_REFUSED_MODES is _EXTERNAL_ARM_REFUSED_MODES
+        assert "member-wake" in _EXTERNAL_ARM_REFUSED_MODES
 
 
 # ── arm outcome reporting: success notice, status in refusal, first wake ─────
@@ -1436,7 +1444,7 @@ class TestFireTimeGuardRequiresTheTrustRecord(TestFireTimeModeRecheck):
         monkeypatch.setattr(autonudge_selfarm, "is_recorded_self_arm", lambda _i, _s: False)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mode", ["crew", "member"])
+    @pytest.mark.parametrize("mode", ["crew", "member", "member-wake"])
     async def test_self_armed_member_wake_is_authorized(self, mode: str) -> None:  # type: ignore[override]
         # Inverted on purpose: bit True but NO trust record refuses.
         assert await self._authorize(mode=mode, self_armed=True) is False

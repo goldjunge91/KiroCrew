@@ -1495,13 +1495,15 @@ async def api_chat_slot_mode(request: web.Request) -> web.Response:
     mode = body.get("mode", "")
     if mode not in _VALID_MODES:
         return web.json_response({"error": "invalid mode"}, status=400)
-    # Member DM threads (mode="member") are pinned to their crew, and every
-    # pin guard is conditioned on this very field — so the mode writer is the
-    # one door that would unlock all of them at once (PATCH mode -> "", then
-    # the agent switch endpoint passes its guard). "member" is deliberately
-    # absent from _VALID_MODES (mode cannot be SET here), and here it cannot
-    # be UNSET either: member slots are born and retired only through the
-    # member-thread endpoint.
+    # Member slots (the DM thread, mode="member", and a member wake context,
+    # mode="member-wake") are pinned to their crew, and every pin guard is
+    # conditioned on this very field — so the mode writer is the one door that
+    # would unlock all of them at once (PATCH mode -> "", then the agent switch
+    # endpoint passes its guard). Neither member mode is in _VALID_MODES (mode
+    # cannot be SET here), and here it cannot be UNSET either: member slots are
+    # born and retired only through the member-thread endpoint and the wake
+    # runner. One shared predicate (``is_member_mode``) so a new member-owned
+    # mode is locked here without a second ``==`` test.
     if is_member_mode(slot.mode):
         return web.json_response(
             {"error": "member thread mode is locked", "code": "member_mode_locked"},

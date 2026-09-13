@@ -71,7 +71,7 @@ function makeStore(slotKey: string, activeSlot?: string, messages: unknown[] = [
   })
 }
 
-function renderPane(slotKey: string, opts: { onOpenFull?: (slot: string) => void; activeSlot?: string; messages?: unknown[]; running?: boolean } = {}) {
+function renderPane(slotKey: string, opts: { onOpenFull?: (slot: string) => void; activeSlot?: string; messages?: unknown[]; running?: boolean; transcript?: ReactNode } = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const store = makeStore(slotKey, opts.activeSlot, opts.messages, opts.running)
   const view = render(
@@ -79,7 +79,7 @@ function renderPane(slotKey: string, opts: { onOpenFull?: (slot: string) => void
       <QueryClientProvider client={qc}>
         <ThemeProvider>
           <MemoryRouter>
-            <ChatPane slotKey={slotKey} onOpenFull={opts.onOpenFull} />
+            <ChatPane slotKey={slotKey} onOpenFull={opts.onOpenFull} transcript={opts.transcript} />
           </MemoryRouter>
         </ThemeProvider>
       </QueryClientProvider>
@@ -469,5 +469,24 @@ describe('the bounded-length record marks the active view as provisional', () =>
       meta: { arg: slot },
     })
     expect(store.getState().chat.slotPaneBounded[slot]).toBeUndefined()
+  })
+})
+
+describe('ChatPane hydrate failure reaches both transcript branches', () => {
+  it('shows the hydration error and retry over a host-owned transcript too', async () => {
+    // The inbox-model projection replaces the message list, but the slot's own
+    // hydration read can still fail underneath it; the notice must not be a
+    // property of the default branch alone.
+    ;(api.chatSlotDetail as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('offline'))
+    const { getByTestId, getByText } = renderPane('pane-host-1', {
+      transcript: <div data-testid="host-transcript">projection</div>,
+    })
+    await waitFor(() => expect(getByTestId('chat-pane-hydrate-error')).toBeInTheDocument())
+    expect(getByTestId('host-transcript')).toBeInTheDocument()
+    ;(api.chatSlotDetail as ReturnType<typeof vi.fn>).mockResolvedValue({
+      messages: [], running: false, has_more: false, total: 0,
+    })
+    fireEvent.click(getByText('Retry'))
+    await waitFor(() => expect(api.chatSlotDetail).toHaveBeenCalledTimes(2))
   })
 })

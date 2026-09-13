@@ -65,6 +65,7 @@ import { emitSlotRead } from '../../lib/slotReadRelay'
 import CrewAvatar from '../../components/CrewAvatar'
 import CrewStateAvatar from '../../components/CrewStateAvatar'
 import ChatPane from '../../components/ChatPane'
+import MemberProjection from './MemberProjection'
 import ErrorBoundary from '../../components/ErrorBoundary'
 import ErrorNotice from '../../components/ErrorNotice'
 import { useGuardedLeave } from '../../components/NavigationLeaveGuard'
@@ -1704,7 +1705,22 @@ export default function MembersPage() {
                     unread dot, with a real accessible name: nothing else on
                     the row says "unread". The left side is taken — presence
                     rides the avatar. */}
-                {isUnread(m) && (
+                {/* Inbox-model members carry a DURABLE count (outbox rows
+                    newer than the read marker, from the roster row itself),
+                    which outranks the live-WS dot: it survives a reload and
+                    clears when the projection is viewed. */}
+                {m.inbox_model && (m.unread ?? 0) > 0 ? (
+                  <span
+                    className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-semibold tabular-nums flex items-center justify-center"
+                    style={{ background: 'var(--accent)', color: 'var(--accent-fg)' }}
+                    role="img"
+                    aria-label={t('pages.membersPage.inbox_unread_count', { count: m.unread ?? 0 })}
+                    title={t('pages.membersPage.inbox_unread_count', { count: m.unread ?? 0 })}
+                    data-testid="member-unread-count"
+                  >
+                    {(m.unread ?? 0) > 99 ? '99+' : m.unread}
+                  </span>
+                ) : isUnread(m) && (
                   <span
                     className="w-2 h-2 rounded-full shrink-0"
                     style={{ background: 'var(--accent)' }}
@@ -1956,6 +1972,22 @@ export default function MembersPage() {
                     frameless
                     followContentWidth
                     busyMode="steer-only"
+                    // Inbox model (RFC member-inbox-model, M1): a flagged
+                    // member's thread is the projection of its inbox and
+                    // outbox on disk, so the pane shows that instead of this
+                    // slot's transcript. The composer is still the pane's:
+                    // typing posts to api_chat, which mints the user_dm and
+                    // wakes the member. `active` is re-read per render so a
+                    // member flagged while open switches without a remount.
+                    transcript={
+                      active.inbox_model ? (
+                        <MemberProjection
+                          slug={active.slug}
+                          memberName={active.name}
+                          visible={pageVisible}
+                        />
+                      ) : undefined
+                    }
                     // The failure notice above owns the verdict on this thread
                     // while a repair has failed; the pane's own "Session
                     // ready" would contradict it one line down.

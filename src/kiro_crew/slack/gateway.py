@@ -67,6 +67,7 @@ from kiro_crew.autonudge import (
     runtime_budget_exceeded,
     terminal_notification_delivery_matches,
 )
+from kiro_crew.autonudge_authz import _EXTERNAL_ARM_REFUSED_MODES
 from kiro_crew.beacon import distribution
 from kiro_crew.channel_history import ChannelHistory
 from kiro_crew.channels import builtin_channel_descriptors
@@ -6692,10 +6693,13 @@ class GatewayOrchestrator:
     async def _dashboard_mode_admits(loop: NudgeLoop, slot: Any) -> bool:
         """Whether *slot*'s mode admits a wake from *loop*.
 
-        Any mode but crew/member admits. A crew/member slot refuses a wake armed
+        Any mode outside ``autonudge_authz._EXTERNAL_ARM_REFUSED_MODES`` (crew,
+        member, member-wake) admits. A member-boundary slot refuses a wake armed
         from OUTSIDE the session; a loop the slot's OWN turn armed is the
-        member keeping itself awake and must fire. Same rule as
-        ``autonudge_authz``. TWO sources must agree, because the loop store is
+        member keeping itself awake and must fire. The SAME set as the arm-time
+        rule in ``autonudge_authz`` -- imported, not restated, so widening the
+        boundary there (as the inbox model did with ``member-wake``) widens the
+        fire-time check with it. TWO sources must agree, because the loop store is
         agent-writable and this is the one bit that relaxes a session boundary:
         the persisted ``self_armed`` must be the boolean True (``is True`` -- a
         forged string is truthy; ``_load`` normalises too) AND the
@@ -6704,7 +6708,7 @@ class GatewayOrchestrator:
         loop on this slot. A forged boolean in the store has no trust entry and
         refuses. The record read is file IO, so it is offloaded.
         """
-        if str(getattr(slot, "mode", "")) not in {"crew", "member"}:
+        if str(getattr(slot, "mode", "")) not in _EXTERNAL_ARM_REFUSED_MODES:
             return True
         if getattr(loop, "self_armed", False) is not True:
             return False

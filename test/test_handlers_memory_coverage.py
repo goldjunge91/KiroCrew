@@ -637,6 +637,14 @@ class TestRedactAndStoreResolution:
         assert _CRED not in json.dumps(out)
         assert out["n"] == 3
 
+    def test_dictionary_keys_are_redacted_like_values(self) -> None:
+        """A mapping the model built is model text in both positions."""
+        out = mem_mod._redact_memory_field({_CRED: "v", "k": {_CRED: [_CRED]}, 7: "seven"})
+        assert isinstance(out, dict)
+        assert _CRED not in json.dumps(out, default=str)
+        assert out[7] == "seven"  # non-string keys pass through untouched
+        assert "k" in out and isinstance(out["k"], dict)
+
     def test_non_string_scalars_pass_through(self) -> None:
         assert mem_mod._redact_memory_field(None) is None
         assert mem_mod._redact_memory_field(True) is True
