@@ -196,19 +196,6 @@ class OpenRouterBYOKManager:
         self._save_presets(filtered)
         return True
 
-    def get_preset_by_name_or_id(
-        self, name_or_id: str, workspace_id: str = "default"
-    ) -> dict[str, Any] | None:
-        """Lookup a preset by matching its 'name' or 'id'."""
-        if not name_or_id:
-            return None
-        target = name_or_id.strip()
-        presets = self.list_presets(workspace_id=workspace_id)
-        for p in presets:
-            if p.get("name") == target or p.get("id") == target:
-                return p
-        return None
-
     # ── Workspace Settings ──
 
     def get_workspace_settings(self, workspace_id: str = "default") -> dict[str, Any]:
@@ -251,29 +238,17 @@ class OpenRouterBYOKManager:
         3. Workspace Settings Default
         4. System Default (Lowest)
         """
-        # Helper to check if model is a preset
-        def _resolve_override(override: tuple[str, str] | None) -> tuple[str, str, str] | None:
-            if not override or not override[1]:
-                return None
-            key_id, model = override
-            preset = self.get_preset_by_name_or_id(model, workspace_id=workspace_id)
-            if preset:
-                p_key_id = preset.get("key_id", "") or key_id
-                p_model = preset.get("model_name", "")
-                raw_key = self.get_raw_key(p_key_id) if p_key_id else None
-                return (p_key_id, raw_key or "", p_model)
+        # 1. Task
+        if task_override and task_override[1]:
+            key_id, model = task_override
             raw_key = self.get_raw_key(key_id) if key_id else None
             return (key_id, raw_key or "", model)
 
-        # 1. Task
-        resolved_task = _resolve_override(task_override)
-        if resolved_task:
-            return resolved_task
-
         # 2. Agent
-        resolved_agent = _resolve_override(agent_override)
-        if resolved_agent:
-            return resolved_agent
+        if agent_override and agent_override[1]:
+            key_id, model = agent_override
+            raw_key = self.get_raw_key(key_id) if key_id else None
+            return (key_id, raw_key or "", model)
 
         # 3. Workspace Default
         ws_settings = self.get_workspace_settings(workspace_id)
