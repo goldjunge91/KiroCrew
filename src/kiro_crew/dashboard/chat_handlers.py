@@ -6739,6 +6739,7 @@ def _model_rejected_reason(model_name: str, provider: str | None = None) -> str 
         return None
     # Allow OpenRouter BYOK presets
     from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+
     byok_mgr = OpenRouterBYOKManager()
     if byok_mgr.get_preset_by_name_or_id(model_name) is not None:
         return None

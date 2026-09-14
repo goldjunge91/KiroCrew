@@ -251,6 +251,7 @@ class OpenRouterBYOKManager:
         3. Workspace Settings Default
         4. System Default (Lowest)
         """
+
         # Helper to check if model is a preset
         def _resolve_override(override: tuple[str, str] | None) -> tuple[str, str, str] | None:
             if not override or not override[1]:
