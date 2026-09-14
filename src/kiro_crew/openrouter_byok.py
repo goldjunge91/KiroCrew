@@ -53,7 +53,7 @@ def test_openrouter_connection(api_key: str) -> dict[str, Any]:
         "https://openrouter.ai/api/v1/auth/key",
         headers={
             "Authorization": f"Bearer {clean_key}",
-            "User-Agent": "KiroCrew-BYOK/1.0",  # brand-ok
+            "User-Agent": "KiroCrew-BYOK/1.0", # brand-ok
         },
         method="GET",
     )

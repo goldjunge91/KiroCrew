@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { SettingsCard, SettingsSection, SettingsInput, SettingsSelect } from '../../components/settings'
 import Clickable from '../../components/Clickable'
 
