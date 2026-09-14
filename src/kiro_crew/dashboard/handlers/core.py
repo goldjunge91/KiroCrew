@@ -145,6 +145,7 @@ _AGENT_UNTRUSTED_TEXT_FIELDS = (
     "model",
     "source",
     "telegram_account",
+    "openrouter_key_id",
 )
 
 

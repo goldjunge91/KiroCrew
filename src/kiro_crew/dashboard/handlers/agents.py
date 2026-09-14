@@ -2188,9 +2188,13 @@ async def api_models(request: web.Request) -> web.Response:
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
     backend = getattr(cfg.agent, "acp_backend", "")
     if backend == ACP_BACKEND_CLAUDE:
-        return web.json_response(_append_openrouter_presets(_cc_models(request, configured_default=cfg.agent.model)))
+        return web.json_response(
+            _append_openrouter_presets(_cc_models(request, configured_default=cfg.agent.model))
+        )
     if backend == ACP_BACKEND_CODEX:
-        return web.json_response(_append_openrouter_presets(_codex_models(request, configured_default=cfg.agent.model)))
+        return web.json_response(
+            _append_openrouter_presets(_codex_models(request, configured_default=cfg.agent.model))
+        )
     # Signed-out gateways must never reach the spawn below. kiro-cli auto-opens
     # an interactive browser login for ANY subcommand run unauthenticated
     # (--no-interactive does not suppress it, and there is no opt-out env var),
