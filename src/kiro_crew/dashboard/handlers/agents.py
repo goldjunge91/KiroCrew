@@ -2143,6 +2143,41 @@ def _wrap_list_models_argv(argv: list[str]) -> tuple[list[str], str | None]:
     return wrap_argv(argv, mode=configured_sandbox_mode(), is_kiro_cli=True)
 
 
+def _append_openrouter_presets(models: list[dict]) -> list[dict]:
+    try:
+        from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+
+        byok_mgr = OpenRouterBYOKManager()
+        presets = byok_mgr.list_presets()
+        existing_names = {
+            m.get("model_name") for m in models if isinstance(m, dict) and m.get("model_name")
+        }
+        for p in presets:
+            m_name = (p.get("model_name") or "").strip()
+            p_name = (p.get("name") or "").strip()
+            if not m_name:
+                continue
+            if p_name and p_name != m_name and p_name not in existing_names:
+                existing_names.add(p_name)
+                models.append(
+                    {
+                        "model_name": p_name,
+                        "description": f"OpenRouter Preset ({m_name})",
+                    }
+                )
+            if m_name not in existing_names:
+                existing_names.add(m_name)
+                models.append(
+                    {
+                        "model_name": m_name,
+                        "description": f"Preset: {p_name}" if p_name else "OpenRouter BYOK Preset",
+                    }
+                )
+    except Exception:
+        logger.warning("failed to load openrouter presets for model list", exc_info=True)
+    return models
+
+
 async def api_models(request: web.Request) -> web.Response:
     """GET /api/models — the model list for the configured backend.
 
@@ -2153,9 +2188,9 @@ async def api_models(request: web.Request) -> web.Response:
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
     backend = getattr(cfg.agent, "acp_backend", "")
     if backend == ACP_BACKEND_CLAUDE:
-        return web.json_response(_cc_models(request, configured_default=cfg.agent.model))
+        return web.json_response(_append_openrouter_presets(_cc_models(request, configured_default=cfg.agent.model)))
     if backend == ACP_BACKEND_CODEX:
-        return web.json_response(_codex_models(request, configured_default=cfg.agent.model))
+        return web.json_response(_append_openrouter_presets(_codex_models(request, configured_default=cfg.agent.model)))
     # Signed-out gateways must never reach the spawn below. kiro-cli auto-opens
     # an interactive browser login for ANY subcommand run unauthenticated
     # (--no-interactive does not suppress it, and there is no opt-out env var),
@@ -2304,6 +2339,7 @@ async def api_models(request: web.Request) -> web.Response:
             )
         models = [m for m in models if not is_deprecated_model(m.get("model_name", ""))]
         models = _entitled_kiro_models(request, models)
+        models = _append_openrouter_presets(models)
         return web.json_response(models)
     except SandboxUnavailableError as exc:
         # Narrower than the generic clause below, and BEFORE it: this is the one

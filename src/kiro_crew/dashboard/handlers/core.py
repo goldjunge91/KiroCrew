@@ -1806,6 +1806,15 @@ def _validate_role_model(
     reason = _model_rejected_reason(value, provider=provider)
     if reason:
         return reason
+    if value.startswith("openrouter::"):
+        return None
+    try:
+        from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+
+        if OpenRouterBYOKManager().find_preset(value):
+            return None
+    except Exception:
+        pass
     advertised = _active_advertised_ids(request)
     if advertised is None:
         return None
