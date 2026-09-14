@@ -18,7 +18,7 @@ import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.loader import config_dir

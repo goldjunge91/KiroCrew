@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from aiohttp import web
 
 from kiro_crew.openrouter_byok import (
