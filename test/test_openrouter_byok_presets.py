@@ -1,11 +1,13 @@
-import pytest
 import json
 from unittest.mock import MagicMock
+
+import pytest
 from aiohttp import web
-from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+
 from kiro_crew.dashboard.chat_handlers import _model_rejected_reason
 from kiro_crew.dashboard.handlers.agents import _append_openrouter_presets, api_models
 from kiro_crew.dashboard.handlers.core import _validate_role_model
+from kiro_crew.openrouter_byok import OpenRouterBYOKManager
 
 
 def test_openrouter_preset_management(tmp_path):

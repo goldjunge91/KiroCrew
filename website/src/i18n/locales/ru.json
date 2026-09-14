@@ -15229,6 +15229,10 @@
       "secrets": {
         "label": "Secrets",
         "description": "Безопасное хранение ключей API и учётных данных"
+      },
+      "openrouter": {
+        "label": "Models & BYOK",
+        "description": "Configure OpenRouter BYOK keys and workspace presets"
       }
     },
     "secrets": {

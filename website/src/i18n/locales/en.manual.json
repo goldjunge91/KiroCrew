@@ -6247,6 +6247,10 @@
       "voice": {
         "description": "Text-to-speech and speech-to-text (dictation) settings",
         "label": "Voice"
+      },
+      "openrouter": {
+        "label": "Models & BYOK",
+        "description": "Configure OpenRouter BYOK keys and workspace presets"
       }
     }
   },

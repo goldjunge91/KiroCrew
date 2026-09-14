@@ -14842,6 +14842,10 @@
       "secrets": {
         "label": "Secrets",
         "description": "API-Schlüssel und Anmeldedaten sicher speichern"
+      },
+      "openrouter": {
+        "label": "Models & BYOK",
+        "description": "Configure OpenRouter BYOK keys and workspace presets"
       }
     },
     "secrets": {

@@ -14843,6 +14843,10 @@
       "secrets": {
         "label": "Secrets",
         "description": "API कुंजियाँ और क्रेडेंशियल सुरक्षित रूप से संग्रहीत करें"
+      },
+      "openrouter": {
+        "label": "Models & BYOK",
+        "description": "Configure OpenRouter BYOK keys and workspace presets"
       }
     },
     "secrets": {
