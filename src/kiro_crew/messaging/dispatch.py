@@ -38,7 +38,11 @@ from kiro_crew.hooks import HOOK_REPLY, TOOL_AUTO_APPROVE, TOOL_DENY, event_is_s
 from kiro_crew.memory_stores import UnknownMemoryStore
 from kiro_crew.messaging.driver import DirectiveConsumer, TurnDriver
 from kiro_crew.messaging.identity import channel_inbound_permitted, publish_turn_identity
-from kiro_crew.messaging.inbound_spool import InboundRoute, spool_refused_turn
+from kiro_crew.messaging.inbound_spool import (
+    InboundRoute,
+    spool_refused_turn,
+    spool_refused_turn_sync,
+)
 from kiro_crew.messaging.link import (
     DM_SCOPE_UNIFIED,
     ChannelLink,
@@ -62,6 +66,104 @@ from kiro_crew.sel import sel
 from kiro_crew.session_allocation import SessionClosingError
 
 logger = logging.getLogger(__name__)
+
+
+async def admit_inbound_callback(
+    sessions: Any,
+    *,
+    channel_type: str,
+    route: InboundRoute | None,
+    restricted: bool | Callable[[], Awaitable[bool]] = False,
+) -> bool:
+    """Reserve one handler task or durably refuse it before pre-turn effects.
+
+    A callable restriction is resolved only after admission refuses the task.
+    Resume-capable channels use that form because their effective session takes
+    an awaited routing decision to determine. The upstream client handler task
+    remains census-visible during that decision, while the happy path keeps the
+    synchronous reserve-before-effects boundary and pays no routing lookup.
+    """
+    reserve = getattr(sessions, "reserve_inbound_callback", None)
+    if not callable(reserve):
+        # Compatibility for focused embedders/test doubles that are not a
+        # SessionManager. Production channel dispatch always receives the real
+        # facade, whose structural contract requires this method.
+        return True
+    reservation = reserve()
+    if reservation is None:
+        try:
+            refusal_restricted = bool(await restricted()) if callable(restricted) else restricted
+        except Exception:
+            logger.warning(
+                "%s: could not resolve refused callback privacy; suppressing durable spool",
+                channel_type,
+                exc_info=True,
+            )
+            refusal_restricted = True
+        if not refusal_restricted:
+            if getattr(sessions, "update_restart_fenced", False):
+                spool_refused_turn_sync(channel_type=channel_type, route=route)
+            else:
+                await spool_refused_turn(channel_type=channel_type, route=route)
+        return False
+    task = asyncio.current_task()
+    if task is None:
+        reservation.release()
+        raise RuntimeError("inbound callback has no owning asyncio task")
+    task.add_done_callback(lambda _done: reservation.release())
+    return True
+
+
+class _InboundCallbackAdmission:
+    """Explicit callback lease for dispatchers running on a long-lived task."""
+
+    def __init__(
+        self,
+        sessions: Any,
+        *,
+        channel_type: str,
+        route: InboundRoute | None,
+        restricted: bool,
+    ) -> None:
+        self._sessions = sessions
+        self._channel_type = channel_type
+        self._route = route
+        self._restricted = restricted
+        self._reservation: Any = None
+
+    async def __aenter__(self) -> bool:
+        reserve = getattr(self._sessions, "reserve_inbound_callback", None)
+        if not callable(reserve):
+            return True
+        self._reservation = reserve()
+        if self._reservation is not None:
+            return True
+        if not self._restricted:
+            if getattr(self._sessions, "update_restart_fenced", False):
+                spool_refused_turn_sync(channel_type=self._channel_type, route=self._route)
+            else:
+                await spool_refused_turn(channel_type=self._channel_type, route=self._route)
+        return False
+
+    async def __aexit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        if self._reservation is not None:
+            self._reservation.release()
+
+
+def hold_inbound_callback(
+    sessions: Any,
+    *,
+    channel_type: str,
+    route: InboundRoute | None,
+    restricted: bool = False,
+) -> _InboundCallbackAdmission:
+    """Hold callback census ownership only for the surrounding async scope."""
+    return _InboundCallbackAdmission(
+        sessions,
+        channel_type=channel_type,
+        route=route,
+        restricted=restricted,
+    )
 
 
 @dataclass
@@ -227,6 +329,14 @@ class ChannelTurn:
     has to declare its own address here -- it is the only place holding the
     normalized envelope. ``None`` (the default) means the channel has not adopted
     the spool and its refusal path is byte-identical to before.
+    """
+
+    inbound_restricted: bool = False
+    """Suppress durable refusal spooling for an incognito/temporary session.
+
+    The dispatcher resolves this against the final session key before entering
+    the shared turn pipeline. It covers the later ``SessionClosingError`` race,
+    after callback admission succeeded but before the provider turn opened.
     """
 
 
@@ -797,7 +907,8 @@ async def drive_turn(turn: ChannelTurn, *, sessions: Any, ctx_builder: Any) -> N
         # quote those rules back into the group in the restart notice. A route
         # whose text is empty is a media-only entry (or nothing), not a cue to
         # reach for the prompt.
-        await spool_refused_turn(channel_type=turn.channel_type, route=turn.inbound_route)
+        if not turn.inbound_restricted:
+            await spool_refused_turn(channel_type=turn.channel_type, route=turn.inbound_route)
     except UnknownMemoryStore as exc:
         logger.warning("%s member memory unavailable: %s", turn.channel_type, exc)
         try:

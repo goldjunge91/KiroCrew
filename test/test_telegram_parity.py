@@ -4276,6 +4276,7 @@ class TestDurableWritesUseTheRotatedKey:
             "handle_message",
             "_notify_mode",
             "_callback_session_key",
+            "_refused_turn_restricted",
         }
         missing = consumers - set(self._CLASSIFIED) - exempt
         assert not missing, f"unclassified session-key consumers: {sorted(missing)}"

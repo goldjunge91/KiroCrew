@@ -121,14 +121,34 @@ class SessionRegistryState:
     sessions: dict[str, Any] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     closing: bool = False
+    update_pause_owned: bool = False
+    update_restart_fenced: bool = False
     start_sem: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(4))
     starting_pids: set[int] = field(default_factory=set)
     allocation_reservations: dict[str, set[object]] = field(default_factory=dict)
+    inbound_callback_reservations: set[object] = field(default_factory=set)
     ownership_generations: dict[str, int] = field(default_factory=dict)
     subagent_runtimes: dict[str, Any] = field(default_factory=dict)
     subagent_runtime_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     continuable_keys: set[str] = field(default_factory=set)
     continuable_fallback: Callable[[str], bool] | None = None
+
+
+class InboundCallbackReservation:
+    """One counted inbound callback claim with idempotent release."""
+
+    __slots__ = ("_reservations", "_token")
+
+    def __init__(self, reservations: set[object], token: object) -> None:
+        self._reservations = reservations
+        self._token: object | None = token
+
+    def release(self) -> None:
+        token = self._token
+        if token is None:
+            return
+        self._token = None
+        self._reservations.discard(token)
 
 
 class _AllocationOwner(Protocol):
@@ -291,6 +311,10 @@ class SessionAllocationService:
     @_allocation_reservations.setter
     def _allocation_reservations(self, value: dict[str, set[object]]) -> None:
         self.state.allocation_reservations = value
+
+    @property
+    def _inbound_callback_reservations(self) -> set[object]:
+        return self.state.inbound_callback_reservations
 
     @property
     def _ownership_generations(self) -> dict[str, int]:
@@ -637,7 +661,15 @@ class SessionAllocationService:
             parent_session_key, agent=agent, cwd=cwd
         )
         try:
-            handle = await runtime.create_session(cwd=cwd or None, agent=agent or None)
+            handle = await runtime.create_session(
+                cwd=cwd or None,
+                agent=agent or None,
+                # A per-step session on the RUN's shared runtime: without its
+                # owner, its broker stubs carry a token no claim names and
+                # resolve to nothing (fail closed), and before the token they
+                # resolved to the run's parent session.
+                session_key=key,
+            )
         except AcpWorkspaceBindingError:
             return await owner.get_or_create(
                 key,
@@ -812,6 +844,18 @@ class SessionAllocationService:
             await self._owner.reset(key)
             return True
         return False
+
+    def reserve_inbound_callback(self) -> InboundCallbackReservation | None:
+        """Claim one pre-turn callback atomically against update/shutdown admission."""
+        if self._closing:
+            return None
+        token = object()
+        self._inbound_callback_reservations.add(token)
+        return InboundCallbackReservation(self._inbound_callback_reservations, token)
+
+    @property
+    def inbound_callback_count(self) -> int:
+        return len(self._inbound_callback_reservations)
 
     def begin_turn(self, key: str) -> None:
         """Yield-free pre-dispatch closing gate for an already-issued lease."""
@@ -1619,12 +1663,15 @@ class SessionAllocationService:
                         agent=agent or "",
                     )
                     replay_needed = getattr(provider, "_history_replay_needed", False) is True
+                    provider_label = self._deps.provider_label(provider)
+                    defer_sid_promotion = (
+                        replay_needed
+                        and provider.defer_replay_sid_promotion is True
+                        and provider_label == constants.provider_label_default
+                    )
                     if provider_switched or replay_needed:
                         session.provider_switch_replay = True
-                    if (
-                        replay_needed
-                        and self._deps.provider_label(provider) != constants.provider_label_default
-                    ):
+                    if replay_needed and provider_label != constants.provider_label_default:
                         owner._session_map.clear_sid(key)
                     self._sessions[key] = session
                     self.advance_ownership_generation(key)
@@ -1651,13 +1698,18 @@ class SessionAllocationService:
                     provider_cwd = provider.cwd
                     if not is_stateless and self._deps.is_acp_provider(provider):
                         sid = cast(Any, provider).client._session_id
-                        provider_label = self._deps.provider_label(provider)
-                        if sid:
+                        if sid and not defer_sid_promotion:
                             owner._session_map.set(
                                 key,
                                 sid,
                                 provider=provider_label,
                                 cwd=provider_cwd,
+                            )
+                        elif sid:
+                            self._deps.logger.info(
+                                "Deferring fresh SID promotion for replay-pending "
+                                "session %s; prior resumable SID stays durable",
+                                key,
                             )
                     elif not is_stateless and self._deps.is_claude_provider(provider):
                         sid = provider.session_id

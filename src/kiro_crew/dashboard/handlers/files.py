@@ -86,6 +86,7 @@ from kiro_crew.security import (
 from kiro_crew.slack.handler import is_tracked_channel
 from kiro_crew.validation import (
     FILE_READ_SCHEMA,
+    MODEL_ID_RE,
     ValidationError,
     validate_tool_args,
 )
@@ -1322,6 +1323,67 @@ def _content_matches_ext(ext: str, data: bytes) -> bool:
     return any(data.startswith(p) for p in prefixes)
 
 
+#: Canonical upload extension per sniffed raster type: the suffix a mislabelled
+#: raster is stored under so every downstream consumer that infers the mime
+#: from the path (ACP image inlining, /api/file-raw) reads the true type.
+_RASTER_MIME_EXT: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/webp": ".webp",
+}
+#: ISO-BMFF brands of still-image containers (HEIF/HEIC/AVIF). An iPhone photo
+#: that reaches the browser as ``IMG_1234.jpeg`` is routinely one of these, and
+#: the generic "not really a .jpeg" sentence leaves the user guessing why.
+_HEIF_BRANDS = frozenset(
+    {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif", b"avis"}
+)
+
+
+def _resolve_raster_ext(ext: str, data: bytes) -> str | None:
+    """The extension a raster upload declared as *ext* is stored under.
+
+    Returns *ext* when the leading bytes match it, the sniffed type's canonical
+    extension when they are a DIFFERENT accepted raster, and ``None`` when they
+    are no raster at all. The relabel exists because browsers keep the URL's
+    extension on "Save image as" while the body is whatever the server sent
+    (a ``.jpeg`` that is really WebP is the everyday case), and a photo is a
+    photo whichever suffix it wears. Security is unchanged: the bytes still
+    have to be a raster the allowlist accepts, so the CWE-434 property --
+    no HTML or script stored under an image extension -- holds; only the label
+    is corrected instead of refused.
+    """
+    expected = _RASTER_EXT_MIME.get(ext)
+    if expected is None:
+        return None
+    sniffed = sniff_raster_mime(data[:SNIFF_BYTES])
+    if sniffed is None:
+        return None
+    if sniffed == expected:
+        return ext
+    return _RASTER_MIME_EXT[sniffed]
+
+
+def _content_mismatch_message(ext: str, data: bytes) -> str:
+    """User-facing sentence for a content-signature refusal.
+
+    Names the remedy for the same reason the video branch does: telling the
+    user their file "does not match its type" says what is wrong without
+    saying what to do about it, and the fix (convert or re-export) is not
+    guessable from the sentence.
+    """
+    if ext in _RASTER_EXT_MIME:
+        accepted = ", ".join(sorted(_RASTER_EXT_MIME))
+        if data[4:8] == b"ftyp" and data[8:12] in _HEIF_BRANDS:
+            return (
+                f"This {ext} file is really a HEIC/AVIF photo — convert it to "
+                f"one of: {accepted} and upload again"
+            )
+        return f"This file is not really a {ext} image — re-export it as one of: {accepted}"
+    return f"File content does not match its type: {ext}"
+
+
 async def _stream_video_part(
     part: BodyPartReader,
     dest: Path,
@@ -1540,7 +1602,25 @@ async def api_upload_file(request: web.Request) -> web.Response:
             # Content-signature gate (CWE-434): verify magic bytes match the
             # claimed extension BEFORE writing, so an allowed extension can't
             # smuggle arbitrary/binary content (e.g. a .png that is really HTML).
-            if not _content_matches_ext(ext, bytes(data)):
+            # A raster whose bytes are a different ACCEPTED raster is relabelled
+            # rather than refused: the content passed the same allowlist, only
+            # the filename lied, and the stored suffix must tell the truth for
+            # everything downstream that infers the mime from the path.
+            if ext in _RASTER_EXT_MIME:
+                true_ext = _resolve_raster_ext(ext, bytes(data))
+                content_ok = true_ext is not None
+                if true_ext is not None and true_ext != ext:
+                    logger.info(
+                        "upload.file relabel: name=%s declared=%s stored=%s",
+                        safe_name,
+                        ext,
+                        true_ext,
+                    )
+                    ext = true_ext
+                    dest = dest.with_suffix(true_ext)
+            else:
+                content_ok = _content_matches_ext(ext, bytes(data))
+            if not content_ok:
                 await _cleanup()
                 _sel().log_api_access(
                     caller=caller,
@@ -1550,7 +1630,10 @@ async def api_upload_file(request: web.Request) -> web.Response:
                     resources=f"file:{fname} reason:content_signature_mismatch:{ext}",
                 )
                 return web.json_response(
-                    {"error": f"File content does not match its type: {ext}"},
+                    {
+                        "error": _content_mismatch_message(ext, bytes(data)),
+                        "code": "content_mismatch",
+                    },
                     status=400,
                 )
             try:
@@ -2194,10 +2277,38 @@ async def api_workspaces_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+#: Every control character: C0, DEL, and the C1 block.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
 def _validate_dashboard_path(raw: str) -> str | None:
-    """Validate a file path through hooks.py enforcement layer."""
+    """Validate a file path through hooks.py enforcement layer.
+
+    Refuses a control character in the RAW path first. ``FILE_READ_SCHEMA``
+    declares that class but cannot enforce it: ``validate_tool_args`` matches the
+    *sanitized* copy of the value, from which ``strip_hidden_unicode`` has already
+    removed every control character but CR, LF and TAB, while the raw string is
+    what travels on. So the class is unobservable at the schema and has to be
+    refused here.
+
+    It is refused HERE rather than inside ``validate_file_path`` because that is a
+    shared chokepoint whose other callers deliberately handle such a name -- a
+    diagnostic that enumerates an agent-writeable directory reports on a
+    control-character-named file and escapes the name for display, and refusing it
+    there would suppress that report. The class is a property of what this
+    boundary accepts from a caller, not of what a path can be.
+
+    What it buys at this boundary: the raw path is recorded in the request's audit
+    entry and echoed in diagnostics, so CR or LF forges a line and ESC or an 8-bit
+    C1 (U+009B CSI, U+0085 NEL) is a terminal escape. No file a dashboard caller
+    means to open is named with one, so the refusal costs nothing legitimate --
+    unlike the punctuation an allowlist omits, which is the defect this gate's
+    denylist exists to stop causing.
+    """
     from kiro_crew.hooks import validate_file_path  # noqa: F811
 
+    if _CONTROL_CHARS_RE.search(raw):
+        return None
     return validate_file_path(raw)
 
 
@@ -4233,7 +4344,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             )
             return body_err
         assert body is not None  # read_bounded_json returns (dict, None) on success
-        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "default_memory_mode", "widget_density", "use_builtin_browser", "verbosity", "quick_send", "session_grid", "tail_fork_enabled", "link_previews", "link_patterns", "mcp_app_panel", "auto_open_git_panel", "folder_suggestions_enabled", "session_card_source_links"}
+        _allowed = {"restore_sessions", "restore_window_minutes", "merge_queued_messages", "default_memory_mode", "widget_density", "use_builtin_browser", "verbosity", "quick_send", "session_grid", "tail_fork_enabled", "link_previews", "link_patterns", "mcp_app_panel", "auto_open_git_panel", "folder_suggestions_enabled", "session_card_source_links", "model_picker_hidden_models_add", "model_picker_hidden_models_remove"}
         # One-release backward-compat shim for removed key; delete after all clients update.
         deprecated_ignored_keys = {"tail_fork_head_handling"}
         # Read-only keys the GET exposes: both settings surfaces save with
@@ -4241,7 +4352,7 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
         # PUT body. Drop them here instead of listing them in _allowed -- they
         # stay unwritable, but a round-tripped read-only field must not 400 an
         # unrelated toggle save.
-        read_only_ignored_keys = {"gitlab_hosts", "jira_hosts", "social_share_enabled"}
+        read_only_ignored_keys = {"gitlab_hosts", "jira_hosts", "social_share_enabled", "model_picker_hidden_models", "model_picker_configured"}
         body = {
             k: v
             for k, v in body.items()
@@ -4254,6 +4365,59 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             )
             return web.json_response({"error": f"Unknown fields: {unknown}"}, status=400)
         updates: dict[str, object] = {}
+        hidden_model_add: list[str] | None = None
+        hidden_model_remove: list[str] | None = None
+
+        def _validated_hidden_model_list(field: str) -> tuple[list[str] | None, web.Response | None]:
+            val = body[field]
+            if not isinstance(val, list) or len(val) > 128:
+                _sel().log_tool_invocation(
+                    session_key="dashboard", tool_name="dashboard_config_write", outcome="failure"
+                )
+                return None, web.json_response(
+                    {
+                        "error": f"{field} must be an array of at most 128 model IDs",
+                        "code": "invalid_model_picker_hidden_models",
+                    },
+                    status=400,
+                )
+            hidden_models: list[str] = []
+            seen_models: set[str] = set()
+            for raw_model in val:
+                if not isinstance(raw_model, str):
+                    _sel().log_tool_invocation(
+                        session_key="dashboard",
+                        tool_name="dashboard_config_write",
+                        outcome="failure",
+                    )
+                    return None, web.json_response(
+                        {
+                            "error": f"{field} entries must be strings",
+                            "code": "invalid_model_picker_hidden_models",
+                        },
+                        status=400,
+                    )
+                model = raw_model.strip()
+                if not model or model == "auto":
+                    continue
+                if not MODEL_ID_RE.fullmatch(model):
+                    _sel().log_tool_invocation(
+                        session_key="dashboard",
+                        tool_name="dashboard_config_write",
+                        outcome="failure",
+                    )
+                    return None, web.json_response(
+                        {
+                            "error": f"{field} contains an invalid model ID",
+                            "code": "invalid_model_picker_hidden_models",
+                        },
+                        status=400,
+                    )
+                if model not in seen_models:
+                    seen_models.add(model)
+                    hidden_models.append(model)
+            return hidden_models, None
+
         if "restore_sessions" in body:
             val = body["restore_sessions"]
             if not isinstance(val, bool):
@@ -4506,6 +4670,20 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
                     status=400,
                 )
             updates["session_card_source_links"] = val
+        if "model_picker_hidden_models_add" in body:
+            hidden_model_add, error_response = _validated_hidden_model_list(
+                "model_picker_hidden_models_add"
+            )
+            if error_response is not None:
+                return error_response
+            updates["model_picker_configured"] = True
+        if "model_picker_hidden_models_remove" in body:
+            hidden_model_remove, error_response = _validated_hidden_model_list(
+                "model_picker_hidden_models_remove"
+            )
+            if error_response is not None:
+                return error_response
+            updates["model_picker_configured"] = True
         # Serialize the read-modify-write under BOTH config locks so no concurrent
         # writer -- in-process OR another process -- can clobber it:
         #  * update_config_locked holds the cross-process advisory file lock
@@ -4533,6 +4711,25 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             section = data.get("dashboard")
             if not isinstance(section, dict):
                 section = data["dashboard"] = {}
+            if hidden_model_add is not None or hidden_model_remove is not None:
+                current = section.get("model_picker_hidden_models")
+                current_models = current if isinstance(current, list) else []
+                remove = set(hidden_model_remove or [])
+                merged_models: list[str] = []
+                seen_models: set[str] = set()
+                for raw_model in current_models:
+                    if not isinstance(raw_model, str):
+                        continue
+                    model = raw_model.strip()
+                    if not model or model == "auto" or model in remove or model in seen_models:
+                        continue
+                    seen_models.add(model)
+                    merged_models.append(model)
+                for model in hidden_model_add or []:
+                    if model not in seen_models:
+                        seen_models.add(model)
+                        merged_models.append(model)
+                section["model_picker_hidden_models"] = merged_models
             for _field, _value in updates.items():
                 section[_field] = _value
             return data
@@ -4637,6 +4834,8 @@ async def api_dashboard_config(request: web.Request) -> web.Response:
             "tail_fork_enabled": cfg.dashboard.tail_fork_enabled,
             "link_previews": cfg.dashboard.link_previews,
             "folder_suggestions_enabled": cfg.dashboard.folder_suggestions_enabled,
+            "model_picker_hidden_models": list(cfg.dashboard.model_picker_hidden_models),
+            "model_picker_configured": cfg.dashboard.model_picker_configured,
             # Read-only here (absent from the PUT allowlist above): authorizing a
             # self-managed GitLab instance is a config-file decision, not a
             # dashboard toggle. The client uses it only to decide which pasted

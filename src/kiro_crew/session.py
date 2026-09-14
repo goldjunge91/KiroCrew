@@ -145,6 +145,7 @@ from kiro_crew.sel import sel
 from kiro_crew.session_allocation import (
     AllocationConstants,
     AllocationDeps,
+    InboundCallbackReservation,
     SessionAllocationService,
 )
 from kiro_crew.session_allocation import SessionBusyError as SessionBusyError  # noqa: F401
@@ -531,6 +532,18 @@ BACKGROUND_AGENT = "kirocrew-lite"
 # ``register_selectable_backend`` — strictly after this module is imported. A
 # module-level intersection would snapshot the baseline and permanently exclude
 # a backend the operator did register.
+#
+# The SET here, deliberately, and NOT ``acp_runtime_backends()``: the codex
+# preview switch does not reach the background path. Background handles are the
+# high-churn ones — title generation, suggestions, folders and nav each take their
+# own ephemeral sessionId, many per conversation — and codex's teardown verb is
+# ``session/cancel``, which ends the turn without evicting the session from the
+# adapter's own map. On a shared process that is unbounded growth in the adapter,
+# at a rate a user never controls, and nothing Crew can send reclaims it.
+# Foreground sessions leak the same way but at the rate a person opens chats, and
+# the runtime's age/RSS recycle eventually collects the process. So the preview is
+# scoped to the path whose exposure is bounded; making codex a member of this set
+# requires a real per-session eviction first.
 def _bg_runtime_backends() -> frozenset[str]:
     return ACP_BACKENDS_ACP_RUNTIME & selectable_backends()
 
@@ -917,10 +930,17 @@ class _Session:
     # must re-inject the cancelled turn (user prompt + partial assistant) as a
     # preamble on the next prompt. One-shot: consumers clear after use.
     prev_turn_cancelled: bool = False
-    # Set when a provider switch is detected (e.g. kiro→CC or CC→kiro).
-    # Consumed one-shot by the next prompt builder to inject history replay
-    # from KiroCrew's conversation_log. Ensures replay fires exactly once
-    # per switch, even if the session is reused across multiple prompts.
+    # Set when a provider switch, failed native resume, or Tool Search
+    # compatibility fallback creates a fresh provider that still needs Kiro Crew
+    # history. Non-destructive slash commands read without clearing; a confirmed
+    # native `/clear` consumes it so replay cannot undo the user's deletion. The
+    # first provider event records acceptance only in the dashboard runner's
+    # turn-local state; the shared lease remains armed until a clean,
+    # non-synthetic, non-empty end_turn atomically promotes the fresh SID and
+    # consumes it. Cancellation, raised streams, empty verdicts, and synthetic
+    # terminals leave it armed because kiro-cli discards or cannot prove those
+    # turns. This preserves replay across empty streams, pre-output failures, and
+    # soft Stops while surviving loss of the separate ``first_turn`` observation.
     provider_switch_replay: bool = False
     # Set of msg_ts values cancelled (message deleted while processing)
     cancelled: set[str] = field(default_factory=set)
@@ -1344,6 +1364,34 @@ class SessionManager:
     @_closing.setter
     def _closing(self, value: bool) -> None:
         self._registry_state().closing = value
+
+    @property
+    def admission_closed(self) -> bool:
+        """Return the shared shutdown/update admission gate without yielding.
+
+        Background launchers read this immediately before registering work. On
+        the event loop that check-and-register span is atomic with respect to
+        ``pause_turn_admission_for_update()``, which sets the same state under
+        the registry lock.
+        """
+        return self._closing
+
+    @property
+    def _update_pause_owned(self) -> bool:
+        return self._registry_state().update_pause_owned
+
+    @_update_pause_owned.setter
+    def _update_pause_owned(self, value: bool) -> None:
+        self._registry_state().update_pause_owned = value
+
+    @property
+    def update_restart_fenced(self) -> bool:
+        """Whether refused callbacks must persist inline before imminent re-exec."""
+        return self._registry_state().update_restart_fenced
+
+    @update_restart_fenced.setter
+    def update_restart_fenced(self, value: bool) -> None:
+        self._registry_state().update_restart_fenced = value
 
     @property
     def _start_sem(self) -> asyncio.Semaphore:
@@ -2206,6 +2254,63 @@ class SessionManager:
         """Consume a live session's reinjection marker."""
         return self._compaction.consume_needs_reinjection(key)
 
+    def provider_switch_replay_pending(self, key: str) -> bool:
+        """Return whether a live session still owes conversation replay.
+
+        The first real claimant can be a native non-destructive slash command,
+        which deliberately bypasses prompt construction. Reading without clearing
+        lets that command finish while preserving replay for the next prompt. A
+        confirmed ``/clear`` is the exception and consumes the marker at its
+        provider event.
+        """
+        session = self._sessions.get(self._fold_key(key))
+        return bool(session is not None and session.provider_switch_replay)
+
+    def mark_provider_switch_replay(self, key: str) -> bool:
+        """Re-arm replay after an accepted turn is discarded by cancellation."""
+        session = self._sessions.get(self._fold_key(key))
+        if session is None:
+            return False
+        session.provider_switch_replay = True
+        return True
+
+    def commit_provider_switch_replay_sid(self, key: str) -> bool:
+        """Settle replay, promoting the live ACP SID when one was deferred.
+
+        Allocation leaves the prior resumable SID in ``SessionMap`` only for an
+        ACP provider that explicitly defers promotion. Other providers publish
+        their own SID during allocation, so a landed replay consumes the lease
+        without another mapping write. This keeps cross-provider history replay
+        one-shot instead of re-arming forever on a non-ACP session.
+        """
+        folded = self._fold_key(key)
+        session = self._sessions.get(folded)
+        if session is None or not session.provider_switch_replay:
+            return False
+        if not _is_acp_provider(session.provider):
+            session.provider_switch_replay = False
+            return True
+        client = getattr(session.provider, "client", None)
+        sid = getattr(client, "_session_id", None)
+        if not isinstance(sid, str) or not sid:
+            return False
+        self._session_map.set(
+            folded,
+            sid,
+            provider=_provider_label(session.provider),
+            cwd=session.provider.cwd,
+        )
+        session.provider_switch_replay = False
+        return True
+
+    def consume_provider_switch_replay(self, key: str) -> bool:
+        """Explicitly retire replay after confirmed native history deletion."""
+        session = self._sessions.get(self._fold_key(key))
+        if session is None or not session.provider_switch_replay:
+            return False
+        session.provider_switch_replay = False
+        return True
+
     def consume_replay_suppression(self, key: str) -> bool:
         """Read *and clear* whether *key*'s next cold start must skip replay.
 
@@ -2376,9 +2481,44 @@ class SessionManager:
         """Record a failure and apply the circuit breaker."""
         return await self._allocation_boundary().record_failure(key)
 
+    def reserve_inbound_callback(self) -> InboundCallbackReservation | None:
+        """Claim one callback before any pre-turn command or card handling."""
+        return self._allocation_boundary().reserve_inbound_callback()
+
+    @property
+    def inbound_callback_count(self) -> int:
+        """Return callbacks admitted but not yet finished."""
+        return self._allocation_boundary().inbound_callback_count
+
     def begin_turn(self, key: str) -> None:
         """Apply the yield-free pre-dispatch closing gate."""
         self._allocation_boundary().begin_turn(key)
+
+    async def pause_turn_admission_for_update(self) -> bool:
+        """Block new turns for update apply without overriding real shutdown."""
+        async with self._lock:
+            if self._closing and not self._update_pause_owned:
+                return False
+            self._closing = True
+            self._update_pause_owned = True
+            self.update_restart_fenced = False
+            return True
+
+    def fence_update_restart(self) -> bool:
+        """Commit inline refusal persistence before the final restart drain."""
+        if not self._closing or not self._update_pause_owned:
+            return False
+        self.update_restart_fenced = True
+        return True
+
+    async def resume_turn_admission_after_update(self) -> None:
+        """Release this caller's temporary update pause, if it still owns it."""
+        async with self._lock:
+            if not self._update_pause_owned:
+                return
+            self.update_restart_fenced = False
+            self._update_pause_owned = False
+            self._closing = False
 
     # ── Per-session semaphore ──
 

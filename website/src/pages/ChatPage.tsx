@@ -1,5 +1,4 @@
-import { WorkspacePanelContext, WorkspaceFullscreenContext } from '../components/WorkspacePanelContext'
-import { useContext, Fragment, useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
+import { Fragment, useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -76,6 +75,7 @@ import { type FileChangeEntry } from '../components/FileChangeChips'
 import { ChatTranscriptSkeleton } from '../components/ChatTranscriptSkeleton'
 import SnipOverlay from '../components/SnipOverlay'
 import CollapsibleToolGroup from './chat/CollapsibleToolGroup'
+import { isSystemNoticeRow } from './chat/CompactionCard'
 import { RowDisclosureProvider } from './chat/rowDisclosure'
 import type { DisplayItem, TurnItem } from './chat/types'
 import { MeasureFarm } from '../hooks/virtualizer/MeasureFarm'
@@ -249,6 +249,7 @@ import WelcomeView from '../components/WelcomeView'
 import { openPanelView, claimAppAutoOpen } from '../hooks/usePanelTabs'
 import { useFilteredDropdown } from '../hooks/useFilteredDropdown'
 import { useAvailableModels } from '../hooks/useAvailableModels'
+import { filterInteractiveModels, useModelPickerConfigured, useModelPickerHiddenModelsQuery } from '../hooks/useInteractiveModels'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useAgents } from '../hooks/useAgents'
 import { useRemoteCapabilities } from '../hooks/useRemoteCapabilities'
@@ -280,7 +281,6 @@ import FollowUpCard from '../components/FollowUpCard'
 import FolderSuggestionCard from './chat/FolderSuggestionCard'
 import { useMoveSlotToFolder } from '../hooks/useMoveSlotToFolder'
 import PendingQuestionCard from '../components/PendingQuestionCard'
-import PendingDecisionCard from '../components/PendingDecisionCard'
 import SessionPulseSurveyCard from '../components/SessionPulseSurveyCard'
 import type { FollowupItem } from '../store/chatSlice'
 
@@ -339,13 +339,13 @@ import { useKnowledgeFetch, extractKnowledgeQuery, expandKnowledgeBlock } from '
 import { KnowledgePicker } from './chat/KnowledgePicker'
 import { EyeOff, Loader, Pen, MessageSquare, Sparkles, VenetianMask, Clock, Undo2, Columns2, ExternalLink, X } from 'lucide-react'
 import { EdgeFade, JumpToBottomButton } from '../app-sdk/ChatScrollChrome'
-import { PanelLeftSolid, PanelLeftLight } from '../components/icons/panels'
+import { PanelLeftSolid, PanelLeftLight, PanelRightSolid } from '../components/icons/panels'
 
 import InfoTip from '../components/InfoTip'
 import SlotTagPopover from '../components/SlotTagPopover'
 import { TagPopoverProvider } from '../hooks/useTagPopover'
 
-import { AnimatePresence, motion, useMotionValue, useTransform, useReducedMotion } from 'framer-motion'
+import { AnimatePresence, motion, useMotionValue, useTransform } from 'framer-motion'
 import DetailPanel from '../components/DetailPanel'
 
 import type { ChatMessage } from '../types'
@@ -915,8 +915,21 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       contextWindow: m.context_window || undefined,
     }))
   }, [remoteCrew.isRemote, remoteCrew.capabilities, localModels])
+  const hiddenModelsQ = useModelPickerHiddenModelsQuery()
+  const hiddenModelIds = hiddenModelsQ.data
+  const modelPickerConfigured = useModelPickerConfigured()
   const availableModels = effectiveModels
-  const { open: modelDropdown, setOpen: setModelDropdown, filter: modelFilter, setFilter: setModelFilter, dropdownRef: modelDropdownRef, inputRef: modelInputRef, filtered: filteredModels } = useFilteredDropdown(availableModels)
+  const modelPickerModels = useMemo(
+    () => {
+      const pickerSlot = slots.find(slot => slot.key === activeSlot)
+      return filterInteractiveModels(effectiveModels, hiddenModelIds, [
+        pickerSlot?.model || '',
+        pickerSlot?.served_model || '',
+      ])
+    },
+    [effectiveModels, hiddenModelIds, slots, activeSlot],
+  )
+  const { open: modelDropdown, setOpen: setModelDropdown, filter: modelFilter, setFilter: setModelFilter, dropdownRef: modelDropdownRef, inputRef: modelInputRef, filtered: filteredModels } = useFilteredDropdown(modelPickerModels)
   // Roving-focus keyboard nav for the agent + model dropdowns (shared with StyledSelect/AgentSelector).
   const { onListKeyDown: onAgentListKeyDown } = useListboxKeyboard({
     open: agentDropdown,
@@ -3759,7 +3772,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       // Agree with renderMessage's skip: a hidden invisible-only row draws
       // nothing, so anchoring Regenerate/variant-switching on it would make
       // those affordances unreachable for the rest of a quiet monitor run.
-      if (messages[i].role === 'assistant' && !isHiddenInvisibleAssistantRow(messages[i])) return i
+      // System-notice rows (compaction / session reload) are passed over too:
+      // they draw a system card, not a reply, so hosting Regenerate/variant
+      // switching on them would target the wrong row.
+      if (messages[i].role === 'assistant' && !isHiddenInvisibleAssistantRow(messages[i]) && !isSystemNoticeRow(messages[i])) return i
     }
     return -1
   }, [messages])
@@ -3800,10 +3816,23 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     // Mirror the server's scan exactly (chat_regenerate.py): the turn being
     // regenerated ends at the last assistant row BY ROLE — hidden
     // invisible-only rows included — so this optimistic truncation cannot
-    // diverge from the history rewrite the server persists. The skip-aware
-    // lastTextIdx only decides which drawn row HOSTS the affordance; using it
-    // here would truncate after an earlier user row than the server does.
-    const aiIdx = messages.map(mm => mm.role).lastIndexOf('assistant')
+    // diverge from the history rewrite the server persists. System-notice
+    // rows (compaction / session reload) ARE skipped, on both sides: they are
+    // status rows, not the reply, and capturing one as the variant would drop
+    // the real reply from variant history. The skip-aware lastTextIdx only
+    // decides which drawn row HOSTS the affordance; its extra invisible-row
+    // skip would truncate after an earlier user row than the server does.
+    let aiIdx = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      // Never cross a real user turn (mirror the server): a reply found past
+      // a newer user row (e.g. a /compact row awaiting only its notice) would
+      // be regenerated by deleting that newer turn, irreversibly.
+      if (messages[i].role === 'user') break
+      if (messages[i].role !== 'assistant') continue
+      if (isSystemNoticeRow(messages[i])) continue
+      aiIdx = i
+      break
+    }
     if (aiIdx < 0) return
     const uIdx = messages.slice(0, aiIdx).map(mm => mm.role).lastIndexOf('user')
     if (uIdx < 0) return
@@ -4081,21 +4110,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // Stored width is validated against SIDEBAR_MIN..SIDEBAR_MAX only, never the
   // window; clamp for render but leave the preference for the wide viewport.
   const effectiveSidebarWidth = clampSidebarWidth({ stored: sidebarWidth, winW, railW: railWidth })
-  const workspaceFullscreen = useContext(WorkspaceFullscreenContext)?.fullscreen ?? false
-  const reduceWorkspaceMotion = useReducedMotion()
-  const reportWorkspaceSearch = useContext(WorkspacePanelContext)
-  useEffect(() => {
-    reportWorkspaceSearch(search.isOpen)
-    return () => reportWorkspaceSearch(false)
-  }, [search.isOpen, reportWorkspaceSearch])
-  const { isOpen: workspaceSearchIsOpen, close: closeWorkspaceSearch } = search
   const toggleAct = useCallback(() => {
-    if (workspaceSearchIsOpen) { closeWorkspaceSearch(); dispatch(openActivityPanel()); return }
-
     // Opening with no tabs shows the empty-state launcher grid (no seeded
     // default view) -- the user picks what to open.
     dispatch(toggleActivity())
-  }, [dispatch, workspaceSearchIsOpen, closeWorkspaceSearch])
+  }, [dispatch])
   // Header-launched toggle: the top-bar Activity button (App.tsx) dispatches
   // this event so the panel-close coordination above stays in ChatPage.
   useEffect(() => {
@@ -5377,6 +5396,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   // A hidden invisible-only row draws nothing, so it cannot
                   // host the footer; pass over it to the row that renders.
                   if (isHiddenInvisibleAssistantRow(later)) continue
+                  // A system-notice row (compaction / session reload) draws a
+                  // system card, not a reply, so it cannot end the turn either.
+                  if (isSystemNoticeRow(later)) continue
                   if (later.role === 'assistant' || later.role === 'streaming') return false // not last assistant in turn
                 }
                 // End of messages. A run still in progress has not produced this
@@ -6173,6 +6195,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
     isMobile,
   })
 
+  // The mobile sessions toggle, rendered inline by whichever header owns the
+  // surface's top-left: the single-chat title row, or in split view the grid's
+  // top-left pane (SessionGridView `leading`). Mirrors the desktop toggle
+  // exactly, state included: solid while the panel is hidden, light while it
+  // is showing.
+  const mobileSessionsToggle = (
+    <button className="p-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none pointer-events-auto shrink-0" onClick={() => mobileSessions ? closeSidebar() : openSidebar()} aria-label={i18nT('pages.chatPage.toggle_sessions')}>
+      {mobileSessions ? <PanelLeftLight size={16} /> : <PanelLeftSolid size={16} />}
+    </button>
+  )
+
   return (
     <RowDisclosureProvider resetKey={activeSlot}>
     <TagPopoverProvider>
@@ -6252,6 +6285,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           aria-expanded={flyoutEligible ? flyout.open : undefined}
           // Geometry mirrored by TOGGLE_RECT (chat/SessionFlyout) — every
           // surface in this interaction grows out of and back into this rect.
+          // In split view the grid's top-left pane reserves this column
+          // (SessionGridView `leading`); its title row is the same height as
+          // the single-chat row, so the toggle keeps this rect there too.
           className="pi-morph absolute top-[9px] left-2 z-[61] w-7 h-7 rounded-md flex items-center justify-center cursor-pointer text-muted hover:text-text hover:bg-bg-hover transition-colors bg-transparent border-none"
           title={sidebarOpen ? i18nT('pages.chatPage.hide_sessions') : i18nT('pages.chatPage.show_sessions')}
           aria-label={sidebarOpen ? i18nT('pages.chatPage.hide_sessions_sidebar') : i18nT('pages.chatPage.show_sessions_sidebar')}
@@ -6529,6 +6565,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           <SessionGridView
             seedSlot={splitAnchor ?? activeSlot}
             openSideChat={connected ? openSideChatForPane : undefined}
+            // The single-chat title row is not rendered in split view, so the
+            // grid's top-left pane stands in for it: on desktop it clears the
+            // shell's stationary toggle while the sidebar is collapsed (the
+            // same columns the title row's 'pl-[60px]' rule reserves, measured
+            // from the pane's own edge); on mobile it carries the sessions
+            // toggle inline.
+            leading={
+              isMobile
+                ? (embedMode !== 'chat' ? { control: mobileSessionsToggle } : undefined)
+                : (embedMode !== 'chat' && embedMode !== 'sessions' && filteredSlots.length > 0 && !sidebarOpen ? { inset: true } : undefined)
+            }
             onClose={() => setSplitMode(false)}
             onCollapse={(slot, anchorTs, anchorMid) => {
               // User gesture on a session reference (split-pane collapse): the
@@ -6582,7 +6629,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   values on the same 320ms curve as the panel — an instant
                   class flip here reads as the title jumping sideways at the
                   start of the slide. */}
-              <div className={`panel-toolbar relative pr-0.5 flex items-center gap-2 bg-bg pointer-events-none transition-[padding-left] duration-[240ms] [transition-timing-function:cubic-bezier(.32,.72,0,1)] ${!isMobile && embedMode !== 'chat' && filteredSlots.length > 0 && !sidebarOpen ? 'pl-[60px]' : isMobile ? (embedMode === 'chat' ? 'pl-4' : 'pl-3') : 'pl-5'}`}>
+              <div className={`relative pr-1.5 pt-[9px] pb-2 flex items-center gap-2 bg-bg pointer-events-none transition-[padding-left] duration-[240ms] [transition-timing-function:cubic-bezier(.32,.72,0,1)] ${!isMobile && embedMode !== 'chat' && filteredSlots.length > 0 && !sidebarOpen ? 'pl-[60px]' : isMobile ? (embedMode === 'chat' ? 'pl-4' : 'pl-3') : 'pl-5'}`}>
                 {/* Divider between toggle and title — ALWAYS mounted and
                     absolute (zero width, no flex-gap participation) so it can
                     never change the row's layout; it rides the row (title
@@ -6591,13 +6638,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 {!isMobile && embedMode !== 'chat' && filteredSlots.length > 0 && (
                   <span aria-hidden="true" className={`absolute left-[52px] top-[13px] w-px h-5 bg-border transition-opacity ${sidebarOpen ? 'opacity-0 duration-100' : 'opacity-100 duration-150 delay-[90ms]'}`} />
                 )}
-                {embedMode !== 'chat' && isMobile && (
-                  <button className="p-1 rounded-md text-muted hover:text-text cursor-pointer bg-transparent border-none pointer-events-auto" onClick={() => mobileSessions ? closeSidebar() : openSidebar()} aria-label={i18nT('pages.chatPage.toggle_sessions')}>
-                    {/* Mirrors the desktop toggle exactly, state included: solid
-                        while the panel is hidden, light while it is showing. */}
-                    {mobileSessions ? <PanelLeftLight size={16} /> : <PanelLeftSolid size={16} />}
-                  </button>
-                )}
+                {embedMode !== 'chat' && isMobile && mobileSessionsToggle}
                 <div className="group/header flex min-w-0 items-stretch gap-0.5 pointer-events-auto">
                 <div className="flex items-center rounded-l-md rounded-r-[2px] px-1.5 py-0.5 group-hover/header:bg-bg-hover transition-colors">
                 <ChatHeaderMenu
@@ -6663,10 +6704,11 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               {/* focus-caption-reserve: this group owns the window's top-trailing
                   corner — where Windows and frameless Linux paint their caption
                   controls — whenever the side panel is not holding that edge, i.e.
-                  while it is closed or docked at the bottom. Right-docked and showing, the
+                  while it is closed (the state that renders the reopen toggle
+                  below) or docked at the bottom. Right-docked and showing, the
                   panel is at that edge instead and carries the reserve itself, so
                   reserving here too would indent these controls for nothing. */}
-              <div data-panel-controls-host="chat" className={`panel-toolbar-actions ml-auto flex shrink-0 items-center gap-1.5 pointer-events-none${!sidePanelWantsMount || sidePanelDock === 'bottom' ? ' focus-caption-reserve' : ''}`}>
+              <div className={`ml-auto flex shrink-0 items-center gap-1.5 pointer-events-none${!sidePanelWantsMount || sidePanelDock === 'bottom' ? ' focus-caption-reserve' : ''}`}>
               {/* Pop-out control, promoted to the title bar (menu items remain for
                   sidebar parity). Mirrors the split-view pattern to its left: a
                   dimmed icon to act, an accent chip when the state is active.
@@ -6684,6 +6726,23 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   <ExternalLink size={15} />
                 </Clickable>
               ))}
+              {/* Activity panel open toggle — relocated here from the top bar
+                  (item 2.4) so opening the panel no longer narrows the now
+                  full-width header. Shown only while the panel is closed; the
+                  panel's own header carries the close button. Never disabled:
+                  below the mobile breakpoint the panel opens full width, at or
+                  above it opens beside the chat. There is no width at which
+                  the button does nothing. */}
+              {!embedMode && !popout && !activityOpen && (
+                <Clickable
+                  className="pi-morph flex items-center justify-center w-7 h-7 rounded-md transition-colors bg-transparent border-none shrink-0 pointer-events-auto text-muted hover:text-text hover:bg-bg-hover cursor-pointer"
+                  onClick={toggleAct}
+                  title={i18nT('pages.chatPage.open_activity_panel')}
+                  aria-label={i18nT('pages.chatPage.open_activity_panel')}
+                >
+                  <PanelRightSolid size={15} />
+                </Clickable>
+              )}
               {!embedMode && splitFeatureEnabled && (splitAnchorForActive && !activeIsSplitAnchor ? (
                 <Clickable className="flex items-center gap-1 text-accent bg-accent/10 hover:bg-accent/20 transition-colors cursor-pointer pointer-events-auto text-[11px] font-medium px-1.5 py-0.5 rounded" onClick={() => enterSplit(splitAnchorForActive)} title={i18nT('pages.chatPage.this_session_is_open_in_a_split_return_to_it')} aria-label={i18nT('pages.chatPage.return_to_split_view')}>
                 <Columns2 size={13} /> {i18nT('pages.chatPage.in_split')}
@@ -7125,34 +7184,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   />
                 </div>
               )}
-              {/* Buried [OPTIONS:] decision — pinned until answered or
-                  dismissed. A pending question card owns the above-composer
-                  band outright (same precedence the sidebar uses: needs_input
-                  outranks pending_decision). needs_input travels in the SAME
-                  slot payload as pending_decision, so it cannot lose a
-                  hydration race; !pendingQuestion alone can — the questions
-                  map fills over an async fetch, and a decision answered in
-                  that window would append a user row that retires the
-                  still-unhydrated stateless question unanswered. */}
-              {!pendingQuestion && !currentSlot?.needs_input && currentSlot?.pending_decision && activeSlot && (
-                <div className="px-4 pb-2 mx-auto w-full" style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
-                  <PendingDecisionCard
-                    slotKey={activeSlot}
-                    decision={currentSlot.pending_decision}
-                    onPick={(o) => setInput((prev) => (prev.trim() ? `${prev.trimEnd()}, ${o}` : o))}
-                    onSendDirect={(o) => {
-                      // Offline, a direct send would silently drop the answer —
-                      // fall back to the composer, the same recovery the
-                      // question card's direct send uses.
-                      if (!connected) {
-                        setInput((prev) => (prev.trim() ? `${prev.trimEnd()}, ${o}` : o))
-                        return
-                      }
-                      void send(o, activeSlot || undefined)
-                    }}
-                  />
-                </div>
-              )}
               {pendingFollowup && activeSlot && (
                 <div className="px-4 pb-2 mx-auto w-full" style={{ maxWidth: 'var(--mc-content-width, 900px)' }}>
                   <FollowUpCard
@@ -7522,11 +7553,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 filter={modelFilter}
                 setFilter={setModelFilter}
                 onClose={() => setModelDropdown(false)}
+                modelVisibilityError={hiddenModelsQ.isError}
+                onRetryModelVisibility={() => hiddenModelsQ.refetch()}
                 hasEffort={!!(activeSlot && provider.capabilities.reasoningEffort && modelSupportsEffort(shownModel === 'auto' ? '' : shownModel))}
                 slot={activeSlot}
                 currentEffort={currentSlot?.reasoning_effort || ''}
                 defaultEffort={defaultEffort}
                 effortLevelsOverride={remoteCrew.isRemote ? (remoteCrew.capabilities?.effort_levels ?? []) : undefined}
+                onManageModels={modelPickerConfigured ? undefined : () => {
+                  setModelDropdown(false)
+                  navigate(settingsPath({ tab: 'chat', highlight: 'key:dashboard.model_picker_hidden_models' }))
+                }}
                 onSetDefault={() => {
                   setModelDropdown(false)
                   navigate(settingsPath({ tab: 'chat', highlight: SETTINGS_DEFAULT_MODEL_ID }))
@@ -7611,7 +7648,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       {search.isOpen && (
           <DetailPanel
             key="search-panel"
-            headerClassName="border-border bg-bg workspace-search-header"
             title={<SearchBar docked term={search.term} setTerm={search.setTerm} matches={search.matches} currentIdx={search.currentIdx} next={search.next} prev={search.prev} close={search.close} caseSensitive={search.caseSensitive} toggleCaseSensitive={search.toggleCaseSensitive} focusNonce={search.focusNonce} goTo={search.goTo} scopeLimited={searchScopeIsLimited({ slotHasMore, cursorIsForActiveSlot })} />}
             onClose={search.close}
             initialWidth={400}
@@ -7654,9 +7690,6 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           : shouldMountSidePanel({ activityOpen, hasLiveAppTab, hasBrowserTab, searchOpen: search.isOpen }) && !activitySlot) && (
           <motion.div
             key="side-panel-inline"
-            layout={reduceWorkspaceMotion ? false : "position"}
-            layoutDependency={workspaceFullscreen}
-            data-workspace-panel-host
             ref={isMobile ? sideOverlayPanelRef : undefined}
             initial={isMobile ? false : { width: 0 }}
             animate={isMobile ? undefined : { width: 'auto' }}
@@ -7712,9 +7745,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
           {shouldMountSidePanel({ activityOpen, hasLiveAppTab, hasBrowserTab, searchOpen: search.isOpen }) && (
             <motion.div
               key="side-panel"
-              data-workspace-panel-host
               initial={sidePanelDockAnim.initial}
-              animate={workspaceFullscreen ? { ...sidePanelDockAnim.animate, width: '100%', height: '100%' } : sidePanelDockAnim.animate}
+              animate={sidePanelDockAnim.animate}
               exit={sidePanelDockAnim.exit}
               transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
               className={sidePanelDock === 'bottom' ? 'w-full overflow-visible flex flex-col justify-end' : 'h-full overflow-visible flex justify-end'}

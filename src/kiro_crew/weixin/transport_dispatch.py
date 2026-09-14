@@ -45,6 +45,7 @@ from kiro_crew.messaging.dispatch import (
     ChannelTurn,
     build_directive_consumer,
     drive_turn,
+    hold_inbound_callback,
     inbound_permitted,
 )
 from kiro_crew.messaging.driver import APPROVAL_INTERACTIVE
@@ -171,13 +172,32 @@ class WeixinDispatcher:
     # ── Turn dispatch (transport's dispatch callback) ──────────────────────
 
     async def handle_message(self, inbound: InboundMessage) -> None:
-        """Drive one authorized inbound Weixin message through TurnDriver."""
+        """Reserve and drive one authorized inbound Weixin callback."""
         assert self.client is not None, "WeixinDispatcher.client must be set"
-        # Inbound channels-governance gate (off-loop) — recheck per message so a
-        # host-profile deny added after connect stops dispatch without a restart
-        # (the startup gate only blocks CONNECTING). Silently drop on deny.
-        if not await inbound_permitted("weixin"):
-            return
+        inbound_route = InboundRoute(
+            conversation_id=inbound.conversation_id,
+            text=inbound.text,
+            user_id=inbound.user_id,
+            attachments_dropped=len(inbound.attachments or ()),
+        )
+        # Weixin dispatches inline on its long-lived poll task. A task-done lease
+        # would therefore stay held until disconnect and defer every later update;
+        # this scope releases exactly when this one callback returns.
+        async with hold_inbound_callback(
+            self.sessions,
+            channel_type="weixin",
+            route=inbound_route,
+        ) as admitted:
+            if not admitted:
+                return
+            # Recheck governance only after this accepted callback is visible;
+            # the off-loop policy read must not precede reservation.
+            if not await inbound_permitted("weixin"):
+                return
+            await self._handle_admitted(inbound)
+
+    async def _handle_admitted(self, inbound: InboundMessage) -> None:
+        """Drive one callback after update admission has been reserved."""
         user_id = inbound.user_id
         text = inbound.text
         logger.info("weixin inbound from %s: %d chars", user_id, len(text or ""))

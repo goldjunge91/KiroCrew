@@ -5182,17 +5182,6 @@
     "viewPr": "Pull Request"
   },
   "components": {
-    "pendingDecisionCard": {
-      "add_to_message_box": "In das Nachrichtenfeld übernehmen",
-      "add_to_message_box_hint": "Übernimmt die gewählten Optionen in das Nachrichtenfeld, ohne zu senden.",
-      "asked_ago": "gefragt {{time}}",
-      "dismiss": "Verwerfen",
-      "dismiss_failed": "Diese Entscheidung konnte nicht verworfen werden. Versuche es erneut.",
-      "dismiss_hint": "Ohne Antwort ausblenden. Die Entscheidung bleibt im Chat und die Schleife läuft weiter.",
-      "submit": "Absenden",
-      "submit_n_answers": "{{count}} Antworten absenden",
-      "waiting_on_you": "Wartet auf dich"
-    },
     "voicePlaybackNotice": {
       "failed": "„{{speak}}“ ist fehlgeschlagen. Prüfe die Text-zu-Sprache-Einstellungen und versuche es erneut.",
       "blocked": "Dein Browser hat die automatische Wiedergabe blockiert. Öffne unter der abgeschlossenen Antwort „{{moreActions}}“ und wähle „{{speak}}“ aus.",
@@ -6754,6 +6743,10 @@
       "click_to_browse_shift_click_to_copy_path": "Klicken zum Durchsuchen / Shift+Klick zum Kopieren des Pfads",
       "click_to_open_shift_click_to_copy_path": "Klicken zum Öffnen / Shift+Klick zum Kopieren des Pfads",
       "copy_diagram_source": "Diagrammquelltext kopieren",
+      "copy_table_csv": "Tabelle als CSV kopieren",
+      "copy_table_markdown": "Tabelle als Markdown kopieren",
+      "format_csv": "CSV kopieren",
+      "format_markdown": "Markdown kopieren",
       "diagram_source": "Diagrammquelltext",
       "copy_failed": "Kopieren fehlgeschlagen",
       "mermaid_render_failed": "Dieses Diagramm konnte nicht gerendert werden. Stattdessen wird der Quelltext angezeigt.",
@@ -6861,12 +6854,12 @@
       "no_matches": "Keine Treffer"
     },
     "modelEffortDropdown": {
+      "manage_in_settings": "In Einstellungen verwalten",
+      "manage_visible_models": "Sichtbare Modelle verwalten",
       "default_for_agent": "Standardmodell für <agent/>",
       "filter_models": "Modelle filtern",
       "model_list": "Modellliste",
-      "models": "Modelle",
       "pin_model_unavailable": "<model/> wird derzeit nicht angeboten",
-      "reasoning": "Reasoning",
       "set_default_for_agent": "<model/> als Standardmodell für <agent/> festlegen",
       "set_default_for_new_sessions": "Globaler Standard für neue Sitzungen…",
       "type_to_filter": "Zum Filtern tippen…"
@@ -6993,6 +6986,12 @@
       "eyebrow": "Datenschutz",
       "subtitle": "Die fünf anonymen Felder, die {{productName}} sendet, und wie du sie abschaltest.",
       "title": "Datenschutz"
+    },
+    "pierreEditorImpl": {
+      "highlighting_restarting_editing_available": "Die Hervorhebung wird neu gestartet. Bearbeiten bleibt möglich.",
+      "highlighting_starting_editing_available": "Die Syntaxhervorhebung wird gestartet. Bearbeiten bleibt möglich.",
+      "highlighting_unavailable_content_readable_reload": "Die Syntaxhervorhebung ist bis zum Neuladen nicht verfügbar. Der Inhalt bleibt lesbar.",
+      "highlighting_unavailable_reload": "Die Syntaxhervorhebung ist nicht verfügbar. Speichern oder kopieren Sie Ihren Entwurf und laden Sie dann neu, um sie wiederherzustellen; Bearbeiten bleibt möglich."
     },
     "projectPicker": {
       "back": "Zurück",
@@ -7171,6 +7170,7 @@
       "effort": "Aufwand",
       "effort_help": "Der Denkaufwand legt fest, wie lange das Modell vor der Antwort nachdenkt. Höher bedeutet mehr Zeit zum Durchdenken schwieriger Probleme (langsamer, bessere Antworten); niedriger ist schneller. Wird die Übersteuerung pro Sitzung deaktiviert, fällt der Denkaufwand auf den Standard unter Einstellungen → Chat zurück oder, wenn kein Standard gesetzt ist, auf die Wahl des Modells selbst (nur Fable/Opus/Sonnet).",
       "faster": "Schneller",
+      "configured_default_marker": "Konfigurierter Standard",
       "reasoning_effort": "Denkaufwand",
       "smarter": "Intelligenter",
       "use_configured_default": "Konfigurierten Standard verwenden",
@@ -7301,6 +7301,10 @@
       "selected": "ausgewählt",
       "showing": "Angezeigt",
       "you": "Du"
+    },
+    "multiSelect": {
+      "deselect_all": "Auswahl aufheben",
+      "select_all": "Alle auswählen"
     },
     "searchableSelect": {
       "no_matches": "Keine Treffer",
@@ -10140,7 +10144,6 @@
       "new_chat": "Neuer Chat",
       "new_chat_in_folder": "Neuer Chat im Ordner",
       "new_chat_on_crew": "Neuer Chat auf einer Crew",
-      "pending_your_response": "Wartet auf deine Antwort",
       "runs_on_crew": "Läuft auf {{name}} — einer verbundenen Crew, nicht auf diesem Rechner",
       "new_chat_in_name": "Neuer Chat in {{name}}",
       "new_chat_session": "Neue Chat-Sitzung",
@@ -10254,7 +10257,20 @@
       "board_update_failed": "Board-Aktualisierung fehlgeschlagen",
       "open_crew_members": "Crew-Mitglieder",
       "open_crew_members_desc": "Öffnet die Seite Crew-Mitglieder – jedes Mitglied ist ein dauerhafter Agent mit eigenem Thread.",
-      "open_crew_members_gated_desc": "Öffnet zuerst die Einstellungen, um diese Vorschau einzuschalten – vorher ist die Seite nicht verfügbar."
+      "open_crew_members_gated_desc": "Öffnet zuerst die Einstellungen, um diese Vorschau einzuschalten – vorher ist die Seite nicht verfügbar.",
+      "remote_sessions_not_shown_in_board_view_one": "{{count}} Remote-Sitzung wird in der Board-Ansicht nicht angezeigt — Board-Spalten verwalten nur lokale Sitzungen.",
+      "remote_sessions_not_shown_in_board_view_other": "{{count}} Remote-Sitzungen werden in der Board-Ansicht nicht angezeigt — Board-Spalten verwalten nur lokale Sitzungen.",
+      "sessions_from_instance_unavailable": "Sitzungen von {{names}} sind derzeit nicht verfügbar.",
+      "checking_remote_instances": "Remote-Instanzen werden geprüft…",
+      "adopt_failed": "Diese Sitzung konnte hier nicht geöffnet werden.",
+      "adopt_remote_bind_failed": "{{name}} war nicht erreichbar, um diese Sitzung zu öffnen.",
+      "adopt_target_unknown": "Diese Sitzung ist auf {{name}} nicht mehr geöffnet.",
+      "not_open_here_yet": "Auf {{name}} — klicken, um sie hier zu öffnen",
+      "on_instance": "Auf {{name}}",
+      "opening_session_locally": "Diese Sitzung wird hier geöffnet…",
+      "opens_here_runs_on_instance": "Öffnet diese Sitzung hier — ihre Ausführung läuft weiter auf {{name}}",
+      "opens_on_crew_switches_there": "Öffnet auf {{name}} — wechselt zu dieser Crew, nicht hier",
+      "remote_instances_list_unavailable": "Remote-Instanzen konnten nicht aufgelistet werden, daher werden ihre Sitzungen nicht angezeigt."
     },
     "connectionsPage": {
       "action_failed": "Aktion fehlgeschlagen: {{error}}",
@@ -10636,6 +10652,8 @@
         "inbound_webhook_tokens_registered_contexts_and_r": "Tokens für eingehende Webhooks, registrierte Kontexte und Ausführungsverlauf. Die API funktioniert, die Seite ist noch nicht fertig.",
         "open_webhooks": "Webhooks öffnen",
         "webhooks": "Webhooks",
+        "remote_instance_sessions": "Sitzungen der Remote-Instanz",
+        "merge_a_connected_remote_instances_live_sessions": "Fügt die aktiven Sitzungen einer verbundenen Remote-Instanz in die Sitzungsliste ein, jeweils mit einem Server-Abzeichen. Funktionsfähig, aber noch nicht fertig.",
         "intro": {
           "webhooks_summary": "Ein anderes System – CI, ein Review-Bot, eine Deploy-Pipeline – kann deinen Agenten für dich starten, indem es eine Nachricht mit einem Zugriffstoken sendet, das du auf der Webhooks-Seite erstellst.",
           "webhooks_where": "Sobald das an ist, erscheint auf dieser Karte in den Einstellungen der Link „Webhooks öffnen“; dort öffnest du die neue Webhooks-Seite. In der Seitenleiste erscheint sie erst, wenn sie fertig ist. Ausschalten blendet die Seite nur wieder aus; erstellte Token bleiben erhalten.",
@@ -12889,6 +12907,13 @@
         "default_auto": "Standard (auto)",
         "default_defers_to_your_agent_config_and_then_to": "Agenten mit einem eigenen konfigurierten Modell ignorieren diese Einstellung. „Standard“ verwendet das Modell aus der Agentenkonfiguration oder den Systemstandard, wenn keines konfiguriert ist. Änderungen wirken sich nicht auf bereits geöffnete Sitzungen aus.",
         "default_model": "Standardmodell",
+        "auto_always_visible": "In der Chat-Modellauswahl immer sichtbar",
+        "failed_to_save_selectable_models": "Auswählbare Modelle konnten nicht gespeichert werden",
+        "model_picker_all_models": "Alle Modelle ({{count}})",
+        "model_picker_selected_models": "{{selected}} / {{total}} ausgewählt",
+        "search_models": "Modelle suchen…",
+        "selectable_models": "Auswählbare Modelle",
+        "selectable_models_description": "Wähle, welche angebotenen Modelle in der Chat-Modellauswahl erscheinen. Auto und das aktive Sitzungsmodell bleiben immer sichtbar.",
         "default_normal_length": "Standard – normale Länge",
         "default_reasoning_effort": "Standard-Denkaufwand",
         "default_to_autopilot_mode": "Standardmäßig Autopilot-Modus",

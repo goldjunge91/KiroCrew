@@ -40,3 +40,7 @@
 src/kiro_crew/_vendor/**/*.py text eol=lf
 src/kiro_crew/_vendor/**/*.md text eol=lf
 src/kiro_crew/_vendor/**/*.typed text eol=lf
+
+# The generated config snapshot is compared byte-for-byte with UTF-8/LF output.
+# Keep checkout conversion from changing it under core.autocrlf=true.
+/config-baseline.json text eol=lf

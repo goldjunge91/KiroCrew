@@ -46,6 +46,7 @@ class _SessionEntry(Protocol):
     provider: Any
     semaphore: asyncio.BoundedSemaphore
     first_turn: object
+    provider_switch_replay: bool
     retire_on_identity_change: bool
     prev_turn_cancelled: bool
 
@@ -81,6 +82,7 @@ class SessionLifecycleOwner(Protocol):
     _sessions: MutableMapping[str, _SessionEntry]
     _lock: asyncio.Lock
     _closing: bool
+    _update_pause_owned: bool
     _start_sem: asyncio.Semaphore
     _starting_pids: set[int]
 
@@ -987,6 +989,7 @@ class SessionLifecycleService:
         # landing in the multi-second window after that snapshot.
         async with owner._lock:
             owner._closing = True
+            owner._update_pause_owned = False
 
         try:
             await owner.drain_active_turns(timeout=drain_timeout)
@@ -1049,8 +1052,13 @@ class SessionLifecycleService:
                 cwd_str = sess.provider.cwd
                 if isinstance(sess.provider, acp_provider_type):
                     sid = sess.provider.client._session_id
+                    # A replay-pending fresh child is not yet the durable
+                    # conversation. Allocation retained the prior full-history
+                    # SID; shutdown must not overwrite it before the replay
+                    # settlement in chat_runner commits the fresh transcript.
                     if (
                         sid
+                        and not sess.provider_switch_replay
                         and key != constants.background_key
                         and (
                             not any(

@@ -110,6 +110,44 @@ class TestInboundReplayResolvesItsSpoolWhenScheduled:
             "thread would read (and lock) whatever data home the environment names then"
         )
 
+    @pytest.mark.asyncio
+    async def test_replay_uses_live_slack_client_without_global_registration(
+        self, monkeypatch, tmp_path
+    ):
+        from kiro_crew.messaging import inbound_spool
+        from kiro_crew.slack.transport import SlackTransport
+
+        seen: list[dict[str, object]] = []
+
+        async def _record(*, transports, path=None, now=None):
+            seen.append(dict(transports))
+            return inbound_spool.ReplayReport()
+
+        monkeypatch.setattr(inbound_spool, "replay_spooled", _record)
+        orch = _make_orchestrator(slack_enabled=True, owner_id="U_OWNER")
+        live_client = MagicMock()
+        orch.slack = live_client
+        teams = object()
+        orch.dashboard_state = SimpleNamespace(channel_transports={"teams": teams})
+
+        await orch._replay_spooled_inbound(spool=tmp_path / "refused.jsonl")
+
+        assert len(seen) == 1
+        assert seen[0]["teams"] is teams
+        slack = seen[0]["slack"]
+        assert isinstance(slack, SlackTransport)
+        assert slack.client is live_client
+        assert slack.may_send_to("C1", "1700.0", principal="U_OWNER") is True
+        assert slack.may_send_to("C1", "1700.0", principal="U_REVOKED") is False
+        live_client.ensure_channel_team = AsyncMock()
+        live_client.post_message = AsyncMock(return_value="1701.0")
+        assert await slack.send_message("C1", "notice", "1700.0") == "1701.0"
+        live_client.ensure_channel_team.assert_awaited_once_with("C1")
+        live_client.post_message.assert_awaited_once_with("C1", "notice", "1700.0")
+        assert orch.dashboard_state.channel_transports == {"teams": teams}, (
+            "Slack replay must not widen the ordinary shared send registry"
+        )
+
 
 # ─── Helper utilities ────────────────────────────────────────────────────
 
@@ -7892,25 +7930,25 @@ class TestCountInFlightWork:
         orch = _make_orchestrator()
         state = MagicMock()
         state.sessions.active_providers.return_value = [
-            _provider(True), _provider(False), _provider(True)
+            _provider(True),
+            _provider(False),
+            _provider(True),
         ]
         orch.dashboard_state = state
         orch._session_tasks = {}
         assert orch._count_in_flight_work() == 2
 
-    def test_skips_missing_accessor_and_swallows_predicate_errors(self):
+    def test_missing_accessor_and_predicate_errors_fail_closed(self):
         orch = _make_orchestrator()
         no_attr = MagicMock(spec=[])  # no has_active_turn attribute
         raising = MagicMock()
         raising.has_active_turn = MagicMock(side_effect=RuntimeError("boom"))
         state = MagicMock()
-        state.sessions.active_providers.return_value = [
-            no_attr, raising, _provider(True)
-        ]
+        state.sessions.active_providers.return_value = [no_attr, raising, _provider(True)]
         orch.dashboard_state = state
         orch._session_tasks = {}
-        # no_attr skipped, raising treated as idle, only the active one counts.
-        assert orch._count_in_flight_work() == 1
+        # Unknown provider state is unsafe for an automatic restart.
+        assert orch._count_in_flight_work() == 3
 
     def test_counts_undone_session_tasks(self):
         orch = _make_orchestrator()
@@ -7922,24 +7960,170 @@ class TestCountInFlightWork:
         orch._session_tasks = {"a": undone1, "b": done, "c": undone2}
         assert orch._count_in_flight_work() == 2
 
-    def test_active_providers_failure_is_treated_as_idle(self):
+    def test_active_providers_failure_fails_closed(self):
         orch = _make_orchestrator()
         state = MagicMock()
         state.sessions.active_providers.side_effect = RuntimeError("nope")
         orch.dashboard_state = state
         orch._session_tasks = {}
-        # A broken introspection surface must not wedge shutdown -> counts 0.
-        assert orch._count_in_flight_work() == 0
+        assert orch._count_in_flight_work() == 1
 
     def test_provider_turns_and_session_tasks_sum(self):
         orch = _make_orchestrator()
         state = MagicMock()
         state.sessions.active_providers.return_value = [_provider(True)]
+        state.workflow_service = None
         orch.dashboard_state = state
         undone = MagicMock()
         undone.done.return_value = False
         orch._session_tasks = {"x": undone}
         assert orch._count_in_flight_work() == 2
+
+    def test_counts_background_work_that_restart_would_interrupt(self):
+        orch = _make_orchestrator()
+        state = MagicMock()
+        state.sessions.active_providers.return_value = []
+        state.workflow_service.list_runs.return_value = [
+            {"status": "running"},
+            {"status": "finished"},
+            {"status": "running"},
+        ]
+        orch.dashboard_state = state
+        orch._session_tasks = {}
+        orch.subagent_mgr = SimpleNamespace(pending_work_count=5)
+        orch._running_script_ids = {"script-a", "script-b"}
+        orch.task_runner = SimpleNamespace(running=True)
+
+        assert orch._in_flight_work_counts() == (0, 10)
+        assert orch._count_in_flight_work() == 10
+
+    def test_counts_callback_reservations_and_channel_handler_tasks(self, monkeypatch):
+        orch = _make_orchestrator()
+        state = MagicMock()
+        state.sessions.active_providers.return_value = []
+        state.workflow_service = None
+        orch.dashboard_state = state
+        orch._session_tasks = {}
+        orch.sessions = SimpleNamespace(inbound_callback_count=2)
+        monkeypatch.setattr(gw.inbound_spool, "pending_refusal_write_count", lambda: 3)
+        direct = MagicMock()
+        direct.done.return_value = False
+        nested = MagicMock()
+        nested.done.return_value = False
+        finished = MagicMock()
+        finished.done.return_value = True
+        orch._handler_tasks = {direct}
+        orch._channel_handles = {
+            "teams": SimpleNamespace(_handler_tasks={direct, finished}),
+            "imessage": SimpleNamespace(_peer=SimpleNamespace(_handler_tasks={nested})),
+        }
+        orch.subagent_mgr = None
+        orch._running_script_ids = set()
+        orch.task_runner = None
+
+        assert orch._in_flight_work_counts() == (0, 7)
+
+    def test_counts_dashboard_tasks_before_provider_acquisition(self):
+        orch = _make_orchestrator()
+        state = MagicMock()
+        state.sessions.active_providers.return_value = []
+        state.workflow_service = None
+        running = MagicMock()
+        running.done.return_value = False
+        remote = MagicMock()
+        remote.done.return_value = False
+        finished = MagicMock()
+        finished.done.return_value = True
+        state._slots = {
+            "normal": SimpleNamespace(task=running, _in_stage_execution=False),
+            "remote": SimpleNamespace(task=remote, _in_stage_execution=False),
+            "finished": SimpleNamespace(task=finished, _in_stage_execution=False),
+            "stage-gap": SimpleNamespace(task=None, _in_stage_execution=True),
+        }
+        orch.dashboard_state = state
+        orch._session_tasks = {}
+        orch.sessions = None
+        orch.subagent_mgr = None
+        orch._running_script_ids = set()
+        orch.task_runner = None
+
+        assert orch._in_flight_work_counts() == (2, 1)
+
+    @pytest.mark.asyncio
+    async def test_final_drain_collects_dashboard_and_stage_tasks(self):
+        orch = _make_orchestrator()
+        normal = asyncio.create_task(asyncio.sleep(60), name="dashboard-turn")
+        remote = asyncio.create_task(asyncio.sleep(60), name="dashboard-relay")
+        stage = asyncio.create_task(asyncio.sleep(60), name="dashboard-stage:slot-a")
+        orch.dashboard_state = SimpleNamespace(
+            _slots={
+                "normal": SimpleNamespace(task=normal),
+                "remote": SimpleNamespace(task=remote),
+                "stage-gap": SimpleNamespace(task=None),
+            },
+            _background_tasks={stage},
+        )
+        try:
+            assert set(orch._live_update_handler_tasks()) >= {normal, remote, stage}
+        finally:
+            for task in (normal, remote, stage):
+                task.cancel()
+            await asyncio.gather(normal, remote, stage, return_exceptions=True)
+
+
+class TestCallbackSafeUpdateRestart:
+    @pytest.mark.asyncio
+    async def test_pre_fence_timeout_defers_without_closing_sessions(self, monkeypatch):
+        orch = _make_orchestrator()
+        orch.dashboard_state = None
+        sessions = SimpleNamespace(
+            inbound_callback_count=0,
+            fence_update_restart=MagicMock(return_value=True),
+            close_all=AsyncMock(),
+        )
+        orch.sessions = sessions
+        orch._drain_update_callback_work = AsyncMock(return_value=False)
+        monkeypatch.setattr(gw, "flush_breadcrumb_writes", lambda _timeout: None)
+        reexec = MagicMock()
+        monkeypatch.setattr(gw.platform_compat, "reexec_python_module", reexec)
+        respawn = MagicMock(return_value="/python")
+
+        await orch._restart_after_update(respawn)
+
+        assert orch._update_apply_deferred is True
+        assert orch._pending_update_respawn is respawn
+        sessions.fence_update_restart.assert_not_called()
+        sessions.close_all.assert_not_awaited()
+        reexec.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_fences_then_closes_and_final_drains(self, monkeypatch):
+        order: list[str] = []
+        orch = _make_orchestrator()
+        orch.dashboard_state = None
+        sessions = SimpleNamespace(inbound_callback_count=0)
+        sessions.fence_update_restart = MagicMock(
+            side_effect=lambda: order.append("fence") or True
+        )
+        sessions.close_all = AsyncMock(side_effect=lambda: order.append("close"))
+        orch.sessions = sessions
+
+        async def drain(*, timeout):
+            order.append(f"drain:{timeout}")
+            return True
+
+        orch._drain_update_callback_work = AsyncMock(side_effect=drain)
+        monkeypatch.setattr(gw, "flush_breadcrumb_writes", lambda _timeout: None)
+        monkeypatch.setattr(
+            gw.platform_compat,
+            "reexec_python_module",
+            lambda *_args, **_kwargs: order.append("exec"),
+        )
+
+        await orch._restart_after_update(lambda: "/python")
+
+        assert order == ["drain:30.0", "fence", "close", "drain:None", "exec"]
+        assert orch._pending_update_respawn is None
 
 
 class TestUnreadyChannelBadge:
@@ -8490,6 +8674,35 @@ class TestWheelApplyReadsTheCapabilityCommand:
         assert handlers._update_info["check_status"] == "succeeded"
         ds.push_refresh.assert_called_with("update_available")
 
+    @pytest.mark.asyncio
+    async def test_auto_update_busy_defers_provider_apply(self, monkeypatch):
+        import kiro_crew.dashboard.handlers as handlers
+        import kiro_crew.platform.update_governance as gov
+        from kiro_crew.platform.update_provider import CommandProvider, UpdateCheckResult
+
+        orch = _make_orchestrator()
+        orch.dashboard_state = _mock_dashboard_state()
+        orch._update_apply_deferred = False
+        orch._prepare_auto_update_apply = AsyncMock(return_value=False)
+        handlers._update_info.clear()
+        handlers._update_info.update({"update_available": False})
+        monkeypatch.setattr(gov, "update_required", lambda _v: False)
+
+        cfg = MagicMock()
+        cfg.auto_update = True
+        provider = CommandProvider(check_command="c", apply_command="a")
+        provider.check = AsyncMock(  # type: ignore[method-assign]
+            return_value=UpdateCheckResult(available=True, remote_version="9.9.9")
+        )
+        provider.apply = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+        with patch("kiro_crew.config.KiroCrewConfig.load", return_value=cfg):
+            await orch._check_for_updates_via_provider(provider)
+
+        provider.apply.assert_not_awaited()
+        assert handlers._update_info["update_available"] is True
+        assert handlers._update_info["latest_version"] == "9.9.9"
+
 
 class TestMandatoryUpdateOnWheelInstall:
     """A policy min-version makes an update mandatory. On a wheel/cli.sh install
@@ -8531,10 +8744,11 @@ class TestMandatoryUpdateOnWheelInstall:
         monkeypatch.setattr(handlers, "_do_update_check", _noop_check)
         monkeypatch.setattr(gov, "update_required", lambda _v: True)
         monkeypatch.setattr(gov, "min_version", lambda: "9.9.9")
-        # The installer may only be driven for the `wheel` stamp: a `source`
-        # install carries the same command but re-running it builds a separate
-        # venv and loops forever.
-        monkeypatch.setattr("kiro_crew.slack.gateway.distribution", lambda: "wheel")
+        # Only the managed venv may drive cli.sh automatically. Runtime
+        # ownership covers both stamped and older unstamped managed installs.
+        monkeypatch.setattr(
+            "kiro_crew.platform.wheel_engine.running_from_managed_venv", lambda: True
+        )
 
         apply_called = AsyncMock()
         monkeypatch.setattr(orch, "_auto_apply_update", apply_called)
@@ -8579,7 +8793,9 @@ class TestMandatoryUpdateOnWheelInstall:
         monkeypatch.setattr(handlers, "_do_update_check", _noop_check)
         monkeypatch.setattr(gov, "update_required", lambda _v: True)
         monkeypatch.setattr(gov, "min_version", lambda: "9.9.9")
-        monkeypatch.setattr("kiro_crew.slack.gateway.distribution", lambda: "wheel")
+        monkeypatch.setattr(
+            "kiro_crew.platform.wheel_engine.running_from_managed_venv", lambda: True
+        )
 
         wheel_apply_called = AsyncMock()
         monkeypatch.setattr(orch, "_auto_apply_update", AsyncMock())
@@ -8592,12 +8808,9 @@ class TestMandatoryUpdateOnWheelInstall:
         ds.push_refresh.assert_called_with("update_available")
 
     @pytest.mark.asyncio
-    async def test_mandatory_update_on_non_wheel_installer_badges(self, monkeypatch):
-        """An install that carries an installer command but is NOT the `wheel`
-        stamp (a cloud source tree) must notify rather than run the installer,
-        and the badge must light even when the check left `update_available`
-        False — a pre-release remote reads as not-newer while the floor still
-        mandates the update."""
+    async def test_mandatory_update_on_non_managed_installer_badges(self, monkeypatch):
+        """An install with an installer command outside the managed venv must
+        notify rather than run it, even when a floor mandates the update."""
         import kiro_crew.dashboard.handlers as handlers
         import kiro_crew.platform.update_governance as gov
 
@@ -8624,7 +8837,9 @@ class TestMandatoryUpdateOnWheelInstall:
         monkeypatch.setattr(handlers, "_do_update_check", _noop_check)
         monkeypatch.setattr(gov, "update_required", lambda _v: True)
         monkeypatch.setattr(gov, "min_version", lambda: "9.9.9")
-        monkeypatch.setattr("kiro_crew.slack.gateway.distribution", lambda: "source")
+        monkeypatch.setattr(
+            "kiro_crew.platform.wheel_engine.running_from_managed_venv", lambda: False
+        )
 
         apply_called = AsyncMock()
         wheel_apply_called = AsyncMock()

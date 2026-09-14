@@ -345,7 +345,14 @@ class WeixinTransport(MessagingTransport):
                     continue
                 self._sync_buf = resp.get("get_updates_buf", self._sync_buf)
                 for msg in resp.get("msgs") or []:
-                    await self.receive(msg)
+                    task = asyncio.current_task()
+                    if task is not None:
+                        self._client._handler_tasks.add(task)
+                    try:
+                        await self.receive(msg)
+                    finally:
+                        if task is not None:
+                            self._client._handler_tasks.discard(task)
                 failures = 0
             except asyncio.CancelledError:
                 # Propagate: cancellation is shutdown, and swallowing it here

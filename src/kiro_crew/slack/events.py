@@ -47,6 +47,7 @@ from kiro_crew.dashboard.token_auth import LINK_WINDOW_SECS, MAX_SESSION_TTL_SEC
 from kiro_crew.executors import subprocess_executor
 from kiro_crew.hooks import safe_read_file
 from kiro_crew.mcp_discovery import list_servers
+from kiro_crew.messaging.dispatch import admit_inbound_callback
 from kiro_crew.messaging.identity import channel_inbound_permitted
 from kiro_crew.platform import current_context, safe_context_call
 from kiro_crew.platform.interfaces import InterceptDecision
@@ -121,17 +122,18 @@ _skills_loader: SkillsLoader | None = None
 _bg_tasks: set[asyncio.Task[object]] = set()
 
 
-def _spawn_tracked(coro: Coroutine[object, object, object]) -> asyncio.Task[object]:
-    """Schedule *coro* as a task and retain a strong reference until it finishes.
-
-    ``asyncio.create_task``/``ensure_future`` alone is not enough: the event loop
-    keeps only a weak reference, so a fire-and-forget task can be garbage-collected
-    mid-execution (silently dropping the work). Tracking it in ``_bg_tasks`` and
-    discarding on completion keeps it alive for its whole lifetime.
-    """
+def _spawn_tracked(
+    coro: Coroutine[object, object, object],
+    *,
+    owner: "GatewayOrchestrator | None" = None,
+) -> asyncio.Task[object]:
+    """Schedule slash work under both retention and restart ownership."""
     task = asyncio.ensure_future(coro)
     _bg_tasks.add(task)
     task.add_done_callback(_on_tracked_done)
+    if owner is not None:
+        owner._handler_tasks.add(task)
+        task.add_done_callback(owner._handler_tasks.discard)
     return task
 
 
@@ -913,6 +915,19 @@ async def init_socket_mode(orch: GatewayOrchestrator, seen: SeenCache) -> None:
     )
 
     async def _on_event(client: WSSocketModeClient, req: SocketModeRequest) -> None:
+        # Reserve before the ACK's first suspension. A paused update returns
+        # without acknowledging, so Slack retries the whole envelope on the new
+        # gateway instead of accepting a card/command that this process cannot
+        # durably finish. The Socket Mode SDK runs this listener in one task per
+        # envelope, so task-lifetime release covers ACK plus all inline routing.
+        if orch.sessions is not None and not await admit_inbound_callback(
+            orch.sessions,
+            channel_type="slack",
+            route=None,
+        ):
+            logger.info("slack envelope left unacknowledged during update restart")
+            return
+
         # Always ack immediately so Slack doesn't retry
         try:
             await client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
@@ -1452,6 +1467,9 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
     response_url = payload.get("response_url", "")
     logger.info("Slash command: %s %s (caller=%s)", cmd, _safe_log(cmd_text), caller_id)
 
+    def _spawn(coro: Coroutine[object, object, object]) -> asyncio.Task[object]:
+        return _spawn_tracked(coro, owner=orch)
+
     async def _respond(text: str, blocks: list[dict] | None = None) -> None:
         if not response_url:
             return
@@ -1478,7 +1496,7 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
             resources=cmd_text,
             error="unauthorized sender",
         )
-        _spawn_tracked(_respond("⛔ You are not authorized to use this command."))
+        _spawn(_respond("⛔ You are not authorized to use this command."))
         return
 
     sel().log_api_access(
@@ -1490,7 +1508,7 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
     )
 
     if not (orch.slack and orch._owner_id):
-        _spawn_tracked(_respond("⚠️ Owner not configured."))
+        _spawn(_respond("⚠️ Owner not configured."))
         return
 
     # Parse sub-command and args
@@ -1504,13 +1522,13 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
         handler, _ = entry
         # Stash trigger_id so modal-opening handlers can use it
         orch._last_trigger_id = payload.get("trigger_id", "")  # type: ignore[attr-defined]
-        _spawn_tracked(handler(orch, caller_id, args, _respond))
+        _spawn(handler(orch, caller_id, args, _respond))
         return
 
     # Fallback: @user mention — multi-user access disabled for security
     user_match = re.search(r"<@([A-Z0-9]+)(?:\|([^>]+))?>", cmd_text)
     if user_match:
-        _spawn_tracked(
+        _spawn(
             _respond("⛔ Multi-user access is disabled. Only the owner can use Kiro Crew via Slack.")
         )
         return
@@ -1520,14 +1538,12 @@ async def _handle_slash(orch: GatewayOrchestrator, payload: dict) -> None:
     if channel_match:
         channel_id = channel_match.group(1)
         channel_name = channel_match.group(2) or "Secret"
-        _spawn_tracked(
-            prompt_track_channel(orch.slack, orch._owner_id, channel_id, channel_name)
-        )
-        _spawn_tracked(_respond(f"📨 Track request sent for #{channel_name or channel_id}."))
+        _spawn(prompt_track_channel(orch.slack, orch._owner_id, channel_id, channel_name))
+        _spawn(_respond(f"📨 Track request sent for #{channel_name or channel_id}."))
         return
 
     # Unknown sub-command → help
-    _spawn_tracked(_respond(_build_help_text(orch.slack_command)))
+    _spawn(_respond(_build_help_text(orch.slack_command)))
 
 
 # ---------------------------------------------------------------------------

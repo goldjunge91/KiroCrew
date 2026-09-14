@@ -154,8 +154,9 @@ in [agent-host-contract.md](agent-host-contract.md).
 - **Why the thresholds are not forced to 0:** deferral costs a round-trip — a deferred tool's spec is absent from the model's tool list, so the first direct call fails with `A tool with the name '<name>' does not exist` and has to be recovered with `tool_search`. That only pays once the specs are genuinely large, which is what the thresholds express (kiro-cli defers when EITHER is exceeded). An earlier build hard-coded both to `0`, imposing the round-trip on every install including ones far below the threshold. Setting both to `0` still restores unconditional deferral for operators who want it. The thresholds are written **explicitly** rather than omitted, so a machine carrying the old forced zeros is actually migrated instead of silently keeping them.
 - Writing both `true` and `false` makes the KiroCrew toggle authoritative over any value in the user's global `~/.kiro/settings/cli.json`. The write is merge-safe with the effort `chat.modelDefaults` keys in the same file.
 - **Non-kiro backends** — no-op. Tool Search is a kiro-cli feature; `_apply_tool_search_overlay` returns early when the backend does not read the overlay and when no toggle value was threaded in (`tool_search is None`).
+- **Native-resume compatibility:** for a direct dashboard turn with Tool Search enabled (dashboard session identity and no resumable linked-channel identity), the kiro backend does not use `session/load`. Before provider acquisition, dashboard chat resolves the slot's dedicated Slack field unconditionally and uses the channel-neutral `SessionMap.mirror` link only when `mirror_accepts_inbound` is true. Thus inbound-capable Telegram/Discord links remain distinguishable when they reuse a `dashboard:*` key after restart, while outbound-only iMessage/WhatsApp mirrors still take the direct-dashboard recovery path. A loaded transcript can return without Tool Search's activated schemas: `tool_search` reports a match, but the next inference still cannot invoke that tool. The provider instead creates a fresh native session and sets `_history_replay_needed`, so `SessionManager` marks conversation replay pending against the rebuilt tool registry. Only this direct-dashboard compatibility branch also makes `defer_replay_sid_promotion` true; `SessionMap` keeps the prior full-history SID durable while that lease is pending, allocation does not publish the fresh SID yet, and `close_all()` refuses to overwrite the retained mapping while `provider_switch_replay` remains armed. Generic `session/load` recovery still requests history replay but publishes its fresh SID immediately because non-dashboard dispatchers do not own the dashboard settlement contract; a later channel restart therefore resumes the recovered native transcript rather than the stale pre-recovery SID. Replay settlement runs from the dashboard turn's `finally`, so exceptions, task cancellation, early returns, and synthetic terminals cannot bypass it. A landed, non-synthetic replay-bearing `end_turn` promotes the fresh SID, as does confirmed `/clear` after native history deletion. Cancellation, incomplete streams, and every other non-committed terminal leave the prior SID in place and re-arm replay, so a second gateway restart cannot strand a slash-only or discarded transcript. That lease drives every replayable dashboard session-start prompt block (history, ContextBuilder, member context, folder, persona, and context telemetry). `AgentSpawn` hooks remain keyed to the actual provider spawn so script side effects execute once; a slash-first turn does not re-fire them during replay. Non-destructive native slash commands bypass `ContextBuilder` and leave the lease intact; a confirmed `/clear` consumes it at `EVENT_CLEAR_STATUS` so later replay cannot restore deleted history. Authorization, shutdown, or pre-dispatch Stop aborts preserve it. Async stream creation is not acceptance: a replay-bearing non-slash turn records acceptance in runner-local state only when its stream yields the first provider event, while the shared lease remains armed throughout the in-flight turn. Empty streams and pre-output failures therefore retain replay without settlement, and a concurrent shutdown can observe only the still-pending old SID. Final settlement synchronously promotes the fresh SID and consumes the lease only for a landed, non-synthetic, non-empty `end_turn`; every empty-response verdict is unlanded for replay durability, including the terminal give-up rung when retry budget is exhausted or auto-continue is disabled. If an accepted turn ends cancelled, the still-armed lease carries forward because kiro-cli discards that turn; the next prompt receives the full older replay plus its cancelled-turn preamble. This trades the native resume latency win for a usable dashboard tool surface without losing prior conversation or undoing an explicit clear. Setting `agent.tool_search=false` keeps dashboard-native `session/load`; a dashboard-keyed resumable channel turn and every channel dispatcher remain on native resume regardless of Tool Search.
 
-- **Resume guard:** `session/load` (resume) is only attempted when the prior session transcript exists on disk (`~/.kiro/sessions/cli/<sid>.json`). A stale persisted sid with no transcript falls back to `session/new`, preventing a fresh conversation from replaying old turns (which inflated base context).
+- **Resume guard:** `session/load` (resume) is only attempted when Tool Search is disabled and the prior session transcript exists on disk (`~/.kiro/sessions/cli/<sid>.json`). A stale persisted sid with no transcript falls back to `session/new`, preventing a fresh conversation from replaying old turns (which inflated base context).
 - **Working dir:** `AcpProvider.cwd` overrides the `LLMProvider` ABC default so `session_map` persists the real workspace path. AcpProvider's work_dir lives on the inner client (`_client._work_dir`), so a consumer reading `_work_dir` off the provider gets `""` for every ACP session; `provider.cwd` is the member to read.
 
 ### Config (`config/loader.py`)
@@ -229,7 +230,7 @@ spawn+initialize handshakes per gateway loop); admission is backend-neutral, so 
 adapted runtime harness neither bypasses the bound nor changes the Kiro path.
 
 - **A runtime backend (`is_acp_runtime_backend`, i.e. membership in
-  `ACP_BACKENDS_ACP_RUNTIME`)** → `_start_kiro_runtime()`. This spawns an
+  `acp_runtime_backends()`)** → `_start_kiro_runtime()`. This spawns an
   `AcpRuntime` (carrying the provider's sandbox mode, extra env, and MCP-gateway
   overlay/socket), resumes via `runtime.load_session()` when a prior transcript
   exists or otherwise `runtime.create_session()`, applies the configured model,
@@ -237,10 +238,38 @@ adapted runtime harness neither bypasses the bound nor changes the Kiro path.
   same interface as `AcpClient`, so downstream callers are unchanged). Any
   failure after `spawn()` kills the runtime so a half-initialised session never
   leaks an orphaned `kiro-cli`.
+
+  This path refuses pooled MCP servers it cannot project.
+  `AcpRuntime._refuse_unprojected_pooled_servers` raises the non-retryable
+  `AcpToolGateUnroutable` — before `session/new`, so there is no session to tear
+  down — when `pooled_session_servers` returns a non-empty array for a backend
+  whose MCP surface is reached through an agent-config mirror
+  (`providers.mirrors.registry.has_mirror`). The reason is that the mirror's
+  `session_projection` is what withholds a pooled stub the agent's `tools` never
+  references and what returns the per-tool deny set the client enforces at the
+  approval request, and it runs only on the `AcpClient` path; a mirrored host
+  approves its own tools internally, so an unprojected stub would be a live tool
+  surface Crew never granted. The gate reads the registry rather than naming a
+  backend, so a future mirrored host on this runtime inherits the refusal instead
+  of the gap. `has_mirror` is False for kiro and KAS, which reach their servers
+  natively, so their paths are untouched. Carrying the projection onto this path
+  is what lifts the refusal.
 - **A non-runtime backend (not a member)** → `AcpClient.ensure_ready()`, one
   process per session with no shared runtime. The branch is expressed as
   positive membership, not `not is_claude_backend`, so a harness added later
   does not inherit the kiro-family path (harness-parity H5).
+
+`acp_runtime_backends()` and not the frozenset itself is what the FOREGROUND start
+path reads (`AcpProvider.is_acp_runtime_backend`, its only consumer). The
+background path (`session._bg_runtime_backends`) reads the frozenset on purpose,
+so the switch does not reach it — see `session.md`, "Multiplexed _bg runtime". It
+returns `ACP_BACKENDS_ACP_RUNTIME` verbatim unless `KIROCREW_CODEX_ACP_RUNTIME` is
+set to `1`/`true`/`yes`/`on`, which adds codex for the life of that process. The
+switch is a preview and is **off** by default: it exists so codex's `AcpRuntime`
+path can be exercised before the membership itself changes, and the frozenset
+stays the shipped answer. A future harness author looking for "the one gate" is
+looking for that function; the set is vocabulary, and `harness_for()` serves a
+host whether or not the switch names it.
 
 `AcpProvider.is_session_sharing_eligible` is membership in
 `ACP_BACKENDS_SESSION_SHARING` (harness-parity H6), not `not is_claude_backend`:

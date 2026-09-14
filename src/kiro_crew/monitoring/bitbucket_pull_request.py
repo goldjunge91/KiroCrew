@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
-import socket
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -30,7 +29,17 @@ from kiro_crew.sel import sel
 _API_ROOT = "https://api.bitbucket.org/2.0"
 _TIMEOUT_SECS = 30.0
 _MAX_RESPONSE_BYTES = 1024 * 1024
-_TERMINAL_STATES = {"MERGED", "DECLINED", "SUPERSEDED"}
+_CANONICAL_STATES = {
+    "OPEN": "open",
+    "MERGED": "merged",
+    "DECLINED": "closed",
+    "SUPERSEDED": "closed",
+}
+# Terminal means "no supplemental read can change the verdict", which is every
+# mapped state except the open one. Deriving it keeps the two from drifting.
+_TERMINAL_STATES = frozenset(
+    raw for raw, canonical in _CANONICAL_STATES.items() if canonical != "open"
+)
 
 BitbucketFetch = Callable[[BitbucketPullRequestTarget, str], object]
 
@@ -126,9 +135,9 @@ class BitbucketPullRequestProvider:
                     "provider_rate_limited",
                 )
             return provider_error_result(ProviderErrorKind.TRANSIENT, "provider_transient")
-        except (TimeoutError, socket.timeout, URLError):
-            return provider_error_result(ProviderErrorKind.TRANSIENT, "provider_transient")
         except OSError:
+            # URLError and TimeoutError are both OSError subclasses, so this one
+            # clause covers the whole network-failure class.
             return provider_error_result(ProviderErrorKind.TRANSIENT, "provider_transient")
         except (KeyError, TypeError, ValueError):
             return provider_error_result(
@@ -201,10 +210,7 @@ def _facts(
     conflicts_complete: bool,
 ) -> PullRequestFacts:
     raw_state = str(pr["state"]).upper()
-    state = {"OPEN": "open", "MERGED": "merged", "DECLINED": "closed"}.get(
-        raw_state,
-        "closed" if raw_state == "SUPERSEDED" else "unknown",
-    )
+    state = _CANONICAL_STATES.get(raw_state, "unknown")
     source_raw = pr.get("source")
     source = {} if source_raw is None else _object(source_raw)
     commit_raw = source.get("commit")
@@ -246,15 +252,19 @@ def _facts(
         for raw in tasks[:100]
         if str(_object(raw).get("state", "")).upper() not in {"RESOLVED", "CLOSED"}
     )
+    if conflicts:
+        mergeability = "conflicting"
+    elif conflicts_complete:
+        mergeability = "mergeable"
+    else:
+        mergeability = "pending"
     return PullRequestFacts(
         kind="bitbucket_pull_request",
         target=target.identity,
         state=state,
         draft=bool(pr.get("draft", False)),
         head_revision=str(commit.get("hash") or ""),
-        mergeability=(
-            "conflicting" if conflicts else "mergeable" if conflicts_complete else "pending"
-        ),
+        mergeability=mergeability,
         review_decision=review_decision,
         checks=tuple(checks),
         checks_complete=statuses_complete,

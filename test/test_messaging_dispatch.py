@@ -356,6 +356,23 @@ def test_a_shutdown_between_the_claim_and_the_dispatch_never_opens_the_turn(
     assert sessions.successes == 0
 
 
+def test_a_restricted_shutdown_refusal_never_spools(monkeypatch) -> None:
+    """A resolved temporary/incognito turn leaves no durable refusal record."""
+    _patch_pipeline(monkeypatch)
+    spool = AsyncMock(return_value=True)
+    monkeypatch.setattr(D, "spool_refused_turn", spool)
+    sessions = _Sessions(closing=True)
+    renderer = _Renderer()
+    turn = _turn(renderer)
+    turn.inbound_route = D.InboundRoute(conversation_id="conv", text="secret", user_id="u")
+    turn.inbound_restricted = True
+
+    asyncio.run(drive_turn(turn, sessions=sessions, ctx_builder=_CtxBuilder()))
+
+    spool.assert_not_awaited()
+    assert sessions.released == 1
+
+
 def test_a_compaction_failed_terminal_resets_the_session(monkeypatch) -> None:
     """A COMPACTION_FAILED terminal is synthetic — the backend abandoned the
     turn after a failed auto-compaction and never sent end_turn, so it still

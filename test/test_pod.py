@@ -4596,7 +4596,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "derive_port", lambda cfg, n: 7811)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
         pod_cli._up(
@@ -4614,7 +4614,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "derive_port", lambda cfg, n: 7811)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
         calls: list[tuple[str, str, bool]] = []
@@ -4653,7 +4653,7 @@ class TestUpVerb:
             "start_pod",
             lambda cfg, name: (starts.append(name) or _cp(returncode=0)),
         )
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
         # This wiring test owns the pre-start decision, not POSIX marker I/O.
@@ -4686,7 +4686,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "derive_port", lambda cfg, n: 7811)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
 
         def _unprovable(cfg: object, n: object, ttl: object) -> str:
             raise rt.PodOwnershipUnproven("could not prove which process holds :7811")
@@ -4716,7 +4716,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "derive_port", lambda cfg, n: 7811)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
 
         def _foreign(cfg: object, n: object, ttl: object) -> str:
             raise rt.PodError("held by another process")
@@ -4753,7 +4753,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "_port_is_free", lambda p: p != derived)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
 
@@ -4783,7 +4783,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "_port_is_free", lambda _p: False)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: True)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
         monkeypatch.setattr(
@@ -4820,7 +4820,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "_port_is_free", lambda _p: True)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
 
@@ -4857,7 +4857,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "_port_is_free", lambda _p: True)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
 
@@ -4894,7 +4894,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "_port_is_free", lambda _p: True)  # nothing is busy
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
 
@@ -4919,7 +4919,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "_port_is_free", lambda p: p != derived)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
         pod_cli._up(
@@ -4970,7 +4970,9 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
         probed: list[int] = []
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: (probed.append(p), 403)[1])
+        monkeypatch.setattr(
+            pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: (probed.append(p), 403)[1]
+        )
 
         pod_cli._up(
             c, argparse.Namespace(name="demo", json=True, seed="", ttl="2h", provision=False)
@@ -5005,7 +5007,7 @@ class TestUpVerb:
         )
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "start_pod", lambda cfg, n: (order.append("start"), _cp())[1])
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
 
@@ -5045,7 +5047,7 @@ class TestUpVerb:
         monkeypatch.setattr(rt, "derive_port", lambda cfg, n: 7811)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: False)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: -1)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: -1)
         monkeypatch.setattr(rt, "recent_journal", lambda cfg, n, ln=30: "ImportError: boom")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
         with pytest.raises(SystemExit):
@@ -6005,7 +6007,7 @@ class TestBootTimeSettings:
         monkeypatch.setattr(rt, "derive_port", lambda cfg, n: 7811)
         monkeypatch.setattr(rt, "is_active", lambda cfg, n: active)
         monkeypatch.setattr(rt, "systemctl", lambda *a, **k: _cp(returncode=0))
-        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p: 403)
+        monkeypatch.setattr(pod_cli, "_wait_healthy", lambda cfg, n, p, tries=0: 403)
         monkeypatch.setattr(rt, "mint_token", lambda cfg, n, ttl: "tok-9")
         monkeypatch.setattr(pod_cli, "_audit", lambda *a, **k: None)
         return PodConfig.load()

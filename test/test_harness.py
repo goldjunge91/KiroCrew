@@ -721,7 +721,8 @@ def _make_fake_proc_with_ready(payload: str) -> FakePopen:
     return proc
 
 
-def test_spawn_feature_gateway_happy_path() -> None:
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_spawn_feature_gateway_happy_path(body_fails: bool) -> None:
     """End-to-end with mocked subprocess: spawn → READY → teardown.
 
     Doesn't spin a real gateway (covered by the gated integration test);
@@ -759,13 +760,22 @@ def test_spawn_feature_gateway_happy_path() -> None:
             return_value=[],
         ),
     ):
-        with spawn_feature_gateway(fixture="empty") as handle:
-            assert handle.port == 51234
-            assert handle.token == "t-abc"
-            assert handle.url == "http://localhost:51234/?token=t-abc"
-            assert handle.home.exists()  # tmp dir created by harness
-            captured_home = handle.home
+        with (
+            pytest.raises(RuntimeError, match="body failed")
+            if body_fails
+            else contextlib.nullcontext()
+        ):
+            with spawn_feature_gateway(fixture="empty") as handle:
+                assert handle.port == 51234
+                assert handle.token == "t-abc"
+                assert handle.url == "http://localhost:51234/?token=t-abc"
+                assert handle.home.exists()  # tmp dir created by harness
+                assert handle.teardown_confirmed is False
+                captured_home = handle.home
+                if body_fails:
+                    raise RuntimeError("body failed")
 
+    assert handle.teardown_confirmed is True
     assert terminated["called"] is True
     # Tmp home is cleaned up on context exit.
     assert not captured_home.exists()
@@ -808,6 +818,7 @@ def test_spawn_feature_gateway_keeps_the_home_when_the_gateway_will_not_die() ->
             captured_home = handle.home
 
     try:
+        assert handle.teardown_confirmed is False
         assert captured_home.exists(), "HOME was deleted under a gateway that did not exit"
     finally:
         import shutil
@@ -872,6 +883,122 @@ def test_spawn_feature_gateway_isolates_the_agent_spec_home() -> None:
 
             # And the data home stays isolated too (unchanged by this fix).
             assert captured_env["KIROCREW_HOME"] == str(data_home)
+
+
+def test_spawn_feature_gateway_explicit_host_inputs_are_child_scoped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kiro_crew import agent
+
+    launcher_dir = tmp_path / "installed-bin"
+    launcher_dir.mkdir()
+    launcher = launcher_dir / ("kirocrew.exe" if platform_compat.IS_WINDOWS else "kirocrew")
+    launcher.write_bytes(b"synthetic launcher, never executed")
+    launcher.chmod(0o755)
+    monkeypatch.setattr(agent, "_resolve_kirocrew_bin", lambda: str(launcher))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+    parent_path = os.environ["PATH"]
+    fake_proc = _make_fake_proc_with_ready(
+        '{"port": 51234, "token": "t-abc", "pid": 9876, "home": "/tmp/x"}'
+    )
+    captured: dict[str, object] = {}
+    preflight: dict[str, object] = {}
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> FakePopen:
+        captured.update(kwargs)
+        return fake_proc
+
+    def before_spawn(env: dict[str, str], cwd: Path) -> None:
+        preflight["env"] = dict(env)
+        preflight["cwd"] = cwd
+        assert not captured, "preflight must precede gateway Popen"
+        assert env["PATH"] == str(launcher_dir) + os.pathsep + parent_path
+        # Model a durable POSIX install, even on Windows. The installer itself
+        # must take the already-reachable branch, not create a host shim.
+        with monkeypatch.context() as child:
+            child.setenv("PATH", env["PATH"])
+            child.setattr(platform_compat, "IS_WINDOWS", False)
+            child.setattr(agent, "_in_linked_git_worktree", lambda _path: False)
+            child.setattr(agent, "_in_ephemeral_tree", lambda _path: False)
+            assert agent.ensure_kirocrew_on_path(tmp_path / "host-local-bin") is None
+        assert not (tmp_path / "host-local-bin").exists()
+        env["KIRO_HOME"] = "mutated-copy"
+
+    binary = Path("/host/bin/kiro-cli")
+    with (
+        patch(
+            "kiro_crew.testing.harness.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0),
+        ),
+        patch("kiro_crew.testing.harness.subprocess.Popen", side_effect=fake_popen),
+        patch("kiro_crew.testing.harness._terminate_process_group"),
+        patch(
+            "kiro_crew.testing.harness.platform_compat.process_descendants",
+            return_value=[],
+        ),
+    ):
+        with spawn_feature_gateway(
+            fixture="empty",
+            kiro_bin=binary,
+            before_spawn=before_spawn,
+        ) as handle:
+            data_home = handle.home
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["KIRO_HOME"] == str(data_home / "kiro")
+    assert env["KIROCREW_KIRO_BIN"] == str(binary)
+    assert env["KIROCREW_HOME"] == str(data_home)
+    assert env["KIRO_HOME"] == str(data_home / "kiro")
+    assert captured["cwd"] == str(_resolve_workspace_src().parent)
+    assert preflight["env"]["KIRO_HOME"] == str(data_home / "kiro")
+    assert preflight["env"]["KIROCREW_KIRO_BIN"] == str(binary)
+    assert preflight["cwd"] == _resolve_workspace_src().parent
+    assert env["PATH"] == preflight["env"]["PATH"]
+    assert os.environ["PATH"] == parent_path
+
+
+@pytest.mark.parametrize("candidate", ["kirocrew", "missing/kirocrew", "other-name"])
+def test_explicit_binary_refuses_without_reachable_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, candidate: str
+) -> None:
+    from kiro_crew import agent
+
+    launcher = "kirocrew" if candidate == "kirocrew" else str(tmp_path / candidate)
+    if candidate == "other-name":
+        Path(launcher).write_bytes(b"synthetic launcher, never executed")
+        Path(launcher).chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-path"))
+    monkeypatch.setattr(agent, "_resolve_kirocrew_bin", lambda: launcher)
+    with patch("kiro_crew.testing.harness.subprocess.Popen") as popen:
+        with pytest.raises(GatewaySpawnError, match="kirocrew launcher"):
+            with spawn_feature_gateway(kiro_bin="native-cli"):
+                pytest.fail("unreachable launcher must prevent boot")
+    popen.assert_not_called()
+
+
+def test_spawn_feature_gateway_host_inputs_default_to_isolation() -> None:
+    fake_proc = _make_fake_proc_with_ready(
+        '{"port": 51234, "token": "t-abc", "pid": 9876, "home": "/tmp/x"}'
+    )
+    captured_env: dict[str, str] = {}
+
+    def fake_popen(cmd: list[str], **kwargs: object) -> FakePopen:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        captured_env.update(env)
+        return fake_proc
+
+    with (
+        patch("kiro_crew.testing.harness.subprocess.Popen", side_effect=fake_popen),
+        patch("kiro_crew.testing.harness._terminate_process_group"),
+        patch(
+            "kiro_crew.testing.harness.platform_compat.process_descendants",
+            return_value=[],
+        ),
+    ):
+        with spawn_feature_gateway(fixture="empty") as handle:
+            assert captured_env["KIRO_HOME"] == str(handle.home / "kiro")
 
 
 def test_spawn_feature_gateway_crons_opt_in() -> None:
@@ -1258,3 +1385,63 @@ def test_terminate_preserves_home_after_root_exits() -> None:
         with contextlib.suppress(OSError):
             proc.kill()
         proc.wait(timeout=10)
+
+
+def test_preflight_runs_after_seed_and_preserves_its_files(tmp_path, monkeypatch):
+    """A native whoami/config preflight may legitimately populate private state."""
+    from kiro_crew.seed import seed
+
+    events = []
+    proc = _make_fake_proc_with_ready('{"port": 51234, "token": "synthetic"}')
+
+    def seed_child(argv, **kwargs):
+        assert argv[-1] == "minimal"
+        assert "replace" not in argv[2]
+        home = Path(kwargs["env"]["KIROCREW_HOME"])
+        assert not any(home.iterdir())
+        with monkeypatch.context() as child:
+            child.setenv("KIROCREW_HOME", str(home))
+            seed("minimal")  # Actual seed guard and fixture copy, no replacement.
+        events.append("seed")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def preflight(env, cwd):
+        home = Path(env["KIROCREW_HOME"])
+        assert (home / "fixture.yaml").is_file(), "preflight ran before fixture seeding"
+        settings = Path(env["KIRO_HOME"]) / "settings" / "cli.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{}", encoding="utf-8")
+        events.append("preflight")
+
+    def popen(cmd, **kwargs):
+        assert "--seed" not in cmd and "--seed-replace" not in cmd
+        assert (Path(kwargs["env"]["KIRO_HOME"]) / "settings" / "cli.json").is_file()
+        events.append("boot")
+        return proc
+
+    with (
+        patch("kiro_crew.testing.harness.subprocess.run", side_effect=seed_child),
+        patch("kiro_crew.testing.harness.subprocess.Popen", side_effect=popen),
+        patch("kiro_crew.testing.harness._terminate_process_group", return_value=True),
+        patch("kiro_crew.testing.harness.platform_compat.process_descendants", return_value=[]),
+    ):
+        with spawn_feature_gateway(fixture="minimal", before_spawn=preflight) as handle:
+            home = handle.home
+    assert events == ["seed", "preflight", "boot"]
+    assert not home.exists()
+
+
+def test_failed_preflight_seed_never_calls_preflight_or_gateway():
+    called = []
+    with (
+        patch(
+            "kiro_crew.testing.harness.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 2, "", "seed refused"),
+        ),
+        patch("kiro_crew.testing.harness.subprocess.Popen") as popen,
+        pytest.raises(GatewaySpawnError, match="seed refused"),
+    ):
+        with spawn_feature_gateway(before_spawn=lambda *_args: called.append(True)):
+            pytest.fail("failed seed reached gateway")
+    assert called == []
+    popen.assert_not_called()

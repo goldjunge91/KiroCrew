@@ -90,7 +90,9 @@ from kiro_crew.messaging.commands import (
     spawn_command_reply,
     task_command_reply,
 )
+from kiro_crew.messaging.dispatch import admit_inbound_callback
 from kiro_crew.messaging.identity import channel_inbound_permitted, publish_turn_identity
+from kiro_crew.messaging.inbound_spool import InboundRoute
 from kiro_crew.messaging.link import canonical_key
 from kiro_crew.messaging.renderer import credential_redaction_notice
 from kiro_crew.messaging.session_trust import _trusted_sessions as _shared_trusted_sessions
@@ -2908,6 +2910,20 @@ async def handle_message(
 
     await _hydrate_thread_overrides(session_key, conversation_log)
     _hydrate_conv_flags(sessions, session_key)
+
+    if not await admit_inbound_callback(
+        sessions,
+        channel_type="slack",
+        route=InboundRoute(
+            conversation_id=channel,
+            text=text,
+            user_id=user_id,
+            thread_id=reply_ts,
+            message_id=msg_ts,
+        ),
+        restricted=_is_slack_restricted(session_key),
+    ):
+        return
 
     # Resolve agent early so ALL persist paths (hook auto-reply, command
     # intercepts, review-mode drafts, main LLM path) can forward it.

@@ -1284,7 +1284,10 @@ async def api_chat_plan_action(request: web.Request) -> web.Response:
                 resources=f"slot={slot.key}",
             )
         )
-    task = asyncio.create_task(_stage_loop(state, slot, auto_run=is_auto))
+    task = asyncio.create_task(
+        _stage_loop(state, slot, auto_run=is_auto),
+        name=f"dashboard-stage:{slot.key}",
+    )
     slot.task = task
     slot._recovery_retrigger_count = 0
     state._background_tasks.add(task)

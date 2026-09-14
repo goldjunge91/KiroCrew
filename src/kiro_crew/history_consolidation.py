@@ -26,6 +26,7 @@ from kiro_crew.llm_helpers import (
     ToolApprovalPolicy,
     background_turn,
 )
+from kiro_crew.project_scope import scope_is_admissible
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
 from kiro_crew.skills import AUTO_SKILL_MAX_PROCEDURE_CHARS, AutoSkillProvenance
 from kiro_crew.skills_dedupe import (
@@ -1057,7 +1058,16 @@ class HistoryConsolidator:
                 keys.append(
                     '"lessons": Array of corrections the user taught '
                     '(e.g. "no, do X", "always Y", "never Z"). '
-                    'Each: {"rule": "...", "negative": "...", "category": "tool|preference|knowledge"}. '
+                    'Each: {"rule": "...", "negative": "...", "category": "tool|preference|knowledge", '
+                    '"repo_scope": "..."}. '
+                    '"repo_scope" is OPTIONAL: include it ONLY when the correction is '
+                    "genuinely specific to one codebase worked on in the chat. Give a "
+                    "RELATIVE directory path inside that repository that is distinctive "
+                    'of it (e.g. "src/kiro_crew") -- never an absolute path, no leading '
+                    'slash or drive letter, no "." or ".." segments; a malformed scope '
+                    "drops the whole lesson. OMIT it when unsure and for anything that "
+                    "applies everywhere -- a scoped lesson is withheld outside its "
+                    "repository. "
                     "Empty [] if no corrections. Skip general preferences. "
                     f"Max {_MAX_LESSONS_PER_CONSOLIDATION} items. "
                     "IMPORTANT: Only extract lessons that the user did NOT explicitly ask "
@@ -1456,6 +1466,41 @@ class HistoryConsolidator:
         # thread-offloaded dedupe judge can marshal back onto the gateway loop.
         await asyncio.to_thread(self._process_auto_skills, result, key)
 
+    def _gated_lesson_scope(self, item: dict) -> tuple[str | None, bool]:
+        """The lesson's ``repo_scope`` to forward, plus whether to DROP the lesson.
+
+        Returns ``(scope, False)`` for no scope (absent, ``None``, or a
+        whitespace-only string -- the unchanged global path) or an admissible
+        one, and ``(None, True)`` (with the reason logged) when a PRESENT scope
+        is malformed. A malformed scope refuses the WHOLE lesson rather than
+        stripping the scope: storing it globally would be the fail-open a
+        scoped lesson must never take (``write_lesson`` draws the same line for
+        inadmissible strings). The value is untrusted model output, so this
+        seam also refuses the shapes the stores' own guards cannot see -- a
+        non-string would slip past ``write_lesson``'s string-only admissibility
+        check and be canonicalised to a GLOBAL write, and ``LessonStore.save``
+        never checks admissibility at all.
+        """
+        raw = item.get("repo_scope")
+        refusal: str | None = None
+        if raw is None:
+            return None, False
+        elif not isinstance(raw, str):
+            refusal = "scope_not_a_string"
+        elif not raw.strip():
+            return None, False
+        elif not scope_is_admissible(raw):
+            refusal = "scope_inadmissible"
+        if refusal:
+            # Only the closed-set reason code is interpolated, never the
+            # untrusted value itself.
+            self._logger.warning(
+                "Dropping consolidation lesson with malformed repo_scope (%s)",
+                refusal,
+            )
+            return None, True
+        return raw, False
+
     def _save_lessons(
         self,
         raw: object,
@@ -1504,11 +1549,17 @@ class HistoryConsolidator:
             count = 0
             for item in raw:
                 if isinstance(item, dict) and item.get("rule"):
+                    scope, drop = self._gated_lesson_scope(item)
+                    if drop:
+                        continue
                     ok = vector_store.write_lesson(
                         rule=item["rule"],
                         category=item.get("category", "knowledge"),
                         negative=item.get("negative"),
                         source="consolidation",
+                        # Gated by _gated_lesson_scope above; write_lesson
+                        # canonicalises and re-checks admissibility itself.
+                        repo_scope=scope,
                         facets=facets,
                     )
                     if ok:
@@ -1526,12 +1577,18 @@ class HistoryConsolidator:
         count = 0
         for item in raw:
             if isinstance(item, dict) and item.get("rule"):
+                scope, drop = self._gated_lesson_scope(item)
+                if drop:
+                    continue
                 lesson_store.save(
                     Lesson(
                         ts=datetime.now(tz=_tz.utc).isoformat(),
                         rule=item["rule"],
                         category=item.get("category", "knowledge"),
                         negative=item.get("negative"),
+                        # Gated by _gated_lesson_scope above (LessonStore.save
+                        # canonicalises but never checks admissibility itself).
+                        repo_scope=scope,
                     )
                 )
                 count += 1

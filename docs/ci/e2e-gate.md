@@ -459,6 +459,125 @@ PRECONDITION (the packaged fake ACP backend missing, `kiro_crew.testing` not
 importable) is a graceful `pytest.skip` on a local run and a `pytest.fail` on the
 job. Set it wherever you expect gateways to actually boot.
 
+## Real-`kiro-cli` opt-in smoke
+
+`test/e2e/test_real_kiro_smoke.py` is the one test in this gate that uses the
+host's signed-in CLI and real model service. It can incur network traffic, model
+latency, and account usage, so it is never part of the default offline gate.
+
+- `KIROCREW_E2E_REAL_KIRO=1` activates it.
+- `KIROCREW_E2E_REAL_KIRO_REQUIRE=1` both activates it and turns a missing CLI,
+  sign-in, or safe-host precondition into a failure. A required run cannot pass
+  as a module-level skip.
+- Resolution ignores an inherited `KIROCREW_KIRO_BIN` test override. Immediately
+  before boot, the exact pinned binary runs `kiro-cli whoami` with the gateway's
+  final child environment and cwd. `KIRO_HOME` remains the harness-owned
+  `<KIROCREW_HOME>/kiro`; authentication uses the existing independent OS/account
+  store without changing HOME, USERPROFILE, or account-store locations. Failed
+  authentication never falls back to real-home session storage.
+- Every token-bearing dashboard request uses `build_loopback_opener`, which
+  disables environment proxies and rejects redirects.
+- The gateway uses `--approval interactive`. The live test accepts hook
+  auto-approval of the confined nonce read; the exact allow-once polling verifier
+  and rejection of a different path remain independently covered offline.
+- A private project agent is derived with the existing grant-stripping helper,
+  from a minimal test spec rather than a host spec. It mounts only the test's
+  `@real-smoke/read` MCP tool: no native filesystem, shell, network, global MCP,
+  lifecycle hooks, resources, or native automatic grants. No host agent file is
+  created or changed.
+- A test-only policy confines `filesystem.read` to the exact nonce path and MCP
+  access to that one tool. The gateway must report the read ceiling installed.
+  The small stdio tool reuses `run_mcp_stdio_loop` and the production
+  `HookManager` at its own execution boundary, before opening a file. Thus even
+  a native MCP pre-approval cannot skip the path check. This is deliberate:
+  native built-in reads on the tested CLI did not honor the grant-free spec's
+  expected permission routing, so they are not exposed by this smoke.
+- The same session then attempts a second synthetic file. Success requires an
+  actual governance-denial tool event, no occurrence of its secret marker, and
+  a read-effect receipt containing only the permitted nonce file. A model merely
+  saying it refused is not denial evidence. This proves the bounded test tool,
+  not unrestricted native-tool or host-filesystem confinement.
+- Success requires the slot to stop running without an error or queued recovery,
+  the correlated tool event to finish with output exactly equal to the nonce,
+  and one assistant message whose body is exactly that nonce. A streaming chunk
+  or a nonce appearing only in JSON metadata is not completion evidence.
+
+Before a preflight runs, the harness seeds its empty owned directory using the
+existing `seed()` API in a child with the final environment. The preflight may
+then populate private CLI settings or audit state without violating seed's
+nonempty guard. This prepared case omits gateway `--seed`; ordinary callers
+without a preflight retain startup seeding. No replacement or preflight-data
+wipe is used.
+
+The native CLI documents `KIRO_HOME` as relocating agents, settings, and sessions
+([native configuration scopes](https://kiro.dev/docs/configuration/#scopes)). This
+is the native writer control, not the Python-only session-reader overrides. A
+fresh Python preflight verifies that both the config resolver and agent target
+point at the harness-private tree. It also requires the existing launcher to be
+usable on the final child PATH before gateway boot. No shared agent specs,
+settings, credential files, or real-home transcript directories are inspected,
+copied, linked, or modified by this preflight.
+
+After each successful turn the smoke requires nonempty, regular native transcript
+files under the owned `KIRO_HOME/sessions/cli` directory. This observes actual
+native files without reading their contents or depending on a deferred session
+map. The harness owns the entire directory from before native process startup:
+a transcript written before session creation responds or initialization fails is
+still private and included in cleanup, even if its ID was never published.
+
+The harness removes its owned tree only after its whole-process-tree termination
+verdict. The smoke requires `GatewayHandle.teardown_confirmed` and checks that
+the private home is actually absent after teardown; a swallowed filesystem
+cleanup error cannot count as success. An unconfirmed stop preserves the tree
+and fails the smoke. There is no shared-home transcript deletion, directory
+comparison, prompt matching, exact-ID purge, or real-home escape hatch.
+
+When an exact `kiro_bin` is supplied, the harness prepends the existing gateway
+launcher's directory to the child PATH without modifying the parent environment
+or installing a launcher. Missing/unreachable launchers fail before `Popen`.
+The fresh smoke preflight additionally checks the production resolver and PATH
+name the same usable launcher, making first-run installation unnecessary.
+
+The harness sets the checkout root (`src.parent`) as gateway cwd for **all**
+callers, not only the real-CLI smoke. This keeps cwd-dependent source/install
+resolution identical between the exact-environment preflight and gateway boot,
+and prevents the caller's working directory from silently choosing a different
+resolution context. Callers must not rely on the gateway inheriting their cwd;
+this does not relocate the harness's throwaway data home.
+
+### Who runs the real-CLI smoke, and when
+
+No workflow runs it. It spends the operator's own signed-in account, so it is
+never scheduled, never triggered by a label, and never wired into `ci.yml` or
+`nightly.yml`: running it is an explicit act by a person who has agreed to that
+account usage. Two named owners, two named moments:
+
+| Owner | When | Mode |
+|---|---|---|
+| The PR author | before requesting review on a change to the ACP client or kiro-cli transport (`src/kiro_crew/acp/`, `src/kiro_crew/kiro_cli.py`), the harness (`src/kiro_crew/testing/harness.py`), the private-agent derivation the smoke uses, or the tool-governance gate (`hooks.py`, the PreToolUse path) | required |
+| The release verifier | before adopting a new installed `kiro-cli` version as the one releases are cut against | required |
+
+Required mode is the exact invocation below; the `_REQUIRE` marker turns a
+missing CLI, a failed `kiro-cli whoami`, or an unsafe host into a FAILURE, so a
+run that could not reach the real CLI cannot be filed as a pass:
+
+```bash
+KIROCREW_E2E_REAL_KIRO_REQUIRE=1 python -m pytest -v -p no:cacheprovider \
+  -o addopts= -n0 --timeout=600 test/e2e/test_real_kiro_smoke.py
+```
+
+`KIROCREW_E2E_REAL_KIRO=1` alone is the best-effort form for a developer who
+wants a skip rather than a failure when the host is not signed in. Both are
+opt-in flags read by the module's own `skipif`; nothing sets them for you.
+
+What to record with the change (in the PR description, or the release notes'
+verification section): the checkout SHA the run was made at, the `kiro-cli
+--version` output, pass or fail, and the pytest summary line. Nothing else. The
+transcript, the model's reply, the nonce, tokens and any path under the real
+`~/.kiro` are not evidence and must not be pasted anywhere. A run that has not
+happened is not recorded; this document names the cadence and the command, not
+any run made under it.
+
 ### The job's own honesty checks
 
 - **`KIROCREW_HARNESS_READY_TIMEOUT` per OS**: 60 on Ubuntu, 90 on macOS, 180 on
@@ -482,7 +601,7 @@ job. Set it wherever you expect gateways to actually boot.
 (`ci.yml` -> `CI`), never by job name, so every job inside `ci.yml` is already
 part of the required `CI` verdict.
 
-## The pod scenario suite (nightly, not a PR gate)
+## The pod scenario suite (nightly on every OS; per-PR Windows is boot-only unless labelled)
 
 A second E2E lane, orthogonal to the browser gate above. `test/e2e/scenarios/`
 boots ONE real service-managed pod through the shipped `kirocrew pod` verbs and
@@ -496,27 +615,67 @@ Plain pytest, not pytest-bdd or Robot Framework. This repo's isolation, timeout
 and sharding story is already pytest-shaped, and a second framework would need a
 second isolation story rather than inheriting this one.
 
+Scenario teardown removes the plane only after `pod down` succeeds, `pod ls`
+returns a valid empty JSON list, and the pod home is absent. A failed or timed-out
+stop preserves the service/task definition, sidecars and home for recovery through
+the pod's own stop path; it fails the test rather than attempting force-cleanup.
+This applies on Linux, macOS and Windows, including a failed boot before a client
+was returned. No PID record, an unresolved handoff, or an empty scratch-path argv
+search proves that the service-managed gateway is gone: its checkout executable
+can receive the plane only through its environment. The fixture also does not
+sweep older planes merely because their owning pytest process died, and refuses
+to adopt an existing root after PID reuse. Normal confirmed teardown and pre-boot
+CLI-probe cleanup still remove their scratch roots.
+Preservation here is by the fixture, not a guarantee against external temp-directory
+retention policies; recover a failed plane before another tool reclaims its parent.
+
 ### Gating
 
 Same shape as `KIROCREW_E2E_REQUIRE` above, and for the same reason.
 
 - `KIROCREW_E2E_SCENARIOS` unset: every scenario skips. The suite boots a real
   pod, which is minutes and a service manager away from a bare `pytest`.
-- `KIROCREW_E2E_SCENARIOS_REQUIRE=1`: every precondition skip becomes a FAILURE.
-  A skip counts as a pass, so without this the job would report green having run
-  zero scenarios.
+- `KIROCREW_E2E_REQUIRE=1`: every precondition skip becomes a FAILURE. A skip
+  counts as a pass, so without this the job would report green having run zero
+  scenarios. It is the same marker the browser gate reads, so one job env serves
+  both suites; `test/e2e/scenarios/conftest.py::_required` is the reader.
 
-`KIROCREW_E2E_SCENARIOS_REAL_AGENT=1` opts the agent turn onto the host's
-signed-in `kiro-cli` instead of the packaged fake backend, and is REFUSED when no
-`kiro-cli` is on PATH rather than being quietly served by the fake.
+`KIROCREW_E2E_SCENARIOS_REAL_AGENT=1` is a pod backend-selection knob, and a
+narrower one than its name suggests. `conftest.py::_resolve_backend` checks that
+a `kiro-cli` is on `PATH` (REFUSING the run otherwise, rather than quietly
+serving the fake) and returns no fake path, so `_plane_env` does not ADD its
+`KIROCREW_POD_KIRO_BIN` override to the copied `os.environ`; an inherited value
+of that variable is not removed, and the pod's normal backend resolution decides
+what `KIROCREW_KIRO_BIN` its service definition carries. It pins no identity,
+verifies no sign-in, and proves nothing positive or negative about what the
+pod's agent may read. Enabling it does NOT turn the 55-test suite into a
+supported real-model success gate: `test_subagent_spawn.py` unconditionally
+asserts the fake backend's `REPLY_TEXT` and `hello-from-fake` tool event, which
+real-model output is not guaranteed to satisfy, and `test_cron_fire.py` asserts
+only that a triggered run was recorded with an outcome, not that a real model
+answered. No successful live run under this flag is on record. It is retained
+for compatibility as an explicit opt-in that nothing sets for you; the presence
+check itself is free, but a turn that actually reaches a real model may incur
+the operator's own account usage. For a bounded real-`kiro-cli` proof use the
+dedicated [`KIROCREW_E2E_REAL_KIRO_REQUIRE=1` smoke](#real-kiro-cli-opt-in-smoke)
+instead: a direct throwaway gateway with a confined nonce read, a governance
+denial and host-spec/session cleanup evidence. That smoke is not service-manager
+pod or cron lifecycle coverage, and this suite is not a real-model gate; neither
+replaces the other.
 
 ### The `pod-scenarios` job
 
-Lives in `.github/workflows/nightly.yml`, matrix `[ubuntu-latest, macos-15]` with
-`fail-fast: false` and `timeout-minutes: 40`. It is not a `needs:` of any publish
-lane, so a scenario failure never holds up a nightly release and a release
-failure never hides a scenario result. `workflow_dispatch` on the workflow makes
-it runnable on a branch.
+Lives in `.github/workflows/nightly.yml`, matrix `[ubuntu-latest, macos-15,
+windows-latest]` with `fail-fast: false` and `timeout-minutes: 40`. It is not a
+`needs:` of any publish lane, so a scenario failure never holds up a nightly
+release and a release failure never hides a scenario result. `workflow_dispatch`
+on the workflow makes it runnable on a branch -- but the workflow also PUBLISHES,
+so a branch dispatch is not how a Windows change gets validated. The suite is not
+a default PR gate on any OS; a Windows PR opts into it with the `ci:pod-scenarios`
+label; completed hosted Windows runs are recorded
+under
+[What has actually run on hosted Windows](#what-has-actually-run-on-hosted-windows)
+below.
 
 Steps, in order: build the checkout's `.venv` (a pod boots the CHECKOUT's own
 `kirocrew`, and the suite refuses to fall back to a global one), `npm ci` plus
@@ -562,13 +721,20 @@ which a runner session already has, and its seatbelt sandbox backend needs no ho
 opt-in, so that leg only prints `launchctl print user/<uid>` to keep the two logs
 readable side by side.
 
+Windows needs none either: Task Scheduler is a system service every runner
+session can reach, and the pod's `require_backend()` probes it by creating a task.
+
 ### The canary
 
 Copied from `ci.yml`'s macOS peer-identity step: run by path with `-v -n0`, tee
-to `pod-scenarios.log`, then `grep -qE '6 passed'` and fail the step otherwise.
-An exit code cannot tell "every scenario passed" from "every scenario was never
+to `pod-scenarios.log`, then `grep -qE '(^|[^0-9])55 passed'` and fail the step
+otherwise. 55 is six user-flow scenarios plus the 49 fixture-isolation checks in
+`test/e2e/scenarios/test_conftest.py`, which run in the same invocation. An exit
+code cannot tell "every scenario passed" from "every scenario was never
 collected", and a precondition-gated suite degrades into exactly that. **Raise
-the expected count when you add a scenario.**
+the expected count when you add a scenario** -- in `nightly.yml` AND in the
+label-gated step of `ci.yml`'s `pod-boot-windows` job, which pins the same
+number; `test/test_pod_scenario_matrix.py` holds the value both must match.
 
 On failure the job uploads `pod-scenarios.log` plus the pod plane's artifact and
 log files as `pod-scenarios-logs-<os>` (7 days, `if-no-files-found: ignore`). A
@@ -579,12 +745,107 @@ log carries just the tail `pod up` chose to print.
 
 No scenario body contains a platform test. Only the pod fixture asks whether this
 host can run pods, and it asks the pod's own `runtime.require_backend()`, which
-dispatches systemd on Linux, launchd on macOS and Task Scheduler on Windows. That
-last one now EXISTS, so the gate finds a backend on windows-latest and the add is
-one more entry in `strategy.matrix.os` plus a service-manager step beside the two
-above. What holds it back is a validated run rather than a missing backend, and
-`test/test_pod_scenario_matrix.py` asserts that reason so this section cannot
-quietly become false: delete its `PENDING_VALIDATION` entry and the test requires
-the matrix entry. Deferred with it: whatever the Windows service manager needs to
-make a pod's private API socket reachable, since `pod api` has no TCP fallback by
-design.
+dispatches systemd on Linux, launchd on macOS and Task Scheduler on Windows. So
+`windows-latest` is one more entry in `strategy.matrix.os` and nothing else in
+the job: `test/test_pod_scenario_matrix.py` asserts that every platform with a
+backend is either in the matrix or named in its `PENDING_VALIDATION` table with a
+reason, and that table is now empty. Windows has no AF_UNIX, so the pod's private
+dashboard socket does not exist there; `pod api` reaches the pod over its
+loopback TCP port with a minted token instead (`PodClient.api` in the conftest),
+which is why no socket-path budget applies to the Windows plane root.
+
+### What has actually run on hosted Windows
+
+Two different things run on `windows-latest`, and they must not be conflated:
+
+| Lane | Workflow / job | What runs | Cadence |
+|---|---|---|---|
+| Boot canary | `ci.yml` -> `pod-boot-windows` (`Pod Boot Canary (Windows)`) | `test/test_pod_windows_boot.py`, 3 tests, anchored `3 passed` grep | every PR and every push to `main` |
+| Full suite, opt-in | the same `pod-boot-windows` job, extra steps gated on `env.POD_SCENARIOS == 'true'` | the boot canary above PLUS `test/e2e/scenarios/`, 55 tests, anchored `55 passed` grep, against a real Vite-built SPA | only a `pull_request` carrying the `ci:pod-scenarios` label |
+| Full suite | `nightly.yml` -> `pod-scenarios` (`windows-latest` leg) | `test/e2e/scenarios/`, 55 tests, anchored `55 passed` grep | nightly |
+
+The default job is boot-only on purpose. It boots the pod against a ONE-FILE SPA
+stand-in (`pod up` refuses a checkout with no bundle, and Task Scheduler
+supervision is what the canary tests, not the Vite build), installs the control
+plane with `--group dev` only, builds the runtime-only payload `.venv`, and
+uploads `pod-boot.log` on failure. Running the 55-test suite on every PR was
+tried on this branch and reverted: it needs the frontend toolchain, a real
+`npm ci` + `npm run build`, `build` in the control plane and a second pod
+bring-up on every PR, which is a permanent cost on every contributor for a
+suite whose bodies contain no platform branch. The nightly leg carries that
+coverage; the label below is how a specific PR buys it for its own revision.
+
+#### Opting a PR in: the `ci:pod-scenarios` label
+
+The job evaluates one expression once, into a job-level env var:
+
+```yaml
+env:
+  POD_SCENARIOS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:pod-scenarios') }}
+```
+
+Every step the label pays for carries the identical `if: env.POD_SCENARIOS ==
+'true'`: `actions/setup-node` (the repo's pinned SHA, `.nvmrc` major, npm cache
+keyed on `website/package-lock.json`), `uv pip install --system build==1.3.0`
+(the wheel scenario runs `python -m build --wheel` with `sys.executable` and,
+under `KIROCREW_E2E_REQUIRE=1`, fails rather than skips without it), the real
+`npm ci` + `npm run build` staged into `src/kiro_crew/static/dist`, and the
+suite step itself. The one-file stand-in carries the negation, so a labelled run
+serves the built bundle to the boot canary too. The 3-test canary and its
+`3 passed` grep run on both paths, unconditionally. The suite step is the
+nightly leg's invocation (`-p no:cacheprovider -o addopts= -n0 --timeout=600`)
+plus `--basetemp "$RUNNER_TEMP/pod-scenarios-tmp"`, with
+`KIROCREW_E2E_SCENARIOS=1` and `KIROCREW_E2E_REQUIRE=1`; pytest's own exit code
+is read from `PIPESTATUS[0]` through the `tee`, the anchored `55 passed` grep is
+checked first, and that status is returned after it. On failure the
+`pod-boot-windows` artifact (7 days) carries `pod-boot.log`, `pod-scenarios.log`
+and the plane's `a/**` artifacts and `h/**/*.log` pod logs from under that
+basetemp; on a default run the scenario globs simply match nothing.
+
+Three facts about WHEN the label takes effect, all consequences of `ci.yml`
+listening only for `push` and `pull_request` (`opened`, `synchronize`,
+`reopened`) and deliberately not for `labeled` -- the same choice `ci-full-run`
+makes, because a `labeled` trigger re-runs the whole workflow on every bot label:
+
+- The label must be on the PR BEFORE the `opened` or `synchronize` event that
+  should run the suite. Apply it, then push (or open the PR).
+- Applying the label to an already-open PR triggers nothing by itself.
+- Re-running a completed run, in whole or failed-jobs-only, replays that run's
+  ORIGINAL event payload, including the label set as of that event. A re-run
+  after labelling is still boot-only; a new push is what picks the label up.
+
+`test/test_pod_scenario_matrix.py` pins both shapes: the unlabelled path
+contains no Node install, no SPA build, no `build==`, no scenario suite and
+still places the stand-in and pins `3 passed`; every step whose text names one of
+those carries exactly that one `if`; the gated suite step sets both env markers
+and pins `55 passed`. A conditional step that drifts onto a different condition
+fails there.
+
+#### The hosted evidence on record
+
+The nightly matrix entry rests on one completed hosted run, made while a
+temporary unconditional version of that step existed on this branch:
+[run 34744065942, job 103688668718](https://github.com/kirodotdev/KiroCrew/actions/runs/34744065942/job/103688668718)
+on `windows-latest`, at revision `c56028aa9`, against the real Vite-built SPA.
+Its raw log reports the boot canary at `3 passed` in 76.26s and the full
+scenario suite at `55 passed` in 204.76s, exit code 0. That is the evidence
+behind removing `windows-latest` from `test/test_pod_scenario_matrix.py`'s
+`PENDING_VALIDATION` table. It is evidence for THAT revision. A later revision
+that changes a scenario body or the pod code it drives gets its own hosted
+Windows evidence either from a labelled PR run or from the nightly; this
+document records a run only after it has completed, never in advance.
+
+A subsequent **label-gated PR run** also completed successfully:
+[run 34759199939, job 103728957225](https://github.com/kirodotdev/KiroCrew/actions/runs/34759199939/job/103728957225),
+at revision `c2f7e39b224c9ab1ddbd2ca970a5b78a947f220e`. The PR label was verified
+before the push. The parent review session checked the raw logs: boot canary
+`3 passed` in 72.84s at 06:18:13 PDT on 2026-09-13, full scenario suite
+`55 passed` in 214.45s at 06:21:49 PDT, and job SUCCESS at 06:22:00 PDT.
+This is completed evidence for the labelled path, not merely the historical
+unconditional step. It does not root-cause the earlier unavailable-handle
+refusal at `312eaca3`, and it does not validate later, unpushed stop repairs.
+The strict `55 passed` assertion remains unchanged.
+
+The fixture-level Windows contracts that do run on every PR live in the sharded
+unit tests (`test/test_pod_windows*.py`, `test/test_pod_scenario_windows_client.py`)
+and in the boot canary above.

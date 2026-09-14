@@ -5271,17 +5271,6 @@
     "viewPr": "Pull request"
   },
   "components": {
-    "pendingDecisionCard": {
-      "add_to_message_box": "Adicionar à caixa de mensagem",
-      "add_to_message_box_hint": "Coloca as opções escolhidas na caixa de mensagem sem enviar.",
-      "asked_ago": "perguntado {{time}}",
-      "dismiss": "Dispensar",
-      "dismiss_failed": "Não foi possível dispensar esta decisão. Tente novamente.",
-      "dismiss_hint": "Ocultar sem responder. A decisão continua no chat e o loop segue rodando.",
-      "submit": "Enviar",
-      "submit_n_answers": "Enviar {{count}} respostas",
-      "waiting_on_you": "Esperando por você"
-    },
     "voicePlaybackNotice": {
       "failed": "Não foi possível usar “{{speak}}”. Verifique as definições de texto para fala e tente novamente.",
       "blocked": "O navegador bloqueou a reprodução automática. Abra “{{moreActions}}” abaixo da resposta concluída e selecione “{{speak}}”.",
@@ -6856,6 +6845,10 @@
       "click_to_browse_shift_click_to_copy_path": "Clique para navegar / Shift+clique para copiar o caminho",
       "click_to_open_shift_click_to_copy_path": "Clique para abrir / Shift+clique para copiar o caminho",
       "copy_diagram_source": "Copiar o código-fonte do diagrama",
+      "copy_table_csv": "Copiar tabela como CSV",
+      "copy_table_markdown": "Copiar tabela como Markdown",
+      "format_csv": "Copiar CSV",
+      "format_markdown": "Copiar Markdown",
       "diagram_source": "Código-fonte do diagrama",
       "copy_failed": "Falha ao copiar",
       "mermaid_render_failed": "Não foi possível renderizar este diagrama. Exibindo o código-fonte.",
@@ -6963,12 +6956,12 @@
       "no_matches": "Nenhuma correspondência"
     },
     "modelEffortDropdown": {
+      "manage_in_settings": "Gerenciar nas configurações",
+      "manage_visible_models": "Gerenciar modelos visíveis",
       "default_for_agent": "Modelo padrão de <agent/>",
       "filter_models": "Filtrar modelos",
       "model_list": "Lista de modelos",
-      "models": "Modelos",
       "pin_model_unavailable": "<model/> não está sendo oferecido no momento",
-      "reasoning": "Raciocínio",
       "set_default_for_agent": "Definir <model/> como modelo padrão de <agent/>",
       "set_default_for_new_sessions": "Padrão global para novas sessões…",
       "type_to_filter": "Digite para filtrar…"
@@ -7097,6 +7090,12 @@
       "eyebrow": "Privacidade",
       "subtitle": "Os cinco campos anônimos que o {{productName}} envia e como desativá-los.",
       "title": "Privacidade"
+    },
+    "pierreEditorImpl": {
+      "highlighting_restarting_editing_available": "O realce está reiniciando. Você pode continuar editando.",
+      "highlighting_starting_editing_available": "O realce de sintaxe está iniciando. Você pode continuar editando.",
+      "highlighting_unavailable_content_readable_reload": "O realce de sintaxe ficará indisponível até você recarregar. O conteúdo continua legível.",
+      "highlighting_unavailable_reload": "O realce de sintaxe está indisponível. Salve ou copie seu rascunho e recarregue para restaurá-lo; você pode continuar editando."
     },
     "projectPicker": {
       "back": "Voltar",
@@ -7281,6 +7280,7 @@
       "effort": "Esforço",
       "effort_help": "O esforço de raciocínio define por quanto tempo o modelo pensa antes de responder. Valores maiores significam mais tempo raciocinando sobre problemas difíceis (mais lento, respostas melhores); valores menores são mais rápidos. Ao desativar a substituição por sessão, o esforço volta ao padrão definido em Configurações → Chat, ou à escolha do próprio modelo quando nenhum padrão está definido (apenas Fable/Opus/Sonnet).",
       "faster": "Mais rápido",
+      "configured_default_marker": "Padrão configurado",
       "reasoning_effort": "Esforço de raciocínio",
       "smarter": "Mais inteligente",
       "use_configured_default": "Usar o padrão configurado",
@@ -7411,6 +7411,10 @@
       "selected": "selecionado",
       "showing": "Exibindo",
       "you": "Você"
+    },
+    "multiSelect": {
+      "deselect_all": "Desmarcar tudo",
+      "select_all": "Selecionar tudo"
     },
     "searchableSelect": {
       "no_matches": "Nenhum resultado",
@@ -10287,7 +10291,6 @@
       "new_chat": "Novo chat",
       "new_chat_in_folder": "Novo chat na pasta",
       "new_chat_on_crew": "Novo chat em um Crew",
-      "pending_your_response": "Aguardando sua resposta",
       "runs_on_crew": "Executa em {{name}} — um Crew conectado, não nesta máquina",
       "new_chat_in_name": "Novo chat em {{name}}",
       "new_chat_session": "Nova sessão de chat",
@@ -10408,7 +10411,21 @@
       "board_update_failed": "Falha ao atualizar o quadro",
       "open_crew_members": "Membros da equipe",
       "open_crew_members_desc": "Abre a página Membros da equipe — cada membro é um agente permanente com o próprio tópico.",
-      "open_crew_members_gated_desc": "Abre primeiro as Configurações para ligar esta prévia — a página não está disponível até você fazer isso."
+      "open_crew_members_gated_desc": "Abre primeiro as Configurações para ligar esta prévia — a página não está disponível até você fazer isso.",
+      "remote_sessions_not_shown_in_board_view_one": "{{count}} sessão remota não é exibida na visualização de quadro — as colunas do quadro gerenciam apenas sessões locais.",
+      "remote_sessions_not_shown_in_board_view_many": "{{count}} sessões remotas não são exibidas na visualização de quadro — as colunas do quadro gerenciam apenas sessões locais.",
+      "remote_sessions_not_shown_in_board_view_other": "{{count}} sessões remotas não são exibidas na visualização de quadro — as colunas do quadro gerenciam apenas sessões locais.",
+      "sessions_from_instance_unavailable": "As sessões de {{names}} estão indisponíveis neste momento.",
+      "checking_remote_instances": "Verificando instâncias remotas…",
+      "adopt_failed": "Não foi possível abrir esta sessão aqui.",
+      "adopt_remote_bind_failed": "Não foi possível alcançar {{name}} para abrir esta sessão.",
+      "adopt_target_unknown": "Esta sessão não está mais aberta em {{name}}.",
+      "not_open_here_yet": "Em {{name}} — clique para abri-la aqui",
+      "on_instance": "Em {{name}}",
+      "opening_session_locally": "Abrindo esta sessão aqui…",
+      "opens_here_runs_on_instance": "Abre esta sessão aqui — a execução dela continua em {{name}}",
+      "opens_on_crew_switches_there": "Abre em {{name}} — muda para esse Crew, não aqui",
+      "remote_instances_list_unavailable": "Não foi possível listar as instâncias remotas, portanto as suas sessões não são exibidas."
     },
     "connectionsPage": {
       "action_failed": "Falha na ação: {{error}}",
@@ -10791,6 +10808,8 @@
         "inbound_webhook_tokens_registered_contexts_and_r": "Tokens de webhooks de entrada, contextos registrados e histórico de execuções. A API funciona; a página não está concluída.",
         "open_webhooks": "Abrir Webhooks",
         "webhooks": "Webhooks",
+        "remote_instance_sessions": "Sessões da instância remota",
+        "merge_a_connected_remote_instances_live_sessions": "Combina as sessões ativas de uma instância remota conectada na lista de sessões, cada uma com um selo de servidor. Funcional, mas não finalizado.",
         "intro": {
           "webhooks_summary": "Outro sistema (CI, um bot de revisão, uma pipeline de deploy) pode iniciar seu agente por você enviando uma mensagem com um token de acesso que você cria na página Webhooks.",
           "webhooks_where": "Quando isto estiver ligado, o link “Abrir Webhooks” aparece neste cartão em Configurações; é dali que a nova página Webhooks abre. Ela fica fora da barra lateral até estar pronta. Desligar só esconde a página de novo; os tokens que você criou são mantidos.",
@@ -13067,6 +13086,13 @@
         "default_auto": "Padrão (automático)",
         "default_defers_to_your_agent_config_and_then_to": "Agentes com um modelo configurado próprio ignoram esta configuração. 'Padrão' usa o modelo da configuração do agente ou o padrão do sistema quando nenhum estiver configurado. Alterar isso não afeta sessões que já estão abertas.",
         "default_model": "Modelo padrão",
+        "auto_always_visible": "Sempre visível nos seletores de modelo do chat",
+        "failed_to_save_selectable_models": "Não foi possível salvar os modelos selecionáveis",
+        "model_picker_all_models": "Todos os modelos ({{count}})",
+        "model_picker_selected_models": "Selecionados {{selected}} / {{total}}",
+        "search_models": "Pesquisar modelos…",
+        "selectable_models": "Modelos selecionáveis",
+        "selectable_models_description": "Escolha quais modelos anunciados aparecem nos seletores do chat. Auto e o modelo da sessão ativa permanecem sempre visíveis.",
         "default_normal_length": "Predefinido — comprimento normal",
         "default_reasoning_effort": "Esforço de raciocínio padrão",
         "default_to_autopilot_mode": "Usar modo Autopilot por padrão",

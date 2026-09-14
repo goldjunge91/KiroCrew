@@ -17,6 +17,7 @@ inject_on_trigger: false
 | `kirocrew setup --clean` | Fresh install — don't merge from existing config |
 | `kirocrew doctor` | Verify Kiro Crew setup (checks all dependencies) |
 | `kirocrew doctor --bundle` | Collect logs + crash reports into a redacted diagnostics zip |
+| `kirocrew ledger-sweep` | List finished session/work ledgers older than 30 days (dry run, deletes nothing) |
 | `kirocrew update` | Update Kiro Crew to the latest version |
 | `kirocrew update approve` | Approve a pending in-app update armed from the dashboard |
 | `kirocrew update --force` | Discard local commits when a git checkout has diverged from upstream (git installs only) |

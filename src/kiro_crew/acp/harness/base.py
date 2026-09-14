@@ -148,6 +148,22 @@ class SessionExtras:
 
     custom_agents: list[dict[str, Any]] | None = None
 
+    derived_spec_snapshot: Any = None
+    """The ``agent.DerivedSpecSnapshot`` the payload above was built from.
+
+    Carried out of the projection because THIS payload is where a wire-registered
+    host consumes the spec: ``session/new`` hands the definition over and a later
+    ``session/set_mode`` only ACTIVATES what is already registered, re-reading
+    nothing. So the check that proves the consumed spec did not change has to
+    compare against this snapshot -- one snapshot per consumed load. A fresh read
+    at activation would validate the file instead of the payload, and pass while
+    the registered definition still carried grants a revocation had removed.
+
+    Typed loosely so this module stays free of :mod:`kiro_crew.agent`, whose
+    import chain reaches the config loader. ``None`` when the host mirrors
+    nothing, or takes its agent at spawn time.
+    """
+
 
 # ── Seam 5: notification aliases ──
 
@@ -191,6 +207,21 @@ class TeardownPolicy:
 
     method: str
     """The JSON-RPC method that ends one session."""
+
+    notification: bool
+    """Whether that method is a NOTIFICATION rather than a request.
+
+    A verb the host answers and a verb it does not are not interchangeable, and the
+    difference is invisible in the method name -- which is why it is declared here
+    rather than inferred. Sending a notification as a request costs the caller the
+    whole teardown budget waiting for a reply that the host is correct never to send,
+    and it logs that wait as a control-plane timeout, so a routine eviction reads as
+    an unhealthy process.
+
+    No default, deliberately. A harness that inherited "request" would inherit the
+    stall silently, and this layer exists so a per-host fact is stated once by the
+    host that knows it.
+    """
 
 
 # ── Seam 9: reclaim ──

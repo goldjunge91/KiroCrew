@@ -30,7 +30,11 @@ from kiro_crew.config import live
 from kiro_crew.config.sections import _normalize_threshold_pair
 from kiro_crew.feishu.client import CHAT_GROUP
 from kiro_crew.feishu.renderer import FeishuRenderer
-from kiro_crew.feishu.transport import FEISHU_CAPABILITIES
+from kiro_crew.feishu.transport import (
+    FEISHU_CAPABILITIES,
+    SPOOL_DM_ROUTE_PREFIX,
+    SPOOL_GROUP_ROUTE_PREFIX,
+)
 from kiro_crew.history import mint_row_mid
 from kiro_crew.messaging.commands import compact_unsupported_backend
 from kiro_crew.messaging.conversation import (
@@ -39,11 +43,13 @@ from kiro_crew.messaging.conversation import (
 )
 from kiro_crew.messaging.dispatch import (
     ChannelTurn,
+    admit_inbound_callback,
     build_directive_consumer,
     drive_turn,
     inbound_permitted,
 )
 from kiro_crew.messaging.driver import APPROVAL_INTERACTIVE
+from kiro_crew.messaging.inbound_spool import InboundRoute
 from kiro_crew.messaging.link import (
     CHAT_TYPE_DIRECT,
     CHAT_TYPE_FORUM,
@@ -141,14 +147,31 @@ class FeishuDispatcher:
         """Drive one authorised inbound Feishu message through TurnDriver."""
         assert self.client is not None, "FeishuDispatcher.client must be set"
 
-        # Inbound channels-governance gate -- recheck per message so a host-
-        # profile deny stops dispatch without requiring a restart.
-        if not await inbound_permitted("feishu"):
-            return
-
         open_id = inbound.open_id
         text = inbound.text
         route = self._route(inbound)
+        inbound_route = InboundRoute(
+            conversation_id=inbound.message_id,
+            text=inbound.text,
+            user_id=open_id,
+            thread_id=(
+                f"{SPOOL_GROUP_ROUTE_PREFIX}{inbound.chat_id}"
+                if inbound.chat_type == CHAT_GROUP
+                else f"{SPOOL_DM_ROUTE_PREFIX}{open_id}"
+            ),
+            message_id=inbound.message_id,
+        )
+        if not await admit_inbound_callback(
+            self.sessions,
+            channel_type="feishu",
+            route=inbound_route,
+        ):
+            return
+
+        # Recheck governance only after this accepted callback is census-visible;
+        # otherwise the off-loop policy read opens an uncounted restart window.
+        if not await inbound_permitted("feishu"):
+            return
         logger.info("Feishu inbound from %s: %d chars", open_id, len(text or ""))
 
         # ── Command intercept (no LLM session needed) ──────────────────────
@@ -218,6 +241,7 @@ class FeishuDispatcher:
             ChannelTurn(
                 channel_type="feishu",
                 session_key=session_key,
+                inbound_route=inbound_route,
                 # Session-directive consumer: monitor_start /
                 # autonudge_stop / ... return a marker TurnDriver decodes;
                 # apply it against THIS turn's session key. Without it the

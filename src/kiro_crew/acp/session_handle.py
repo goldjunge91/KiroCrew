@@ -46,7 +46,6 @@ from kiro_crew.acp._dispatch import (
 )
 from kiro_crew.acp.client import (
     _COMPACTION_FAILED_TURN_BUDGET,
-    _JSONRPC_INVALID_PARAMS,
     DEFAULT_MODEL,
     AcpClient,
     AcpError,
@@ -55,9 +54,11 @@ from kiro_crew.acp.client import (
     AcpTimeoutError,
     AcpToolGateUnroutable,
     _effective_prompt_timeout_async,
+    _is_config_value_rejection,
     _is_safe_oauth_url,
     _is_tool_interrupted_marker,
     _jsonrpc_error_code,
+    _push_model_via_effort_split,
     _raise_acp_error,
     compaction_failure_detail,
     compaction_failure_is_transient,
@@ -86,7 +87,10 @@ from kiro_crew.acp.prompt_blocks import build_prompt_blocks, summarize_prompt_st
 from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
+    ACP_BACKENDS_ADVERTISED_MODEL_SELECTION,
+    ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS,
     ACP_BACKENDS_MODEL_VIA_CONFIG_OPTION,
+    ACP_BACKENDS_STEER,
     EVENT_AGENT_SWITCHED,
     EVENT_CLEAR_STATUS,
     EVENT_COMPACTION_STATUS,
@@ -124,6 +128,7 @@ from kiro_crew.acp.types import (
     AcpEvent,
     AcpPromptStats,
     JsonRpcMessage,
+    effort_config_option_id,
 )
 from kiro_crew.config.paths import kiro_sessions_dir
 from kiro_crew.constants import COMPACT_WAIT_TIMEOUT_SECS
@@ -417,6 +422,79 @@ def parse_advertised_models(resp: dict[str, Any]) -> list[dict[str, str]]:
     return []
 
 
+def models_from_config_options(resp: dict[str, Any], backend: str) -> dict[str, Any] | None:
+    """A ``models`` envelope synthesized from a ``model`` select, or ``None``.
+
+    Some hosts advertise no ``models`` object at all and put their model list in
+    ``configOptions`` instead, as a ``select`` whose ``options`` carry the ids
+    ``session/set_config_option`` accepts -- so a caller that reads only ``models``
+    records nothing and the picker it feeds is empty. Gated on membership in
+    ``ACP_BACKENDS_ADVERTISED_MODEL_SELECTION`` (harness-parity H6): the fold is
+    only meaningful where the advertised list IS the vocabulary, and a host outside
+    that set keeps whatever the static registry gave it.
+
+    Authored once because both drivers need the same answer -- ``AcpClient`` on the
+    per-session path and ``AcpSessionHandle`` on the shared-runtime one -- and a
+    second copy is free to disagree about the select's shape.
+    """
+    if backend not in ACP_BACKENDS_ADVERTISED_MODEL_SELECTION:
+        return None
+    for opt in resp.get("configOptions") or []:
+        if not isinstance(opt, dict) or opt.get("id") != "model" or opt.get("type") != "select":
+            continue
+        options = [o for o in opt.get("options") or [] if isinstance(o, dict) and o.get("value")]
+        if not options:
+            return None
+        envelope: dict[str, Any] = {
+            "availableModels": [
+                {
+                    "modelId": o["value"],
+                    "name": o.get("name") or o["value"],
+                    "description": o.get("description") or "",
+                }
+                for o in options
+            ]
+        }
+        current = opt.get("currentValue")
+        if isinstance(current, str) and current:
+            envelope["currentModelId"] = current
+        return envelope
+    return None
+
+
+def session_models_envelope(resp: dict[str, Any], backend: str) -> Any:
+    """The ``models`` payload of a session response, with the select folded in.
+
+    One home for "where does this host's model list live", so a reader cannot know
+    about the ``models`` object and not about the ``configOptions`` select. Returns
+    whatever shape the response carried when it carried one, the synthesized
+    envelope when it did not and the host advertises a ``model`` select, and the
+    original absent value when neither applies -- so a caller's own shape branches
+    stay exactly as they were.
+    """
+    models = resp.get("models") or resp.get("availableModels")
+    if models is None or models == {} or models == []:
+        models = models_from_config_options(resp, backend) or models
+    return models
+
+
+def advertised_models_from_session(resp: dict[str, Any], backend: str) -> list[dict[str, str]]:
+    """The normalized advertised-model list for a session response, either shape.
+
+    What a caller wants when it needs the LIST and not the envelope -- the
+    entitlement probe, which re-asks the question on a throwaway session. Reading
+    ``parse_advertised_models`` alone answers ``[]`` for a host whose list is a
+    ``configOptions`` select, and an empty probe result is contractually "no
+    evidence", so the snapshot it exists to correct would never heal.
+    """
+    env = session_models_envelope(resp, backend)
+    if isinstance(env, dict):
+        return parse_advertised_models({"models": env})
+    if isinstance(env, list):
+        return parse_advertised_models({"availableModels": env})
+    return []
+
+
 class AcpRuntimeError(Exception):
     """Base error for AcpRuntime operations."""
 
@@ -564,6 +642,13 @@ class AcpSessionHandle:
         # When True, destroy() skips the transcript unlink (subagent
         # continuability: the transcript is spawn_continue's resume material).
         self.keep_transcript = False
+        # Token carried by THIS session's injected broker-stub entries
+        # (``mcp_gateway.claim.mint_stub_session_token``), set by the runtime
+        # that created the session. It is what a later claim-push names so
+        # gatewayd re-targets this session's stub connections and not every
+        # session's on the shared runtime. Empty when the gateway injected no
+        # stubs. Never logged: it is a bearer name for this session's identity.
+        self.stub_session_token: str = ""
         # Watchdog windows are snapshotted here (construction time) so the
         # dispatch loop never reads config; the liveness oracle carries the
         # per-session evidence state (tracked child, counter samples).
@@ -1529,11 +1614,7 @@ class AcpSessionHandle:
                         MODEL_CONFIG_ID,
                     )
                     return ""
-                value_rejected = (
-                    f"config option {MODEL_CONFIG_ID}" in lowered
-                    or getattr(exc, "code", None) == _JSONRPC_INVALID_PARAMS
-                )
-                if not value_rejected:
+                if not _is_config_value_rejection(exc, MODEL_CONFIG_ID):
                     raise
                 last_exc = exc
                 continue
@@ -1544,6 +1625,14 @@ class AcpSessionHandle:
                     cand,
                 )
             return cand
+        # Every spelling refused as one value. A ``<model>[<effort>]`` pair --
+        # the shape codex-acp advertises but its ``model`` option does not take --
+        # is applied as its two halves instead (shared seam with AcpClient).
+        split_applied = await _push_model_via_effort_split(
+            self, self._runtime.acp_backend, model_id
+        )
+        if split_applied:
+            return split_applied
         # Redacted through the platform context before the id reaches a log or an
         # exception message: it is caller-supplied text on a path that ends up in
         # front of a user, and this process can compose a companion redactor -- so
@@ -1551,14 +1640,27 @@ class AcpSessionHandle:
         # this file already makes for the unserved-default warning, which is the
         # same shape of value going to the same kind of place.
         _rejected_log = redact_log_via_context(str(model_id))
+        advertised_ids = self._advertised_model_ids()
         if strict:
-            raise AcpModelUnavailable(_rejected_log, self._advertised_model_ids()) from last_exc
+            raise AcpModelUnavailable(
+                _rejected_log,
+                advertised_ids,
+                # Only a pair-id harness earns the adapter-mismatch wording: on
+                # those the advertised list IS the entitlement, so refusing
+                # something on it is the adapter contradicting itself. Elsewhere an
+                # advertised id may simply be out of the account's reach, and the
+                # entitlement wording plus the `whoami` hint is the true answer.
+                advertised_but_refused=(
+                    model_id in advertised_ids
+                    and self._runtime.acp_backend in ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS
+                ),
+            ) from last_exc
         logger.warning(
             "ACP model %s rejected by the adapter; staying on the backend default %s "
             "(advertised: %s)",
             _rejected_log,
             self._resolved_model_id or DEFAULT_MODEL,
-            ", ".join(self._advertised_model_ids()) or "none",
+            ", ".join(advertised_ids) or "none",
         )
         return ""
 
@@ -1607,8 +1709,17 @@ class AcpSessionHandle:
 
     @property
     def supports_steer(self) -> bool:
-        """True — AcpRuntime is kiro-cli only, which supports _session/steer."""
-        return True
+        """True when this session's host implements ``_session/steer``.
+
+        Membership in ``ACP_BACKENDS_STEER`` (harness-parity H6), read from the
+        runtime's own backend id -- the same answer, from the same table, that
+        ``AcpClient.supports_steer`` gives. A capability is granted by opt-in
+        membership, so a host the runtime learns to drive does not inherit an
+        extension it never demonstrated: answering True for one would advertise
+        the steer affordance and then meet the user's mid-turn correction with
+        ``-32601``.
+        """
+        return self._runtime.acp_backend in ACP_BACKENDS_STEER
 
     # ── Commands & Config ──
 
@@ -1982,11 +2093,18 @@ class AcpSessionHandle:
         )
 
     def get_valid_effort_levels(self) -> list[str]:
-        """Return valid effort levels from config options, preserving order."""
+        """Return valid effort levels from config options, preserving order.
+
+        The option id is resolved per backend (``effort`` for most,
+        ``reasoning_effort`` for codex-acp): a hard-coded spelling returns an
+        empty list on a backend that spells it differently, which every caller
+        reads as "this model has no effort levels".
+        """
+        effort_option = effort_config_option_id(self._runtime.acp_backend)
         for opt in self._config_options:
             if not isinstance(opt, dict):
                 continue
-            if opt.get("id") == "effort":
+            if opt.get("id") == effort_option:
                 options = opt.get("options", [])
                 if isinstance(options, list):
                     return [
@@ -2028,7 +2146,14 @@ class AcpSessionHandle:
         if isinstance(config_options, list):
             self._config_options = config_options
             self._sync_effort_levels()
-        models = resp.get("models") or resp.get("availableModels")
+        # Where this host's model list lives is asked in ONE place
+        # (``session_models_envelope``): a host in
+        # ``ACP_BACKENDS_ADVERTISED_MODEL_SELECTION`` advertises no ``models`` object
+        # and puts the list in a ``configOptions`` ``model`` select, and a reader that
+        # knows about one shape and not the other is how the entitlement probe came to
+        # answer ``[]`` for codex while this path answered correctly. Absent stays
+        # absent, so the shape branches below are untaken exactly as before.
+        models = session_models_envelope(resp, self._runtime.acp_backend)
         if isinstance(models, dict):
             # Record the resolved model id (kiro-cli's currentModelId) so
             # _backfill_context_window can look up the window on pct-only

@@ -642,6 +642,14 @@
       "description": "Time window for session restoration"
     },
     {
+      "id": "chat.selectable-models",
+      "label": "Selectable Models",
+      "tab": "chat",
+      "route": "/settings/chat?highlight=key%3Adashboard.model_picker_hidden_models",
+      "description": "Choose which advertised models appear in Chat model pickers. Auto and an active session model always remain visible.",
+      "configKey": "dashboard.model_picker_hidden_models"
+    },
+    {
       "id": "chat.send-shortcut",
       "label": "Send shortcut",
       "tab": "chat",
@@ -823,6 +831,13 @@
       "tab": "developer",
       "route": "/settings/developer?highlight=developer.developer-mode",
       "description": "Show Developer page in sidebar with Logs, System metrics, and Memory internals"
+    },
+    {
+      "id": "developer.remote-instance-sessions",
+      "label": "Remote instance sessions",
+      "tab": "developer",
+      "route": "/settings/developer?highlight=developer.remote-instance-sessions",
+      "description": "Merge a connected remote instance's live sessions into the Sessions list, each marked with a server badge. Functional, but not finished."
     },
     {
       "id": "developer.run-a-local-gateway",

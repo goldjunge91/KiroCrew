@@ -46,6 +46,7 @@ from kiro_crew.acp.runtime import (
 )
 from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
+    ACP_BACKEND_KIRO,
     EVENT_COMPLETE,
     EVENT_PERMISSION_REQUEST,
     EVENT_SUBAGENT_ACTIVITY,
@@ -4419,7 +4420,9 @@ class TestAcpRuntimeLoadSession:
             return {}
 
         async def _fake_agents(agent, *, member_dispatch=False):
-            return [{"id": agent, "prompt": "p", "tools": []}]
+            from kiro_crew.acp.harness import SessionExtras
+
+            return SessionExtras(custom_agents=[{"id": agent, "prompt": "p", "tools": []}])
 
         monkeypatch.setattr(rt, "_send_and_await", _fake_send)
         monkeypatch.setattr(rt, "_kas_custom_agents", _fake_agents)
@@ -4461,7 +4464,9 @@ class TestAcpRuntimeLoadSession:
             return {}
 
         async def _fake_agents(agent, *, member_dispatch=False):
-            return [{"id": agent, "prompt": "p", "tools": []}]
+            from kiro_crew.acp.harness import SessionExtras
+
+            return SessionExtras(custom_agents=[{"id": agent, "prompt": "p", "tools": []}])
 
         monkeypatch.setattr(rt, "_send_and_await", _fake_send)
         monkeypatch.setattr(rt, "_kas_custom_agents", _fake_agents)
@@ -4494,8 +4499,10 @@ class TestAcpRuntimeLoadSession:
             return {}
 
         async def _fake_agents(agent, *, member_dispatch=False):
+            from kiro_crew.acp.harness import SessionExtras
+
             calls.append(agent)
-            return [{"id": agent, "prompt": "p", "tools": []}]
+            return SessionExtras(custom_agents=[{"id": agent, "prompt": "p", "tools": []}])
 
         monkeypatch.setattr(rt, "_send_and_await", _fake_send)
         monkeypatch.setattr(rt, "_kas_custom_agents", _fake_agents)
@@ -5733,6 +5740,9 @@ async def test_handle_steer_sends_session_steer():
 
     rt = MagicMock()
     rt.send_request = _send_request
+    # A real backend id, not a MagicMock attribute: supports_steer is membership
+    # in ACP_BACKENDS_STEER, so the host has to be named for it to answer.
+    rt.acp_backend = ACP_BACKEND_KIRO
     handle = AcpSessionHandle("sA", asyncio.Queue(), rt)
     assert handle.supports_steer is True
     assert handle.last_steer_monotonic == 0.0  # never steered

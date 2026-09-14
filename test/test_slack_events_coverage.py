@@ -199,6 +199,27 @@ class TestSpawnTracked:
         await asyncio.sleep(0)
         assert task not in ev._bg_tasks
 
+    @pytest.mark.asyncio
+    async def test_owner_registry_retains_detached_work_until_completion(self):
+        orch = _make_orch()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _work() -> None:
+            started.set()
+            await release.wait()
+
+        task = ev._spawn_tracked(_work(), owner=orch)
+        await started.wait()
+        assert task in ev._bg_tasks
+        assert task in orch._handler_tasks
+
+        release.set()
+        await task
+        await asyncio.sleep(0)
+        assert task not in ev._bg_tasks
+        assert task not in orch._handler_tasks
+
 
 class TestBuildHelpText:
     def test_lists_registered_subcommands_and_channel_hint(self):
@@ -826,6 +847,21 @@ class TestOnEventDispatch:
             await on_event(_client(), _req("interactive", {"action": "x"}))
             await _drain(orch)
         dispatch.assert_awaited_once_with({"action": "x"})
+
+    @pytest.mark.asyncio
+    async def test_update_pause_refuses_before_interaction_ack(self):
+        orch = _socket_orch()
+        orch.sessions.reserve_inbound_callback = lambda: None
+        on_event = await _install_on_event(orch, ev.SeenCache())
+        client = _client()
+        with patch(
+            "kiro_crew.slack.events.dispatch_interactive", new_callable=AsyncMock
+        ) as dispatch:
+            await on_event(client, _req("interactive", {"action": "x"}))
+            await _drain(orch)
+
+        client.send_socket_mode_response.assert_not_awaited()
+        dispatch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_slash_command_is_dispatched(self):

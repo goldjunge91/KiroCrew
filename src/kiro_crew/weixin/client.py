@@ -288,6 +288,7 @@ class WeixinClient:
         self.base_url = base_url.rstrip("/")
         self.account_id = account_id
         self._session: Any = None  # aiohttp.ClientSession, created in connect()
+        self._handler_tasks: set[asyncio.Task[Any]] = set()
 
     async def connect(self) -> None:
         if self._session is None or self._session.closed:

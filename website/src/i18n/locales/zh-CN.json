@@ -5093,17 +5093,6 @@
     "viewPr": "拉取请求"
   },
   "components": {
-    "pendingDecisionCard": {
-      "add_to_message_box": "添加到消息框",
-      "add_to_message_box_hint": "把选中的选项放入消息框，但不发送。",
-      "asked_ago": "{{time}}提问",
-      "dismiss": "忽略",
-      "dismiss_failed": "无法忽略此决定。请重试。",
-      "dismiss_hint": "不作答直接隐藏。该决定仍留在聊天中，循环继续运行。",
-      "submit": "提交",
-      "submit_n_answers": "提交 {{count}} 个回答",
-      "waiting_on_you": "等待你决定"
-    },
     "voicePlaybackNotice": {
       "failed": "{{speak}}失败。请检查文字转语音设置后重试。",
       "blocked": "浏览器阻止了自动播放。回复完成后，打开回复下方的“{{moreActions}}”，然后选择“{{speak}}”。",
@@ -6652,6 +6641,10 @@
       "click_to_browse_shift_click_to_copy_path": "点击浏览 / Shift+点击复制路径",
       "click_to_open_shift_click_to_copy_path": "点击打开 / Shift+点击复制路径",
       "copy_diagram_source": "复制图表源代码",
+      "copy_table_csv": "以 CSV 格式复制表格",
+      "copy_table_markdown": "以 Markdown 格式复制表格",
+      "format_csv": "复制 CSV",
+      "format_markdown": "复制 Markdown",
       "diagram_source": "图表源代码",
       "copy_failed": "复制失败",
       "mermaid_render_failed": "无法渲染此图表。改为显示源代码。",
@@ -6759,12 +6752,12 @@
       "no_matches": "无匹配项"
     },
     "modelEffortDropdown": {
+      "manage_in_settings": "设置中管理",
+      "manage_visible_models": "管理显示的模型",
       "default_for_agent": "<agent/> 的默认模型",
       "filter_models": "筛选模型",
       "model_list": "模型列表",
-      "models": "模型",
       "pin_model_unavailable": "<model/> 目前未提供",
-      "reasoning": "推理",
       "set_default_for_agent": "将 <model/> 设为 <agent/> 的默认模型",
       "set_default_for_new_sessions": "新会话的全局默认…",
       "type_to_filter": "输入以筛选…"
@@ -6889,6 +6882,12 @@
       "eyebrow": "隐私",
       "subtitle": "{{productName}} 发送的五个匿名字段，以及如何关闭。",
       "title": "隐私"
+    },
+    "pierreEditorImpl": {
+      "highlighting_restarting_editing_available": "正在重新启动高亮显示。仍可继续编辑。",
+      "highlighting_starting_editing_available": "正在启动语法高亮。仍可继续编辑。",
+      "highlighting_unavailable_content_readable_reload": "重新加载前语法高亮不可用。内容仍可阅读。",
+      "highlighting_unavailable_reload": "语法高亮不可用。请保存或复制草稿，然后重新加载以恢复语法高亮；仍可继续编辑。"
     },
     "projectPicker": {
       "back": "返回",
@@ -7061,6 +7060,7 @@
       "effort": "强度",
       "effort_help": "推理强度决定模型在回答前思考多久。强度越高，用于思考难题的时间越长（更慢，但答案更好）；越低则越快。关闭会话级覆盖后，会回退到“设置 → 聊天”中的默认值，或在未设置默认值时交由模型自行决定（仅 Fable/Opus/Sonnet）。",
       "faster": "更快",
+      "configured_default_marker": "已配置默认值",
       "reasoning_effort": "推理强度",
       "smarter": "更聪明",
       "use_configured_default": "使用已配置的默认值",
@@ -7191,6 +7191,10 @@
       "selected": "已选中",
       "showing": "正在显示",
       "you": "你"
+    },
+    "multiSelect": {
+      "deselect_all": "取消全选",
+      "select_all": "全选"
     },
     "searchableSelect": {
       "no_matches": "无匹配项",
@@ -9993,7 +9997,6 @@
       "new_chat": "新建对话",
       "new_chat_in_folder": "在文件夹中新建聊天",
       "new_chat_on_crew": "在 Crew 上新建聊天",
-      "pending_your_response": "等待你的回复",
       "runs_on_crew": "在 {{name}} 上运行 —— 一个已连接的 Crew，而非本机",
       "new_chat_in_name": "在 {{name}} 中新建聊天",
       "new_chat_session": "新建聊天会话",
@@ -10100,7 +10103,19 @@
       "board_update_failed": "看板更新失败",
       "open_crew_members": "团队成员",
       "open_crew_members_desc": "打开团队成员页面——每个成员都是一个常驻代理，各有自己的话题。",
-      "open_crew_members_gated_desc": "会先打开设置以开启此预览——开启之前该页面不可用。"
+      "open_crew_members_gated_desc": "会先打开设置以开启此预览——开启之前该页面不可用。",
+      "remote_sessions_not_shown_in_board_view_other": "看板列仅管理本地会话，因此 {{count}} 个远程会话不会显示在看板视图中。",
+      "sessions_from_instance_unavailable": "{{names}} 的会话当前不可用。",
+      "checking_remote_instances": "正在检查远程实例…",
+      "adopt_failed": "无法在此处打开该会话。",
+      "adopt_remote_bind_failed": "无法连接 {{name}}，因此无法打开该会话。",
+      "adopt_target_unknown": "该会话在 {{name}} 上已不再打开。",
+      "not_open_here_yet": "在 {{name}} 上 —— 点击可在此处打开",
+      "on_instance": "在 {{name}} 上",
+      "opening_session_locally": "正在此处打开该会话…",
+      "opens_here_runs_on_instance": "在此处打开该会话——它的执行仍在 {{name}} 上进行",
+      "opens_on_crew_switches_there": "在 {{name}} 上打开 —— 切换到该 Crew，而不是在此处",
+      "remote_instances_list_unavailable": "无法列出远程实例，因此不显示其会话。"
     },
     "connectionsPage": {
       "action_failed": "操作失败：{{error}}",
@@ -10481,6 +10496,8 @@
         "inbound_webhook_tokens_registered_contexts_and_r": "入站 Webhook 令牌、已注册的上下文和运行历史。API 可用，但页面尚未完成。",
         "open_webhooks": "打开 Webhook",
         "webhooks": "Webhook",
+        "remote_instance_sessions": "远程实例会话",
+        "merge_a_connected_remote_instances_live_sessions": "将已连接远程实例的实时会话合并到会话列表中，每个会话都带有服务器标记。功能可用，但尚未完成。",
         "intro": {
           "webhooks_summary": "让另一个系统替你启动代理——CI、评审机器人、部署流水线——只需用你在 Webhooks 页面创建的访问令牌发送一条消息。",
           "webhooks_where": "开启后，这张卡片在“设置”里会出现“打开 Webhooks”链接，新的 Webhooks 页面从那里进入；页面完成之前不会出现在侧边栏里。关闭后只是重新隐藏这个页面；你创建的 token 会保留。",
@@ -12711,6 +12728,13 @@
         "default_auto": "默认（自动）",
         "default_defers_to_your_agent_config_and_then_to": "配置了自己模型的代理会忽略此设置。“默认”使用代理配置中的模型；若未配置，则使用系统默认模型。更改此设置不会影响已打开的会话。",
         "default_model": "默认模型",
+        "auto_always_visible": "在聊天模型选择器中始终显示",
+        "failed_to_save_selectable_models": "保存可选模型失败",
+        "model_picker_all_models": "全部模型（{{count}}）",
+        "model_picker_selected_models": "已选择 {{selected}} / {{total}}",
+        "search_models": "搜索模型…",
+        "selectable_models": "可选模型",
+        "selectable_models_description": "选择哪些已提供的模型显示在聊天模型选择器中。Auto 和当前会话正在使用的模型始终保留显示。",
         "default_normal_length": "默认 — 正常长度",
         "default_reasoning_effort": "默认推理强度",
         "default_to_autopilot_mode": "默认使用自动驾驶模式",

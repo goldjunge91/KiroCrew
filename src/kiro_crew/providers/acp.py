@@ -15,6 +15,7 @@ from kiro_crew.acp.client import (
     AcpAuthRequired,
     AcpClient,
     AcpError,
+    _is_config_value_rejection,
     advertised_model_ids,
     model_is_unusable,
     resolve_pin_spelling,
@@ -27,9 +28,9 @@ from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
     ACP_BACKEND_OPENCODE,
-    ACP_BACKENDS_ACP_RUNTIME,
     ACP_BACKENDS_COMPACT,
     ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION,
+    ACP_BACKENDS_HARNESS_OWNED_SESSIONS,
     ACP_BACKENDS_KIRO_SLASH_COMMANDS,
     ACP_BACKENDS_KNOWN,
     ACP_BACKENDS_SESSION_SHARING,
@@ -41,6 +42,8 @@ from kiro_crew.acp.types import (
     PROVIDER_LABEL_OPENCODE,
     STOP_REASON_CANCELLED,
     STOP_REASON_END_TURN,
+    acp_runtime_backends,
+    effort_config_option_id,
 )
 from kiro_crew.acp_backends import POLICY_ID_BY_BACKEND
 from kiro_crew.agent_sdk import host_auth
@@ -362,6 +365,11 @@ class AcpProvider(LLMProvider):
         # conversation_log into the fresh session on the first prompt so the slot
         # is not context-free.
         self._history_replay_needed: bool = False
+        # Only the direct-dashboard Tool Search compatibility path owns the
+        # dashboard runner's durable replay settlement contract. Generic
+        # session/load recovery (including channel dispatchers) still requests
+        # history replay but must publish its fresh SID immediately.
+        self._defer_replay_sid_promotion: bool = False
         # Terminal compaction status captured by compact() while draining its
         # prompt turn; consumed by wait_for_compaction() (see compact()).
         self._compact_result: dict | None = None
@@ -521,6 +529,11 @@ class AcpProvider(LLMProvider):
         return self._client.backend == ACP_BACKEND_KAS
 
     @property
+    def defer_replay_sid_promotion(self) -> bool:
+        """Whether this fresh session waits for replay settlement before SID publish."""
+        return self._defer_replay_sid_promotion
+
+    @property
     def is_kiro_backend(self) -> bool:
         """True when this ACP provider talks to kiro-cli.
 
@@ -540,8 +553,16 @@ class AcpProvider(LLMProvider):
         spelled ``not is_claude_backend`` — which would hand the kiro-family
         path to every harness added later. The claude AcpClient is deliberately
         not a member: it runs one process per session and shares no runtime.
+
+        Reads ``acp_runtime_backends()`` rather than the set directly, so the
+        codex preview switch (``KIROCREW_CODEX_ACP_RUNTIME``, off by default) has
+        one home instead of one per foreground call site. With the switch off the
+        function returns ``ACP_BACKENDS_ACP_RUNTIME`` verbatim and this property
+        answers exactly the frozenset. This is the switch's ONLY reader in ``src``:
+        ``session._bg_runtime_backends`` reads the set, so background handles stay
+        off a codex runtime even with the switch on.
         """
-        return self._client.backend in ACP_BACKENDS_ACP_RUNTIME
+        return self._client.backend in acp_runtime_backends()
 
     @property
     def is_session_sharing_eligible(self) -> bool:
@@ -705,6 +726,28 @@ class AcpProvider(LLMProvider):
         except Exception:  # never let telemetry break session startup
             logger.debug("kiro startup metric emit failed", exc_info=True)
 
+    def _owning_session_key(self) -> str:
+        """The Kiro Crew session key this provider serves, or ``""``.
+
+        Handed to the runtime's session-creation paths so the session's broker
+        stubs carry a token bound to THIS session (see
+        ``AcpRuntime._own_stub_session``). Read off the placeholder client the
+        same way :meth:`_member_session_key` does; empty for a pooled worker
+        spawned before any session claimed it, whose ``rekey()`` names it later.
+        """
+        skey = getattr(self._client, "_session_key", None)
+        return skey if isinstance(skey, str) else ""
+
+    def _owning_channel_id(self) -> str | None:
+        """The channel this provider's session belongs to, or ``None``.
+
+        Carried on the claim frame beside the session key so a channel-driven
+        session's forwarded calls keep naming their channel. Read off the
+        placeholder client like :meth:`_owning_session_key`.
+        """
+        channel = getattr(self._client, "_channel_id", None)
+        return channel if isinstance(channel, str) and channel else None
+
     def _member_session_key(self) -> str:
         """This session's key when it is a member DM on a dispatch-capable backend.
 
@@ -734,6 +777,7 @@ class AcpProvider(LLMProvider):
         work_dir: str | Path | None,
         agent: str | None,
         member_session_key: str = "",
+        session_key: str = "",
     ) -> AcpSessionHandle | None:
         """Resume via session/load, retrying past a stale native session lock.
 
@@ -759,6 +803,7 @@ class AcpProvider(LLMProvider):
                     cwd=work_dir,
                     agent=agent or None,
                     member_session_key=member_session_key,
+                    session_key=session_key,
                 )
                 if attempt:
                     logger.info(
@@ -829,8 +874,34 @@ class AcpProvider(LLMProvider):
         if self._private_memory:
             mcp_gateway_socket = getattr(self._client, "_private_mcp_gateway_socket", "")
 
-        # Check for session resume
+        # Check for session resume. A direct dashboard turn (dashboard session
+        # key with no channel identity) can restore the transcript without
+        # restoring Tool Search's activated schemas: the loader still runs, but
+        # a tool it reports as loaded remains absent on the next inference. A
+        # fresh native session rebuilds that registry, while
+        # ``_history_replay_needed`` preserves the Kiro Crew conversation. Linked
+        # Slack and other channel dispatchers keep native resume until they own
+        # the same replay-lease contract end to end.
         resume_sid = getattr(self._client, "_resume_session_id", "")
+        session_key = getattr(self._client, "_session_key", None)
+        channel_id = getattr(self._client, "_channel_id", None)
+        if (
+            resume_sid
+            and self._tool_search is True
+            and self._client.backend == ACP_BACKEND_KIRO
+            and not channel_id
+            and telemetry_channel_of(session_key if isinstance(session_key, str) else None)
+            == "dashboard"
+        ):
+            logger.info(
+                "Tool Search is enabled; replacing native session/load for %s "
+                "with a fresh session and conversation replay",
+                resume_sid,
+            )
+            self._history_replay_needed = True
+            self._defer_replay_sid_promotion = True
+            meta["resume_outcome"] = "tool_search_replay"
+            resume_sid = ""
 
         # Preserve the configured model so we can re-apply it once the session
         # is live. AcpClient sends session/set_model in its handshake; the runtime
@@ -892,11 +963,24 @@ class AcpProvider(LLMProvider):
             handle = None
             resumed = False
             if resume_sid:
-                if self.is_kas_backend:
-                    # KAS locates the transcript itself from sessionId, and in
-                    # remote-session mode there are no local files to stat at
-                    # all. Attempt the load and let failure fall through to a
-                    # fresh session/new with history replay.
+                if self.is_kas_backend or self._client.backend in (
+                    ACP_BACKENDS_HARNESS_OWNED_SESSIONS
+                ):
+                    # Nothing local to stat. KAS locates the transcript itself
+                    # from sessionId, and in remote-session mode there are no
+                    # local files at all; a member of
+                    # ``ACP_BACKENDS_HARNESS_OWNED_SESSIONS`` keeps its own
+                    # session records and resolves a resume from the id alone.
+                    # Attempt the load and let failure fall through to a fresh
+                    # session/new with history replay.
+                    #
+                    # Pre-checking the kiro transcript for those hosts makes
+                    # ``should_load`` permanently False — the file is never
+                    # written for them — so every reopen would silently start a
+                    # fresh session and drop the conversation. ``AcpClient``
+                    # reads the same set for the same reason (client.py's
+                    # ``file_ok`` branch). KAS is named separately because it is
+                    # NOT a member: adding it would change that client path too.
                     session_file = None
                     should_load = True
                 else:
@@ -919,6 +1003,7 @@ class AcpProvider(LLMProvider):
                             work_dir,
                             agent,
                             member_session_key=self._member_session_key(),
+                            session_key=self._owning_session_key(),
                         )
                     finally:
                         phases["session_load"] = (time.monotonic() - _t_load) * 1000.0
@@ -976,6 +1061,7 @@ class AcpProvider(LLMProvider):
                         cwd=work_dir,
                         agent=agent or None,
                         member_session_key=self._member_session_key(),
+                        session_key=self._owning_session_key(),
                     )
                 except AcpRuntimeError as exc:
                     if runtime.saw_not_logged_in():
@@ -1037,7 +1123,16 @@ class AcpProvider(LLMProvider):
                         phases["set_model"] = (time.monotonic() - _t_model) * 1000.0
 
             # Replace the placeholder AcpClient with the real AcpSessionProvider
-            provider = AcpSessionProvider(handle, runtime, owns_runtime=True)
+            provider = AcpSessionProvider(
+                handle,
+                runtime,
+                owns_runtime=True,
+                # This path is the COLD start, which never rekeys — so the
+                # correlation keys have to arrive here or the per-turn re-claim
+                # pushes a keyless claim gatewayd throws away.
+                session_key=self._owning_session_key(),
+                channel_id=self._owning_channel_id(),
+            )
             if resumed:
                 provider.resumed = True
             # Re-apply the consumer's fidelity opt-in: it was set on THIS
@@ -1104,7 +1199,18 @@ class AcpProvider(LLMProvider):
         return model_supports_effort(self._client._model)
 
     def _resolve_effort(self) -> str | None:
-        """Resolve effort for the current model via the shared priority chain."""
+        """Resolve effort for the current model via the shared priority chain.
+
+        Both the slot overrides and the workspace defaults key on the model id as
+        RECORDED, which on an ``ACP_BACKENDS_MODEL_EFFORT_PAIR_IDS`` harness is the
+        advertised suffixed spelling (``openai.gpt-6-astra[max]``). So a default
+        stored under the bare ``openai.gpt-6-astra`` does not answer for a session
+        that picked the ``[max]`` row, and the row's own effort stands. That is the
+        intended precedence -- an explicit pick of one advertised row is more
+        specific than a per-model default -- and not an aliasing gap to close.
+        ``change_effort`` writes the override under the same recorded spelling
+        this reads, so the override path matches by construction.
+        """
         return resolve_effort_for_model(
             self._client._model,
             slot_overrides=self._effort_per_model,
@@ -1179,6 +1285,14 @@ class AcpProvider(LLMProvider):
         ``ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION`` arrives here, and the
         adapter-behaviour notes below are what that channel does in practice.
 
+        WHICH option id carries the effort is resolved per backend through
+        ``effort_config_option_id``: claude-agent-acp spells it ``effort`` and
+        codex-acp spells it ``reasoning_effort``. Naming one spelling here writes
+        an id the other adapter does not know, which comes back as "unknown
+        config option" -- and the branch below reads that as "no effort selector"
+        and skips, so the session keeps whatever effort it already had while the
+        dashboard reports the level the user picked.
+
         claude-agent-acp validates the value against the *current model's*
         ``supportedEffortLevels`` and throws ``Invalid value for config option
         effort: <level>`` (surfaced as an ``AcpError``) for anything the model
@@ -1187,29 +1301,33 @@ class AcpProvider(LLMProvider):
         dashboard reset the whole session and silently drop to the adapter
         default), fall back down the effort ladder so the model still lands at
         the highest level it actually supports. Only the value-rejection error
-        is retried; any other failure (transport, timeout) propagates.
+        is retried; any other failure (transport, timeout) propagates. codex-acp
+        refuses a value with a bare ``-32602`` and no message instead of naming
+        the option, so the shared ``_is_config_value_rejection`` reader answers
+        for both shapes.
 
-        Older claude-agent-acp builds expose no ``effort`` config option at all
-        and reject the push with ``Unknown config option: effort`` (a -32603
-        Internal error). When the session advertises no effort selector, skip
-        the push entirely — there is nothing to set, and attempting it would
-        spam errors and trigger a session reset on every turn.
+        An adapter build may expose no effort config option at all and reject the
+        push with ``Unknown config option: <id>`` (a -32603 Internal error). When
+        the session advertises no effort selector, skip the push entirely — there
+        is nothing to set, and attempting it would spam errors and trigger a
+        session reset on every turn.
         """
-        if not self._client.supports_config_option("effort"):
-            logger.debug("adapter exposes no 'effort' config option; skipping effort push")
+        effort_option = effort_config_option_id(self._client.backend)
+        if not self._client.supports_config_option(effort_option):
+            logger.debug("adapter exposes no %r config option; skipping effort push", effort_option)
             return
         # Descend from the requested level through lower levels (e.g.
         # max → xhigh → high). Never escalate above what was asked.
         try:
             start = EFFORT_LEVELS.index(level)
         except ValueError:
-            await self._client.set_config_option("effort", level)
+            await self._client.set_config_option(effort_option, level)
             return
         ladder = [lvl for lvl in reversed(EFFORT_LEVELS[: start + 1])]
         last_exc: Exception | None = None
         for candidate in ladder:
             try:
-                await self._client.set_config_option("effort", candidate)
+                await self._client.set_config_option(effort_option, candidate)
                 if candidate != level:
                     logger.info(
                         "CC effort %r unsupported by model %s — applied %r instead",
@@ -1219,13 +1337,12 @@ class AcpProvider(LLMProvider):
                     )
                 return
             except AcpError as exc:
-                msg = str(exc)
-                if "unknown config option" in msg.lower():
-                    # Adapter has no 'effort' option at all (older build) —
+                if "unknown config option" in str(exc).lower():
+                    # Adapter has no effort option at all (older build) —
                     # nothing to set; skip silently rather than reset.
-                    logger.debug("claude-agent-acp rejected 'effort' as unknown; skipping")
+                    logger.debug("adapter rejected %r as unknown; skipping", effort_option)
                     return
-                if "config option effort" not in msg:
+                if not _is_config_value_rejection(exc, effort_option):
                     raise  # not a value-rejection — a real failure
                 last_exc = exc
                 continue
@@ -1262,8 +1379,11 @@ class AcpProvider(LLMProvider):
         # An adapter build may advertise no 'effort' config option; attempting to
         # push would fail with 'Unknown config option' and reset the session.
         # Report unsupported so the dashboard leaves the UI as-is.
-        if via_config_option and not self._client.supports_config_option("effort"):
-            logger.info("change_effort skipped — adapter build exposes no 'effort' option")
+        _effort_option = effort_config_option_id(self._client.backend)
+        if via_config_option and not self._client.supports_config_option(_effort_option):
+            logger.info(
+                "change_effort skipped — adapter build exposes no %r option", _effort_option
+            )
             return False
         # Accept any level the dynamic validation set knows about — ACP backends
         # can report levels beyond the canonical five (effort.py), and those are
@@ -1408,27 +1528,45 @@ class AcpProvider(LLMProvider):
         await self._apply_initial_effort()
 
     async def _apply_initial_effort(self) -> None:
-        """Apply the resolved effort to a fresh claude-agent-acp session.
+        """Apply the resolved effort to a fresh session on the config-option channel.
 
         claude-agent-acp does NOT read ``CLAUDE_CODE_EFFORT_LEVEL`` from the
         environment — effort only takes hold via settings.json files or a live
         ``session/set_config_option``. So for the claude backend we push the
         resolved level once after the session is ready. Best-effort: a model
         that does not support effort, or an adapter that rejects the value,
-        must not break session start. The kiro backend already gets effort
-        from the cli.json overlay at spawn, so this is a no-op there.
+        must not break session start.
+
+        Gated on ``ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION`` -- the set that names
+        the CHANNEL -- rather than on ``is_acp_runtime_backend``, for the reason
+        harness-parity H6 gives: which harnesses take effort over
+        ``session/set_config_option`` is a fact the table already holds, and
+        "runs on the shared runtime" is a different fact. The kiro family is
+        outside the channel set because it reads effort from the spawn-time
+        cli.json overlay instead, so it still skips the push; opencode is
+        outside it because its ``session/new`` advertises no ``effort`` option at
+        all. Reading the runtime answer here instead drops a codex session's
+        configured effort as soon as the preview switch puts codex on the
+        runtime, because codex IS in the channel set and takes effort no other
+        way.
         """
-        if self.is_acp_runtime_backend:
+        if self._client.backend not in ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION:
             return
         level = self._resolve_effort()
         if not level:
             return
         try:
             await self._set_effort_config_option(level)
-            logger.info("CC initial effort applied: model=%s effort=%s", self._client._model, level)
+            logger.info(
+                "ACP initial effort applied: backend=%s model=%s effort=%s",
+                self._client.backend,
+                self._client._model,
+                level,
+            )
         except Exception:
             logger.warning(
-                "CC initial effort apply failed (model=%s effort=%s)",
+                "ACP initial effort apply failed (backend=%s model=%s effort=%s)",
+                self._client.backend,
                 self._client._model,
                 level,
                 exc_info=True,
