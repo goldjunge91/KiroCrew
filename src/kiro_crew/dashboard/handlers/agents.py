@@ -1904,17 +1904,23 @@ def _entitled_kiro_models(request: web.Request, models: list[dict]) -> list[dict
             break
     if not advertised:
         return models
+    # Do not filter out OpenRouter presets
+    from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+    byok_mgr = OpenRouterBYOKManager()
+    preset_names = {p.get("name", "").strip() for p in byok_mgr.list_presets() if p.get("name")}
+
     advertises_auto = any(_normalize_model_key(i) == "auto" for i in advertised)
     offered: set[str] = {
         _normalize_model_key(m.get("model_name", ""))
         for m in models
         if _normalize_model_key(m.get("model_name", "")) == "auto"
+        or m.get("model_name", "").strip() in preset_names
         or not model_is_unusable(m.get("model_name", ""), advertised)
     }
     kept: list[dict] = []
     for m in models:
         name = m.get("model_name", "")
-        if _normalize_model_key(name) == "auto" or not model_is_unusable(name, advertised):
+        if _normalize_model_key(name) == "auto" or name.strip() in preset_names or not model_is_unusable(name, advertised):
             kept.append(m)
             continue
         resolved = resolve_pin_spelling(name, advertised)
@@ -2153,9 +2159,37 @@ async def api_models(request: web.Request) -> web.Response:
     cfg = await asyncio.to_thread(KiroCrewConfig.load)
     backend = getattr(cfg.agent, "acp_backend", "")
     if backend == ACP_BACKEND_CLAUDE:
-        return web.json_response(_cc_models(request, configured_default=cfg.agent.model))
+        res = _cc_models(request, configured_default=cfg.agent.model)
+        from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+        byok_mgr = OpenRouterBYOKManager()
+        presets = byok_mgr.list_presets()
+        for p in presets:
+            preset_name = p.get("name", "").strip()
+            target_model = p.get("model_name", "").strip()
+            if preset_name and not any(m.get("model_name") == preset_name for m in res):
+                res.append({
+                    "model_name": preset_name,
+                    "display_name": preset_name,
+                    "description": f"OpenRouter Preset ({target_model})",
+                    "context_window": model_registry.model_window(target_model) or model_registry.REFERENCE_WINDOW_TOKENS,
+                })
+        return web.json_response(res)
     if backend == ACP_BACKEND_CODEX:
-        return web.json_response(_codex_models(request, configured_default=cfg.agent.model))
+        res = _codex_models(request, configured_default=cfg.agent.model)
+        from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+        byok_mgr = OpenRouterBYOKManager()
+        presets = byok_mgr.list_presets()
+        for p in presets:
+            preset_name = p.get("name", "").strip()
+            target_model = p.get("model_name", "").strip()
+            if preset_name and not any(m.get("model_name") == preset_name for m in res):
+                res.append({
+                    "model_name": preset_name,
+                    "display_name": preset_name,
+                    "description": f"OpenRouter Preset ({target_model})",
+                    "context_window": model_registry.model_window(target_model) or model_registry.REFERENCE_WINDOW_TOKENS,
+                })
+        return web.json_response(res)
     # Signed-out gateways must never reach the spawn below. kiro-cli auto-opens
     # an interactive browser login for ANY subcommand run unauthenticated
     # (--no-interactive does not suppress it, and there is no opt-out env var),
@@ -2304,6 +2338,22 @@ async def api_models(request: web.Request) -> web.Response:
             )
         models = [m for m in models if not is_deprecated_model(m.get("model_name", ""))]
         models = _entitled_kiro_models(request, models)
+
+        # Append OpenRouter BYOK model presets
+        from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+        byok_mgr = OpenRouterBYOKManager()
+        presets = byok_mgr.list_presets()
+        for p in presets:
+            preset_name = p.get("name", "").strip()
+            target_model = p.get("model_name", "").strip()
+            if preset_name:
+                models.append({
+                    "model_name": preset_name,
+                    "display_name": preset_name,
+                    "description": f"OpenRouter Preset ({target_model})",
+                    "context_window": model_registry.model_window(target_model) or model_registry.REFERENCE_WINDOW_TOKENS,
+                })
+
         return web.json_response(models)
     except SandboxUnavailableError as exc:
         # Narrower than the generic clause below, and BEFORE it: this is the one
