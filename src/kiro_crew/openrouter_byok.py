@@ -49,8 +49,12 @@ def test_openrouter_connection(api_key: str) -> dict[str, Any]:
     if not clean_key:
         return {"success": False, "error": "API key cannot be empty"}
 
+    url = "https://openrouter.ai/api/v1/auth/key"
+    if not url.startswith("https://"):
+        return {"success": False, "error": "Invalid target URL scheme"}
+
     req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/auth/key",
+        url,
         headers={
             "Authorization": f"Bearer {clean_key}",
             "User-Agent": "KiroCrew-BYOK/1.0", # brand-ok
