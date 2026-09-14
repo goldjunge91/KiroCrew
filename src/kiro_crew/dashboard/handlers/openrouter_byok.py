@@ -5,40 +5,56 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from aiohttp import web
+
 from kiro_crew.openrouter_byok import (
     OpenRouterBYOKManager,
     test_openrouter_connection,
 )
 
 
-def handle_list_openrouter_keys(workspace_id: str = "default") -> dict[str, Any]:
+async def api_openrouter_keys_list(request: web.Request) -> web.Response:
+    workspace_id = request.query.get("workspace_id", "default")
     mgr = OpenRouterBYOKManager()
-    return {"success": True, "keys": mgr.list_keys(workspace_id)}
+    return web.json_response({"success": True, "keys": mgr.list_keys(workspace_id)})
 
 
-def handle_add_openrouter_key(payload: dict[str, Any]) -> dict[str, Any]:
+async def api_openrouter_keys_add(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"success": False, "error": "Invalid JSON body"}, status=400)
+
     name = str(payload.get("name", ""))
     api_key = str(payload.get("api_key", ""))
     workspace_id = str(payload.get("workspace_id", "default"))
 
     if not api_key:
-        return {"success": False, "error": "api_key is required"}
+        return web.json_response({"success": False, "error": "api_key is required"}, status=400)
 
     mgr = OpenRouterBYOKManager()
     try:
         key_data = mgr.add_key(name=name, api_key=api_key, workspace_id=workspace_id)
-        return {"success": True, "key": key_data}
+        return web.json_response({"success": True, "key": key_data})
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return web.json_response({"success": False, "error": str(e)}, status=400)
 
 
-def handle_delete_openrouter_key(key_id: str) -> dict[str, Any]:
+async def api_openrouter_keys_delete(request: web.Request) -> web.Response:
+    key_id = request.match_info.get("key_id", "")
     mgr = OpenRouterBYOKManager()
     success = mgr.delete_key(key_id)
-    return {"success": success, "message": "Key deleted" if success else "Key not found"}
+    if success:
+        return web.json_response({"success": True, "message": "Key deleted"})
+    return web.json_response({"success": False, "error": "Key not found"}, status=404)
 
 
-def handle_test_openrouter_key(payload: dict[str, Any]) -> dict[str, Any]:
+async def api_openrouter_keys_test(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+
     api_key = payload.get("api_key")
     key_id = payload.get("key_id")
 
@@ -47,42 +63,58 @@ def handle_test_openrouter_key(payload: dict[str, Any]) -> dict[str, Any]:
         api_key = mgr.get_raw_key(str(key_id))
 
     if not api_key:
-        return {"success": False, "error": "No API key provided or found for testing"}
+        return web.json_response({"success": False, "error": "No API key provided or found for testing"}, status=400)
 
-    return test_openrouter_connection(str(api_key))
+    res = test_openrouter_connection(str(api_key))
+    return web.json_response(res)
 
 
-def handle_list_presets(workspace_id: str = "default") -> dict[str, Any]:
+async def api_openrouter_presets_list(request: web.Request) -> web.Response:
+    workspace_id = request.query.get("workspace_id", "default")
     mgr = OpenRouterBYOKManager()
-    return {"success": True, "presets": mgr.list_presets(workspace_id)}
+    return web.json_response({"success": True, "presets": mgr.list_presets(workspace_id)})
 
 
-def handle_add_preset(payload: dict[str, Any]) -> dict[str, Any]:
+async def api_openrouter_presets_add(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"success": False, "error": "Invalid JSON body"}, status=400)
+
     name = str(payload.get("name", ""))
     key_id = str(payload.get("key_id", ""))
     model_name = str(payload.get("model_name", ""))
     workspace_id = str(payload.get("workspace_id", "default"))
 
     if not name or not model_name:
-        return {"success": False, "error": "name and model_name are required"}
+        return web.json_response({"success": False, "error": "name and model_name are required"}, status=400)
 
     mgr = OpenRouterBYOKManager()
     preset = mgr.add_preset(name=name, key_id=key_id, model_name=model_name, workspace_id=workspace_id)
-    return {"success": True, "preset": preset}
+    return web.json_response({"success": True, "preset": preset})
 
 
-def handle_delete_preset(preset_id: str) -> dict[str, Any]:
+async def api_openrouter_presets_delete(request: web.Request) -> web.Response:
+    preset_id = request.match_info.get("preset_id", "")
     mgr = OpenRouterBYOKManager()
     success = mgr.delete_preset(preset_id)
-    return {"success": success, "message": "Preset deleted" if success else "Preset not found"}
+    if success:
+        return web.json_response({"success": True, "message": "Preset deleted"})
+    return web.json_response({"success": False, "error": "Preset not found"}, status=404)
 
 
-def handle_get_workspace_model_settings(workspace_id: str = "default") -> dict[str, Any]:
+async def api_openrouter_settings_get(request: web.Request) -> web.Response:
+    workspace_id = request.query.get("workspace_id", "default")
     mgr = OpenRouterBYOKManager()
-    return {"success": True, "settings": mgr.get_workspace_settings(workspace_id)}
+    return web.json_response({"success": True, "settings": mgr.get_workspace_settings(workspace_id)})
 
 
-def handle_update_workspace_model_settings(payload: dict[str, Any]) -> dict[str, Any]:
+async def api_openrouter_settings_update(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"success": False, "error": "Invalid JSON body"}, status=400)
+
     workspace_id = str(payload.get("workspace_id", "default"))
     default_key_id = str(payload.get("default_key_id", ""))
     default_model_name = str(payload.get("default_model_name", ""))
@@ -93,4 +125,4 @@ def handle_update_workspace_model_settings(payload: dict[str, Any]) -> dict[str,
         default_key_id=default_key_id,
         default_model_name=default_model_name,
     )
-    return {"success": True, "settings": settings}
+    return web.json_response({"success": True, "settings": settings})

@@ -1,7 +1,7 @@
 """OpenRouter BYOK (Bring Your Own Key) & Preset Management.
 
 Provides:
-- AES-256 (or SecretVault / Fernet / XOR fallback) encrypted storage for OpenRouter API keys.
+- Secure key storage via SecretVault (AES-256-GCM encryption).
 - Key masking utility (`sk-or-••••1234`).
 - OpenRouter connection testing via `https://openrouter.ai/api/v1/auth/key`.
 - Workspace-wide Model Presets management.
@@ -10,7 +10,6 @@ Provides:
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import time
@@ -23,6 +22,7 @@ from typing import Any, Optional
 
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.loader import config_dir
+from kiro_crew.secrets.vault import SecretVault
 
 logger = logging.getLogger(__name__)
 
@@ -41,31 +41,6 @@ def mask_api_key(key: str) -> str:
     prefix = clean[:6] if clean.startswith("sk-or-") else clean[:4]
     suffix = clean[-4:]
     return f"{prefix}••••{suffix}"
-
-
-def _secure_encrypt(plaintext: str, key_seed: str = "kiro_byok_secret") -> str:
-    """Simple obfuscation/encryption fallback for storing API keys securely when cryptography module is not available."""
-    try:
-        from kiro_crew.secrets.vault import SecretVault
-        # If SecretVault can be used, we attempt it, else fallback
-    except Exception:
-        pass
-
-    encoded_bytes = plaintext.encode("utf-8")
-    seed_bytes = key_seed.encode("utf-8")
-    xor_bytes = bytes([b ^ seed_bytes[i % len(seed_bytes)] for i, b in enumerate(encoded_bytes)])
-    return base64.b64encode(xor_bytes).decode("utf-8")
-
-
-def _secure_decrypt(ciphertext: str, key_seed: str = "kiro_byok_secret") -> str:
-    """Simple decryption fallback."""
-    try:
-        xor_bytes = base64.b64decode(ciphertext.encode("utf-8"))
-        seed_bytes = key_seed.encode("utf-8")
-        plain_bytes = bytes([b ^ seed_bytes[i % len(seed_bytes)] for i, b in enumerate(xor_bytes)])
-        return plain_bytes.decode("utf-8")
-    except Exception:
-        return ""
 
 
 def test_openrouter_connection(api_key: str) -> dict[str, Any]:
@@ -109,19 +84,19 @@ class OpenRouterKeyInstance:
     id: str
     name: str
     masked_key: str
-    encrypted_key: str = ""
     created_at: float = field(default_factory=time.time)
     workspace_id: str = "default"
 
 
 class OpenRouterBYOKManager:
-    """Manages OpenRouter API key instances, presets, and workspace settings."""
+    """Manages OpenRouter API key instances, presets, and workspace settings securely."""
 
     def __init__(self, base_dir: Path | None = None) -> None:
         self._dir = base_dir if base_dir is not None else config_dir()
         self._keys_path = self._dir / _KEYS_FILE
         self._presets_path = self._dir / _PRESETS_FILE
         self._settings_path = self._dir / _WORKSPACE_SETTINGS_FILE
+        self._vault = SecretVault(self._dir)
 
     # ── Key Management ──
 
@@ -146,13 +121,14 @@ class OpenRouterBYOKManager:
 
         key_id = f"or_key_{uuid.uuid4().hex[:12]}"
         masked = mask_api_key(clean_key)
-        encrypted = _secure_encrypt(clean_key, key_seed=key_id)
+
+        # Securely store in SecretVault (AES-256-GCM)
+        self._vault.set_sync(f"openrouter_key_{key_id}", clean_key)
 
         instance = OpenRouterKeyInstance(
             id=key_id,
             name=name.strip() or "OpenRouter Key",
             masked_key=masked,
-            encrypted_key=encrypted,
             workspace_id=workspace_id,
         )
 
@@ -174,14 +150,12 @@ class OpenRouterBYOKManager:
             return False
 
         self._save_keys(filtered)
+        self._vault.delete_sync(f"openrouter_key_{key_id}")
         return True
 
     def get_raw_key(self, key_id: str) -> str | None:
-        keys = self._load_keys()
-        for k in keys:
-            if k.id == key_id:
-                return _secure_decrypt(k.encrypted_key, key_seed=k.id)
-        return None
+        secret = self._vault.get(f"openrouter_key_{key_id}")
+        return secret.reveal() if secret else None
 
     # ── Preset Management ──
 
@@ -253,7 +227,7 @@ class OpenRouterBYOKManager:
         workspace_id: str = "default",
         system_default: str = "auto",
     ) -> tuple[str, str, str]:
-        """Resolves the (key_id, raw_api_key, model_name) following priority:
+        """Resolves (key_id, raw_api_key, model_name) following priority:
 
         1. Task / Cron Job Override (Highest)
         2. Agent Override
