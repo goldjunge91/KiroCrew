@@ -149,7 +149,7 @@ jobs:
           # Stamp the Electron app: app.getVersion() (from the bundle's
           # Info.plist, which electron-builder fills from package.json) must
           # equal the feed version for the auto-updater's compare gate.
-          node -e "const fs=require('fs');const f='website/electron/package.json';const p=JSON.parse(fs.readFileSync(f));p.version=process.env.STAMP_VERSION;fs.writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
+          node -e "const fs=require('fs');const f='website/electron/package.json';const p=JSON.parse(fs.readFileSync(f));let v=process.env.STAMP_VERSION||'';v=v.replace(/^(\\d+\\.\\d+\\.\\d+)\\.(\\d+)$/,'\$1-\$2');p.version=v;fs.writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
           echo "Building desktop: ${STAMP_VERSION}"
 
       - name: Build desktop app

@@ -106,6 +106,8 @@ if [ -z "$KC_VERSION" ]; then
   echo "ERROR: could not parse __version__ from src/kiro_crew/__init__.py" >&2
   exit 1
 fi
+# Normalize 4-part numeric version strings (e.g. 0.7.0.1234 -> 0.7.0-1234) for semver compatibility in electron-builder
+KC_VERSION="$(echo "$KC_VERSION" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.([0-9]+)$/\1-\2/')"
 
 # Channel identity from the version stamp. Nightly ships as a SEPARATE
 # side-by-side app (its own bundle id, name, icon) so it can be installed
