@@ -1,9 +1,9 @@
 import tempfile
-from pathlib import Path
 import unittest
+from pathlib import Path
 
-from kiro_crew.openrouter_byok import OpenRouterBYOKManager
 from kiro_crew.dashboard.chat_handlers import _model_rejected_reason
+from kiro_crew.openrouter_byok import OpenRouterBYOKManager
 
 
 class TestOpenRouterPresetsIntegration(unittest.TestCase):
