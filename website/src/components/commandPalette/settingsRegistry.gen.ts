@@ -1625,6 +1625,41 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "description": "External hook triggers"
   },
   {
+    "id": "openrouter.api-key",
+    "label": "API Key",
+    "tab": "openrouter",
+    "type": "input",
+    "occurrence": 1
+  },
+  {
+    "id": "openrouter.assigned-key",
+    "label": "Assigned Key",
+    "tab": "openrouter",
+    "type": "select",
+    "occurrence": 1
+  },
+  {
+    "id": "openrouter.key-name",
+    "label": "Key Name",
+    "tab": "openrouter",
+    "type": "input",
+    "occurrence": 1
+  },
+  {
+    "id": "openrouter.model-name-identifier",
+    "label": "Model Name Identifier",
+    "tab": "openrouter",
+    "type": "input",
+    "occurrence": 1
+  },
+  {
+    "id": "openrouter.preset-name",
+    "label": "Preset Name",
+    "tab": "openrouter",
+    "type": "input",
+    "occurrence": 1
+  },
+  {
     "id": "privacy.record-metrics",
     "label": "Record metrics",
     "labelKey": "pages.settings.privacyPanel.recordMetricsLabel",

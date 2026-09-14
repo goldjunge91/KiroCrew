@@ -25,6 +25,7 @@ import { ComputerUsePanel } from './settings/ComputerUsePanel'
 import { WebhooksPanel } from './settings/WebhooksPanel'
 import { PrivacyPanel } from './settings/PrivacyPanel'
 import { SecretsPanel } from './settings/SecretsPanel'
+import { OpenRouterBYOKPanel } from './settings/OpenRouterPanel'
 import SettingsSearch from './settings/SettingsSearch'
 
 import { i18nT } from '../i18n/t'
@@ -58,6 +59,7 @@ function buildTabs() {
     { key: 'notifications', label: i18nT('settings.tabs.notifications.label'), icon: <Bell size={16} />, group: GROUP_PREFERENCES, description: i18nT('settings.tabs.notifications.description') },
     { key: 'shortcuts', label: i18nT('settings.tabs.shortcuts.label'), icon: <Keyboard size={16} />, group: GROUP_PREFERENCES, description: i18nT('settings.tabs.shortcuts.description') },
     { key: 'skills', label: i18nT('settings.tabs.skills.label'), icon: <Sparkles size={16} />, group: GROUP_PREFERENCES, description: i18nT('settings.tabs.skills.description') },
+    { key: 'openrouter', label: i18nT('settings.tabs.openrouter.label'), icon: <Server size={16} />, group: GROUP_PREFERENCES, description: i18nT('settings.tabs.openrouter.description') },
     { key: 'channels', label: i18nT('settings.tabs.channels.label'), icon: <Link2 size={16} />, description: i18nT('settings.tabs.channels.description'), hostsSubNav: true },
     { key: 'browser', label: i18nT('settings.tabs.browser.label'), icon: <Globe size={16} />, group: GROUP_SYSTEM, description: i18nT('settings.tabs.browser.description') },
     { key: 'computer-use', label: i18nT('settings.tabs.computerUse.label'), icon: <SquareMousePointer className="lucide-inline" />, group: GROUP_SYSTEM, description: i18nT('settings.tabs.computerUse.description') },
@@ -230,6 +232,7 @@ export default function SettingsPage() {
         {tab === 'notifications' && <NotificationsPanel />}
         {tab === 'shortcuts' && <ShortcutsPanel />}
         {tab === 'skills' && <SkillsPanel />}
+        {tab === 'openrouter' && <OpenRouterBYOKPanel />}
         {tab === 'channels' && <ChannelsPanel basePath={SETTINGS_BASE_PATH} />}
         {tab === 'browser' && <BrowserPanel />}
         {tab === 'computer-use' && <ComputerUsePanel />}
