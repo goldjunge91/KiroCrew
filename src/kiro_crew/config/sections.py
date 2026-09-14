@@ -872,6 +872,13 @@ class AgentConfig:
             enum=["", *EFFORT_LEVELS],
         ),
     )
+    openrouter_key_id: str = field(
+        default="",
+        metadata=_meta(
+            "OpenRouter Key ID",
+            "Optional OpenRouter BYOK key ID for this agent.",
+        ),
+    )
     provider: str = field(
         default="acp",
         metadata=_meta("Provider", "LLM provider backend (KiroACP / kiro-cli).", enum=["acp"]),
