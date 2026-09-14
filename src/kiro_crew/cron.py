@@ -100,7 +100,6 @@ _CRON_STRING_FIELD_CAPS: tuple[tuple[str, int], ...] = (
     # this length gate). Per the no-schema convention they use the general ID cap.
     ("secret_env_pin", MAX_SHORT_STRING),
     ("secret_env_pending_pin", MAX_SHORT_STRING),
-    ("openrouter_key_id", MAX_SHORT_STRING),
 )
 
 
@@ -771,7 +770,6 @@ class CronJob:
     # benign (they self-heal on the job's next folder move).
     folder_id: str = ""
     model: str = ""  # per-job model override (canonical key or provider id); "" = inherit
-    openrouter_key_id: str = ""  # BYOK key ID override for task/cron
     # Transient-retry telemetry for the LAST completed run. Both fields are
     # written in ONE place, `CronService._execute`, right after it stamps
     # `last_run_ts`: it reads the in-flight `_transient_attempts` counter the

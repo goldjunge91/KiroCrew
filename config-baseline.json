@@ -21,7 +21,6 @@
         "role_efforts": {},
         "fallback_model": "auto",
         "reasoning_effort": "",
-        "openrouter_key_id": "",
         "provider": "acp",
         "mcp_registry_mode": false,
         "mcp_quarantine_after_failures": 3,
@@ -216,20 +215,6 @@
         "xhigh",
         "max"
       ],
-      "defaultValue": ""
-    },
-    {
-      "path": "agent.openrouter_key_id",
-      "kind": "core",
-      "type": "string",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [],
-      "label": "OpenRouter Key ID",
-      "help": "Optional OpenRouter BYOK key ID for this agent.",
-      "hasChildren": false,
-      "enumValues": null,
       "defaultValue": ""
     },
     {
@@ -7536,20 +7521,6 @@
       "tags": [],
       "label": "Reasoning Effort",
       "help": "Default reasoning effort for sessions on this crew. Empty inherits: the global agent.reasoning_effort (or, for a background worker crew, its role effort). A per-session pick still overrides this. Only reasoning-capable models accept a level; on any other model the pin is ignored, exactly as the global default is.",
-      "hasChildren": false,
-      "enumValues": null,
-      "defaultValue": ""
-    },
-    {
-      "path": "agents.*.openrouter_key_id",
-      "kind": "core",
-      "type": "string",
-      "required": false,
-      "deprecated": false,
-      "sensitive": false,
-      "tags": [],
-      "label": "OpenRouter Key ID",
-      "help": "Optional OpenRouter BYOK key ID override for this agent.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": ""

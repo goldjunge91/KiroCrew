@@ -9030,10 +9030,6 @@
   },
   "settings": {
     "tabs": {
-      "openrouter": {
-        "label": "Models & BYOK",
-        "description": "Configure OpenRouter BYOK keys and workspace presets"
-      },
       "webhooks": {
         "label": "Webhooks",
         "description": "Let an outside system start one agent turn"

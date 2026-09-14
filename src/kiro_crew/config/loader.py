@@ -5133,51 +5133,37 @@ class KiroCrewConfig:
             extra_env: dict[str, str] | None = None,
             reasoning_effort_override: str | None = None,
             crew_agent: str | None = None,
-            openrouter_key_id: str | None = None,
-            openrouter_key_raw: str | None = None,
             **_kwargs: object,
         ) -> AcpProvider:
             wdir = Path(cwd) if cwd else _session_work_dir(session_key)
+            # Canonical crew identity for the session (keys per-agent watchdog
+            # windows on the handle) — one shared resolution rule, see
+            # resolve_crew_identity.
             crew_agent = resolve_crew_identity(self, agent, crew_agent)
-
-            # BYOK OpenRouter resolution hierarchy check
-            from kiro_crew.openrouter_byok import OpenRouterBYOKManager
-
-            byok_mgr = OpenRouterBYOKManager()
-
-            # Task/Cron or session model_override
-            task_tuple = (openrouter_key_id or "", model_override or "")
-
-            # Agent override check
-            agent_cfg = self.agents.get(agent) if agent else None
-            agent_key_id = agent_cfg.openrouter_key_id if agent_cfg else ""
-            agent_model = (
-                (
-                    agent_cfg.model
-                    if agent_cfg and agent_cfg.model
-                    else self._resolve_named_agent_model(agent)
-                )
-                if agent
-                else ""
-            )
-            agent_tuple = (agent_key_id, agent_model)
-
-            res_key_id, res_raw_key, res_model = byok_mgr.resolve_model(
-                task_override=task_tuple,
-                agent_override=agent_tuple,
-                workspace_id="default",
-                system_default=model,
-            )
-
-            if res_model and res_model != "auto":
-                m = res_model
-            else:
-                m = self.acp_effective_model(agent, model_override, global_model=model)
-
-            merged_env = dict(extra_env or {})
-            if res_raw_key or openrouter_key_raw:
-                merged_env["OPENROUTER_API_KEY"] = res_raw_key or openrouter_key_raw or ""
-            extra_env = merged_env
+            # Resolve the model, highest tier first:
+            #   1. model_override — the caller's explicit pick. The dashboard
+            #      passes the slot's own model, else the KiroCrew agent's
+            #      configured default (see chat_runner._run_chat).
+            #   2. the bound kiro agent's own pinned model, for a named agent.
+            #      Custom agents MUST resolve here because the ACP
+            #      session/set_mode path switches prompt/tools but not the model,
+            #      so an unset model makes kiro fall back to cli.json's
+            #      chat.defaultModel. Use _resolve_named_agent_model (the kiro
+            #      model slot) to match this backend.
+            #   3. ``model`` — the global agent.model default, already collapsed
+            #      through _resolve_agent_model() at factory-build time. It
+            #      applies to every agent, not just "kirocrew": an agent that
+            #      pins nothing inherits the user's configured default instead of
+            #      silently falling through to the backend's own choice.
+            # "" at the end means nothing is pinned anywhere; AcpClient
+            # normalizes "" to DEFAULT_MODEL, same as None.
+            # Selection + the per-backend id translation live in
+            # acp_effective_model — SHARED with the spawn-side effort verdict
+            # (subagent.py) so the reported outcome cannot drift from what this
+            # gate actually keys on. (Why the translation is keyed on the
+            # backend, and why to_acp_id is the non-claude choice, is documented
+            # on that method.)
+            m = self.acp_effective_model(agent, model_override, global_model=model)
             # Thread the slot's effort into a per-model override so the kiro
             # cli.json overlay is written from it at spawn — without this, a
             # kiro cold start (or the handler's reset-then-respawn) would only

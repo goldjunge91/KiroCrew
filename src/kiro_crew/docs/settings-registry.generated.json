@@ -1070,36 +1070,6 @@
       "description": "External hook triggers"
     },
     {
-      "id": "openrouter.api-key",
-      "label": "API Key",
-      "tab": "openrouter",
-      "route": "/settings/openrouter?highlight=openrouter.api-key"
-    },
-    {
-      "id": "openrouter.assigned-key",
-      "label": "Assigned Key",
-      "tab": "openrouter",
-      "route": "/settings/openrouter?highlight=openrouter.assigned-key"
-    },
-    {
-      "id": "openrouter.key-name",
-      "label": "Key Name",
-      "tab": "openrouter",
-      "route": "/settings/openrouter?highlight=openrouter.key-name"
-    },
-    {
-      "id": "openrouter.model-name-identifier",
-      "label": "Model Name Identifier",
-      "tab": "openrouter",
-      "route": "/settings/openrouter?highlight=openrouter.model-name-identifier"
-    },
-    {
-      "id": "openrouter.preset-name",
-      "label": "Preset Name",
-      "tab": "openrouter",
-      "route": "/settings/openrouter?highlight=openrouter.preset-name"
-    },
-    {
       "id": "privacy.record-metrics",
       "label": "Record metrics",
       "tab": "privacy",
