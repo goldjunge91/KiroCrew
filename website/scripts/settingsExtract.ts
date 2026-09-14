@@ -105,6 +105,7 @@ type PanelTarget = PanelTargetSingle | PanelTargetSingle[]
  *  dropped from search, so the gate cross-checks every panel file against it. */
 export const PANEL_TAB_MAP: Record<string, PanelTarget> = {
   'OverviewPanel.tsx': 'overview',
+  'OpenRouterPanel.tsx': 'openrouter',
   'ChatPanel.tsx': 'chat',
   'VoicePanel.tsx': 'voice',
   'DisplayPanel.tsx': 'display',

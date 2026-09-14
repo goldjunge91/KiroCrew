@@ -123,13 +123,16 @@ def register(app: web.Application) -> None:
 
     # OpenRouter BYOK & Model Presets
     from kiro_crew.dashboard.handlers import openrouter_byok as byok_handlers
+
     app.router.add_get("/api/openrouter/keys", byok_handlers.api_openrouter_keys_list)
     app.router.add_post("/api/openrouter/keys", byok_handlers.api_openrouter_keys_add)
     app.router.add_delete("/api/openrouter/keys/{key_id}", byok_handlers.api_openrouter_keys_delete)
     app.router.add_post("/api/openrouter/keys/test", byok_handlers.api_openrouter_keys_test)
     app.router.add_get("/api/openrouter/presets", byok_handlers.api_openrouter_presets_list)
     app.router.add_post("/api/openrouter/presets", byok_handlers.api_openrouter_presets_add)
-    app.router.add_delete("/api/openrouter/presets/{preset_id}", byok_handlers.api_openrouter_presets_delete)
+    app.router.add_delete(
+        "/api/openrouter/presets/{preset_id}", byok_handlers.api_openrouter_presets_delete
+    )
     app.router.add_get("/api/openrouter/settings", byok_handlers.api_openrouter_settings_get)
     app.router.add_post("/api/openrouter/settings", byok_handlers.api_openrouter_settings_update)
 

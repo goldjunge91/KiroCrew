@@ -5127,6 +5127,7 @@ class KiroCrewConfig:
 
             # BYOK OpenRouter resolution hierarchy check
             from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+
             byok_mgr = OpenRouterBYOKManager()
 
             # Task/Cron or session model_override
@@ -5135,7 +5136,15 @@ class KiroCrewConfig:
             # Agent override check
             agent_cfg = self.agents.get(agent) if agent else None
             agent_key_id = agent_cfg.openrouter_key_id if agent_cfg else ""
-            agent_model = (agent_cfg.model if agent_cfg and agent_cfg.model else self._resolve_named_agent_model(agent)) if agent else ""
+            agent_model = (
+                (
+                    agent_cfg.model
+                    if agent_cfg and agent_cfg.model
+                    else self._resolve_named_agent_model(agent)
+                )
+                if agent
+                else ""
+            )
             agent_tuple = (agent_key_id, agent_model)
 
             res_key_id, res_raw_key, res_model = byok_mgr.resolve_model(

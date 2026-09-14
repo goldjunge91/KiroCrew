@@ -23,21 +23,28 @@ async def api_openrouter_keys_add(request: web.Request) -> web.Response:
     try:
         payload = await request.json()
     except Exception:
-        return web.json_response({"success": False, "error": "Invalid JSON body"}, status=400)
+        return web.json_response(
+            {"success": False, "error": "Invalid JSON body", "code": "invalid_json"}, status=400
+        )
 
     name = str(payload.get("name", ""))
     api_key = str(payload.get("api_key", ""))
     workspace_id = str(payload.get("workspace_id", "default"))
 
     if not api_key:
-        return web.json_response({"success": False, "error": "api_key is required"}, status=400)
+        return web.json_response(
+            {"success": False, "error": "api_key is required", "code": "missing_api_key"},
+            status=400,
+        )
 
     mgr = OpenRouterBYOKManager()
     try:
         key_data = mgr.add_key(name=name, api_key=api_key, workspace_id=workspace_id)
         return web.json_response({"success": True, "key": key_data})
     except Exception as e:
-        return web.json_response({"success": False, "error": str(e)}, status=400)
+        return web.json_response(
+            {"success": False, "error": str(e), "code": "add_key_failed"}, status=400
+        )
 
 
 async def api_openrouter_keys_delete(request: web.Request) -> web.Response:
@@ -46,7 +53,9 @@ async def api_openrouter_keys_delete(request: web.Request) -> web.Response:
     success = mgr.delete_key(key_id)
     if success:
         return web.json_response({"success": True, "message": "Key deleted"})
-    return web.json_response({"success": False, "error": "Key not found"}, status=404)
+    return web.json_response(
+        {"success": False, "error": "Key not found", "code": "key_not_found"}, status=404
+    )
 
 
 async def api_openrouter_keys_test(request: web.Request) -> web.Response:
@@ -63,7 +72,14 @@ async def api_openrouter_keys_test(request: web.Request) -> web.Response:
         api_key = mgr.get_raw_key(str(key_id))
 
     if not api_key:
-        return web.json_response({"success": False, "error": "No API key provided or found for testing"}, status=400)
+        return web.json_response(
+            {
+                "success": False,
+                "error": "No API key provided or found for testing",
+                "code": "missing_api_key",
+            },
+            status=400,
+        )
 
     res = test_openrouter_connection(str(api_key))
     return web.json_response(res)
@@ -79,7 +95,9 @@ async def api_openrouter_presets_add(request: web.Request) -> web.Response:
     try:
         payload = await request.json()
     except Exception:
-        return web.json_response({"success": False, "error": "Invalid JSON body"}, status=400)
+        return web.json_response(
+            {"success": False, "error": "Invalid JSON body", "code": "invalid_json"}, status=400
+        )
 
     name = str(payload.get("name", ""))
     key_id = str(payload.get("key_id", ""))
@@ -87,10 +105,19 @@ async def api_openrouter_presets_add(request: web.Request) -> web.Response:
     workspace_id = str(payload.get("workspace_id", "default"))
 
     if not name or not model_name:
-        return web.json_response({"success": False, "error": "name and model_name are required"}, status=400)
+        return web.json_response(
+            {
+                "success": False,
+                "error": "name and model_name are required",
+                "code": "missing_required_fields",
+            },
+            status=400,
+        )
 
     mgr = OpenRouterBYOKManager()
-    preset = mgr.add_preset(name=name, key_id=key_id, model_name=model_name, workspace_id=workspace_id)
+    preset = mgr.add_preset(
+        name=name, key_id=key_id, model_name=model_name, workspace_id=workspace_id
+    )
     return web.json_response({"success": True, "preset": preset})
 
 
@@ -100,20 +127,26 @@ async def api_openrouter_presets_delete(request: web.Request) -> web.Response:
     success = mgr.delete_preset(preset_id)
     if success:
         return web.json_response({"success": True, "message": "Preset deleted"})
-    return web.json_response({"success": False, "error": "Preset not found"}, status=404)
+    return web.json_response(
+        {"success": False, "error": "Preset not found", "code": "preset_not_found"}, status=404
+    )
 
 
 async def api_openrouter_settings_get(request: web.Request) -> web.Response:
     workspace_id = request.query.get("workspace_id", "default")
     mgr = OpenRouterBYOKManager()
-    return web.json_response({"success": True, "settings": mgr.get_workspace_settings(workspace_id)})
+    return web.json_response(
+        {"success": True, "settings": mgr.get_workspace_settings(workspace_id)}
+    )
 
 
 async def api_openrouter_settings_update(request: web.Request) -> web.Response:
     try:
         payload = await request.json()
     except Exception:
-        return web.json_response({"success": False, "error": "Invalid JSON body"}, status=400)
+        return web.json_response(
+            {"success": False, "error": "Invalid JSON body", "code": "invalid_json"}, status=400
+        )
 
     workspace_id = str(payload.get("workspace_id", "default"))
     default_key_id = str(payload.get("default_key_id", ""))

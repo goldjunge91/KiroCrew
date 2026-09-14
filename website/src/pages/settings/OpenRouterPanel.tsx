@@ -29,8 +29,8 @@ export function OpenRouterBYOKPanel() {
   const [presetModelName, setPresetModelName] = useState('')
 
   useEffect(() => {
-    fetchKeys()
-    fetchPresets()
+    fetchKeys().catch(() => {})
+    fetchPresets().catch(() => {})
   }, [])
 
   const fetchKeys = async () => {
@@ -38,8 +38,8 @@ export function OpenRouterBYOKPanel() {
       const res = await fetch('/api/openrouter/keys')
       const data = await res.json()
       if (data.success) setKeys(data.keys || [])
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // Ignored
     }
   }
 
@@ -48,8 +48,8 @@ export function OpenRouterBYOKPanel() {
       const res = await fetch('/api/openrouter/presets')
       const data = await res.json()
       if (data.success) setPresets(data.presets || [])
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // Ignored
     }
   }
 
@@ -68,8 +68,9 @@ export function OpenRouterBYOKPanel() {
         success: data.success,
         message: data.success ? 'Connection verified successfully!' : (data.error || 'Connection failed'),
       })
-    } catch (e: any) {
-      setTestResult({ success: false, message: e.message || 'Connection error' })
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Connection error'
+      setTestResult({ success: false, message })
     } finally {
       setTesting(false)
     }
@@ -88,19 +89,19 @@ export function OpenRouterBYOKPanel() {
         setNewKeyName('')
         setNewApiKey('')
         setTestResult(null)
-        fetchKeys()
+        await fetchKeys()
       }
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // Ignored
     }
   }
 
   const handleDeleteKey = async (id: string) => {
     try {
       await fetch(`/api/openrouter/keys/${id}`, { method: 'DELETE' })
-      fetchKeys()
-    } catch (e) {
-      console.error(e)
+      await fetchKeys()
+    } catch {
+      // Ignored
     }
   }
 
@@ -116,19 +117,19 @@ export function OpenRouterBYOKPanel() {
       if (data.success) {
         setPresetName('')
         setPresetModelName('')
-        fetchPresets()
+        await fetchPresets()
       }
-    } catch (e) {
-      console.error(e)
+    } catch {
+      // Ignored
     }
   }
 
   const handleDeletePreset = async (id: string) => {
     try {
       await fetch(`/api/openrouter/presets/${id}`, { method: 'DELETE' })
-      fetchPresets()
-    } catch (e) {
-      console.error(e)
+      await fetchPresets()
+    } catch {
+      // Ignored
     }
   }
 

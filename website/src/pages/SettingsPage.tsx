@@ -59,7 +59,7 @@ function buildTabs() {
     { key: 'notifications', label: i18nT('settings.tabs.notifications.label'), icon: <Bell size={16} />, group: GROUP_PREFERENCES, description: i18nT('settings.tabs.notifications.description') },
     { key: 'shortcuts', label: i18nT('settings.tabs.shortcuts.label'), icon: <Keyboard size={16} />, group: GROUP_PREFERENCES, description: i18nT('settings.tabs.shortcuts.description') },
     { key: 'skills', label: i18nT('settings.tabs.skills.label'), icon: <Sparkles size={16} />, group: GROUP_PREFERENCES, description: i18nT('settings.tabs.skills.description') },
-    { key: 'openrouter', label: 'Models & BYOK', icon: <Server size={16} />, group: GROUP_PREFERENCES, description: 'Configure OpenRouter BYOK keys and workspace presets' },
+    { key: 'openrouter', label: i18nT('settings.tabs.openrouter.label'), icon: <Server size={16} />, group: GROUP_PREFERENCES, description: i18nT('settings.tabs.openrouter.description') },
     { key: 'channels', label: i18nT('settings.tabs.channels.label'), icon: <Link2 size={16} />, description: i18nT('settings.tabs.channels.description'), hostsSubNav: true },
     { key: 'browser', label: i18nT('settings.tabs.browser.label'), icon: <Globe size={16} />, group: GROUP_SYSTEM, description: i18nT('settings.tabs.browser.description') },
     { key: 'computer-use', label: i18nT('settings.tabs.computerUse.label'), icon: <SquareMousePointer className="lucide-inline" />, group: GROUP_SYSTEM, description: i18nT('settings.tabs.computerUse.description') },

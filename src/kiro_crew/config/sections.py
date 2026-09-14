@@ -3329,6 +3329,13 @@ class KiroCrewAgentConfig:
             "is ignored, exactly as the global default is.",
         ),
     )
+    openrouter_key_id: str = field(
+        default="",
+        metadata=_meta(
+            "OpenRouter Key ID",
+            "Optional OpenRouter BYOK key ID override for this agent.",
+        ),
+    )
     description: str = field(
         default="",
         metadata=_meta("Description", "Human-readable agent description."),
