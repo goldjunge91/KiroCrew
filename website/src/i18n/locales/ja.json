@@ -14649,6 +14649,10 @@
       "secrets": {
         "label": "Secrets",
         "description": "APIキーと資格情報を安全に保存"
+      },
+      "openrouter": {
+        "label": "Models & BYOK",
+        "description": "Configure OpenRouter BYOK keys and workspace presets"
       }
     },
     "secrets": {

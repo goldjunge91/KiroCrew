@@ -171,6 +171,21 @@ class OpenRouterBYOKManager:
             if p.get("workspace_id", "default") == workspace_id or workspace_id == "*"
         ]
 
+    def find_preset(self, target: str, workspace_id: str = "default") -> dict[str, Any] | None:
+        if not target:
+            return None
+        clean_target = target.strip()
+        presets = self.list_presets(workspace_id)
+        for p in presets:
+            if clean_target in (
+                p.get("id"),
+                p.get("name"),
+                p.get("model_name"),
+                f"openrouter::{p.get('model_name')}",
+            ):
+                return p
+        return None
+
     def add_preset(
         self, name: str, key_id: str, model_name: str, workspace_id: str = "default"
     ) -> dict[str, Any]:
@@ -241,12 +256,22 @@ class OpenRouterBYOKManager:
         # 1. Task
         if task_override and task_override[1]:
             key_id, model = task_override
+            if not key_id:
+                preset = self.find_preset(model, workspace_id)
+                if preset:
+                    key_id = preset.get("key_id", "")
+                    model = preset.get("model_name", model)
             raw_key = self.get_raw_key(key_id) if key_id else None
             return (key_id, raw_key or "", model)
 
         # 2. Agent
         if agent_override and agent_override[1]:
             key_id, model = agent_override
+            if not key_id:
+                preset = self.find_preset(model, workspace_id)
+                if preset:
+                    key_id = preset.get("key_id", "")
+                    model = preset.get("model_name", model)
             raw_key = self.get_raw_key(key_id) if key_id else None
             return (key_id, raw_key or "", model)
 
@@ -255,10 +280,23 @@ class OpenRouterBYOKManager:
         ws_key_id = ws_settings.get("default_key_id", "")
         ws_model = ws_settings.get("default_model_name", "")
         if ws_model:
+            if not ws_key_id:
+                preset = self.find_preset(ws_model, workspace_id)
+                if preset:
+                    ws_key_id = preset.get("key_id", "")
+                    ws_model = preset.get("model_name", ws_model)
             raw_key = self.get_raw_key(ws_key_id) if ws_key_id else None
             return (ws_key_id, raw_key or "", ws_model)
 
         # 4. System Default
+        if system_default and system_default != "auto":
+            preset = self.find_preset(system_default, workspace_id)
+            if preset:
+                key_id = preset.get("key_id", "")
+                model = preset.get("model_name", system_default)
+                raw_key = self.get_raw_key(key_id) if key_id else None
+                return (key_id, raw_key or "", model)
+
         return ("", "", system_default)
 
     # ── Persistence Internal Helpers ──

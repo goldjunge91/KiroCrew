@@ -6728,8 +6728,15 @@ def _model_rejected_reason(model_name: str, provider: str | None = None) -> str 
     files — work that must not land on the event loop under a held lock. Omit it
     and the provider is resolved here, preserving the original behaviour.
     """
-    if not model_name or model_name == "auto":
+    if not model_name or model_name == "auto" or model_name.startswith("openrouter::"):
         return None
+    try:
+        from kiro_crew.openrouter_byok import OpenRouterBYOKManager
+
+        if OpenRouterBYOKManager().find_preset(model_name):
+            return None
+    except Exception:
+        pass
     if provider is None:
         try:
             provider = KiroCrewConfig.load().agent.provider

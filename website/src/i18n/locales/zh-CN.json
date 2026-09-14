@@ -14649,6 +14649,10 @@
       "secrets": {
         "label": "Secrets",
         "description": "安全存储 API 密钥和凭据"
+      },
+      "openrouter": {
+        "label": "Models & BYOK",
+        "description": "Configure OpenRouter BYOK keys and workspace presets"
       }
     },
     "secrets": {
