@@ -70,6 +70,7 @@ WITHHELD_RECORD_FIELDS = frozenset(
         "watchdog_tool_stall_hard_cap_secs",
         "telegram_account",
         "starred",
+        "openrouter_key_id",
     }
 )
 
